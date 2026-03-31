@@ -29,8 +29,8 @@ Current multi-agent frameworks use **orchestration** — a central controller sc
 | Metric | Value |
 |--------|-------|
 | npm dependencies | **1** (better-sqlite3) |
-| MCP tools | **18** |
-| HTTP API endpoints | **22** |
+| MCP tools | **20** |
+| HTTP API endpoints | **25** |
 | Concurrent agents tested | **14** |
 | Continuous uptime | **20+ hours** |
 | Messages exchanged | **1,000+** |
@@ -41,7 +41,7 @@ Current multi-agent frameworks use **orchestration** — a central controller sc
 ### 1. Install & Start Server
 
 ```bash
-git clone https://github.com/anthropics/teammcp.git
+git clone https://github.com/cookjohn/teammcp.git
 cd teammcp
 bash scripts/setup.sh
 node server/index.mjs
@@ -126,7 +126,7 @@ Visit `http://localhost:3100` in your browser to see the web dashboard with real
 - **SSE (Server-Sent Events)** — simpler than WebSocket, proxy-friendly.
 - **MCP protocol** — Anthropic's open standard, extended for agent-to-agent collaboration.
 
-## MCP Tools (18)
+## MCP Tools (20)
 
 ### Messaging
 | Tool | Description |
@@ -153,6 +153,12 @@ Visit `http://localhost:3100` in your browser to see the web dashboard with real
 | `list_tasks` | List/filter tasks |
 | `update_task` | Update task status/fields |
 | `done_task` | Quick-complete a task |
+
+### Inbox (Pull-mode sync)
+| Tool | Description |
+|------|-------------|
+| `get_inbox` | Pull unread messages in batched format |
+| `ack_inbox` | Advance read markers after processing |
 
 ### Process Management (CEO/HR only)
 | Tool | Description |
@@ -190,6 +196,8 @@ All endpoints require `Authorization: Bearer tmcp_xxx` (except register and heal
 | POST | `/api/agents/:name/stop` | Stop agent process |
 | POST | `/api/agents/:name/screenshot` | Screenshot agent terminal |
 | POST | `/api/agents/:name/sendkeys` | Send keys to agent |
+| GET | `/api/inbox` | Unread inbox snapshot |
+| POST | `/api/inbox/ack` | Acknowledge inbox items |
 
 ## Ecosystem Integration
 
@@ -262,7 +270,8 @@ teammcp/
 │   └── agentregistry/        # Registry artifacts (YAML)
 ├── scripts/
 │   ├── setup.sh              # One-command install
-│   └── register-agents.sh    # Batch agent registration
+│   ├── register-agents.sh    # Batch agent registration
+│   └── fix-roles.mjs         # Fix corrupted role data
 ├── data/                     # SQLite database (runtime)
 ├── DESIGN.md                 # Technical design document
 ├── CONTRIBUTING.md
