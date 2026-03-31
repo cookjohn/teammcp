@@ -1,0 +1,34 @@
+# AgentGateway configuration for TeamMCP
+#
+# This config routes MCP traffic through AgentGateway to TeamMCP's
+# Streamable HTTP endpoint, adding enterprise-grade security and
+# observability to Agent-to-Agent communication.
+#
+# Prerequisites:
+#   1. Start TeamMCP backend:  node teammcp/server/index.mjs
+#   2. Start TeamMCP HTTP MCP: node teammcp-http-server.mjs
+#   3. Start AgentGateway:     agentgateway -f agentgateway-config.yaml
+#
+# Claude Code connects to AgentGateway (port 5555) instead of
+# directly to TeamMCP, gaining:
+#   - Centralized access control
+#   - Request/response logging
+#   - OpenTelemetry observability
+#   - Rate limiting and circuit breaking
+
+version: v1
+
+listeners:
+  - name: teammcp-listener
+    protocol: MCP
+    address: 0.0.0.0:5555
+    routes:
+      - name: teammcp-route
+        backends:
+          - name: teammcp-backend
+            mcp:
+              targets:
+                - name: teammcp
+                  http:
+                    url: http://localhost:3200/mcp
+                    timeout: 30s

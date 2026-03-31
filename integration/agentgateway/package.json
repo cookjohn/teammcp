@@ -1,0 +1,13 @@
+{
+  "name": "teammcp-agentgateway-integration",
+  "version": "1.0.0",
+  "description": "TeamMCP MCP Server with Streamable HTTP transport for AgentGateway integration",
+  "type": "module",
+  "scripts": {
+    "start:http": "node teammcp-http-server.mjs",
+    "start:stdio": "node ../../teammcp/mcp-client/teammcp-channel.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  }
+}

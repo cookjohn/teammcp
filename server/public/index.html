@@ -1,0 +1,3797 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TeamMCP Dashboard</title>
+<style>
+/* ── Reset & Base ─────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0f1117;
+  --bg-sidebar: #161822;
+  --bg-header: #1a1d2e;
+  --bg-msg: #1e2133;
+  --bg-msg-hover: #252840;
+  --bg-input: #1a1d2e;
+  --border: #2a2d3e;
+  --text: #e1e3eb;
+  --text-dim: #8b8fa3;
+  --text-muted: #5c6078;
+  --accent: #5b7ff5;
+  --accent-dim: #3d5bd9;
+  --green: #3dd68c;
+  --red: #e5534b;
+  --orange: #d4843e;
+  --yellow: #c9b44a;
+  --code-bg: #12141f;
+  --scrollbar: #2a2d3e;
+  --scrollbar-hover: #3a3e55;
+  --radius: 8px;
+  --radius-sm: 4px;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
+
+/* ── Auth Overlay ─────────────────────────────────────── */
+#auth-overlay {
+  position: fixed; inset: 0;
+  background: var(--bg);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 1000;
+}
+
+.auth-card {
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 40px;
+  width: 400px;
+  text-align: center;
+}
+
+.auth-card h1 {
+  font-size: 24px;
+  margin-bottom: 8px;
+  font-weight: 700;
+}
+
+.auth-card p {
+  color: var(--text-dim);
+  margin-bottom: 24px;
+  font-size: 14px;
+}
+
+.auth-card input {
+  width: 100%;
+  padding: 12px 16px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 14px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.auth-card input:focus { border-color: var(--accent); }
+
+.auth-card button {
+  width: 100%;
+  margin-top: 16px;
+  padding: 12px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.auth-card button:hover { background: var(--accent-dim); }
+
+.auth-error {
+  color: var(--red);
+  font-size: 13px;
+  margin-top: 12px;
+  min-height: 20px;
+}
+
+/* ── Layout ───────────────────────────────────────────── */
+#app {
+  display: none;
+  height: 100vh;
+  grid-template-columns: 280px 1fr;
+  grid-template-rows: auto 1fr;
+}
+
+#app.active { display: grid; }
+
+/* ── Header ───────────────────────────────────────────── */
+#header {
+  grid-column: 1 / -1;
+  background: var(--bg-header);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+#header h1 {
+  font-size: 16px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+#header h1 .logo {
+  width: 28px; height: 28px;
+  background: var(--accent);
+  border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.connection-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.connection-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--red);
+}
+
+.connection-dot.connected { background: var(--green); }
+
+.agent-badge {
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--bg);
+  padding: 4px 10px;
+  border-radius: 12px;
+}
+
+/* ── Sidebar ──────────────────────────────────────────── */
+#sidebar {
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-section {
+  padding: 16px 12px 8px;
+}
+
+.sidebar-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  padding: 0 8px;
+  margin-bottom: 6px;
+}
+
+.channel-list {
+  list-style: none;
+}
+
+.channel-item {
+  display: flex;
+  align-items: center;
+  padding: 7px 12px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--text-dim);
+  transition: all 0.15s;
+  gap: 8px;
+  margin: 1px 0;
+}
+
+.channel-item:hover { background: var(--bg-msg); color: var(--text); }
+.channel-item.active { background: var(--bg-msg); color: var(--text); font-weight: 600; }
+
+.channel-icon {
+  font-size: 16px;
+  width: 20px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+.channel-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.unread-badge {
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 10px;
+  min-width: 18px;
+  text-align: center;
+}
+
+/* Agents section */
+.agent-item {
+  display: flex;
+  align-items: center;
+  padding: 6px 12px;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+
+.agent-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.agent-dot.online { background: var(--green); }
+.agent-dot.offline { background: var(--text-muted); }
+
+.agent-name { flex: 1; }
+.agent-role {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+}
+
+/* ── Main Content ─────────────────────────────────────── */
+#main {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Channel Header */
+#channel-header {
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+#channel-header .ch-icon { font-size: 20px; }
+
+#channel-header .ch-info h2 {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+#channel-header .ch-info p {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-top: 1px;
+}
+
+/* Messages Area */
+#messages-container {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 24px;
+}
+
+.load-more-bar {
+  text-align: center;
+  padding: 8px;
+}
+
+.load-more-btn {
+  background: var(--bg-msg);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  padding: 6px 16px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.15s;
+}
+
+.load-more-btn:hover { background: var(--bg-msg-hover); color: var(--text); }
+
+.message {
+  display: flex;
+  gap: 12px;
+  padding: 8px 0;
+  border-radius: var(--radius);
+}
+
+.message + .message { margin-top: 2px; }
+
+.msg-avatar {
+  width: 36px; height: 36px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px;
+  font-weight: 700;
+  flex-shrink: 0;
+  color: #fff;
+}
+
+.msg-body { flex: 1; min-width: 0; }
+
+.msg-header {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.msg-sender {
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.msg-time {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.msg-edited {
+  font-size: 10px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.msg-reply-indicator {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  padding: 2px 8px;
+  border-left: 2px solid var(--border);
+}
+
+.msg-content {
+  font-size: 14px;
+  line-height: 1.55;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+.msg-content p { margin: 4px 0; }
+.msg-content p:first-child { margin-top: 0; }
+
+/* Markdown styles */
+.msg-content code {
+  background: var(--code-bg);
+  padding: 2px 5px;
+  border-radius: 3px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 13px;
+}
+
+.msg-content pre {
+  background: var(--code-bg);
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  overflow-x: auto;
+  margin: 8px 0;
+  border: 1px solid var(--border);
+}
+
+.msg-content pre code {
+  background: none;
+  padding: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.msg-content strong { font-weight: 700; }
+.msg-content em { font-style: italic; }
+
+.msg-content ul, .msg-content ol {
+  padding-left: 20px;
+  margin: 4px 0;
+}
+
+.msg-content li { margin: 2px 0; }
+
+.msg-content blockquote {
+  border-left: 3px solid var(--border);
+  padding-left: 12px;
+  color: var(--text-dim);
+  margin: 6px 0;
+}
+
+.msg-content a {
+  color: var(--accent);
+  text-decoration: none;
+}
+.msg-content a:hover { text-decoration: underline; }
+
+.msg-content h1, .msg-content h2, .msg-content h3 {
+  margin: 8px 0 4px;
+  font-weight: 700;
+}
+.msg-content h1 { font-size: 18px; }
+.msg-content h2 { font-size: 16px; }
+.msg-content h3 { font-size: 14px; }
+
+/* Date separator */
+.date-separator {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 16px 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.date-separator::before,
+.date-separator::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+/* Empty state */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-size: 14px;
+  gap: 8px;
+}
+
+.empty-state .icon { font-size: 40px; opacity: 0.5; }
+
+/* ── Compose Area ──────────────────────────────────────── */
+#compose {
+  padding: 12px 24px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-header);
+  display: none;
+}
+
+#compose.active { display: block; }
+
+.compose-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+#compose-input {
+  flex: 1;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 14px;
+  font-family: inherit;
+  padding: 10px 14px;
+  resize: none;
+  outline: none;
+  min-height: 40px;
+  max-height: 120px;
+  line-height: 1.4;
+  transition: border-color 0.2s;
+}
+
+#compose-input:focus { border-color: var(--accent); }
+
+#compose-input::placeholder { color: var(--text-muted); }
+
+#send-btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  padding: 10px 18px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+  white-space: nowrap;
+  height: 40px;
+}
+
+#send-btn:hover { background: var(--accent-dim); }
+#send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.compose-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 6px;
+}
+
+/* ── Mention Dropdown ──────────────────────────────────── */
+#mention-dropdown {
+  display: none;
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+  z-index: 100;
+  box-shadow: 0 -4px 16px rgba(0,0,0,0.3);
+}
+
+#mention-dropdown.active { display: block; }
+
+.mention-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-dim);
+  transition: background 0.1s;
+}
+
+.mention-item:hover, .mention-item.selected {
+  background: var(--bg-msg);
+  color: var(--text);
+}
+
+.mention-item .agent-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.compose-wrapper {
+  position: relative;
+}
+
+/* ── Reply Bar ────────────────────────────────────────── */
+#reply-bar {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  margin-bottom: 4px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+#reply-bar.active { display: flex; }
+
+#reply-bar .reply-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#reply-cancel {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 16px;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+#reply-cancel:hover { color: var(--text); }
+
+/* ── DM Button on agent ──────────────────────────────── */
+.agent-item {
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  transition: background 0.15s;
+}
+
+.agent-item:hover { background: var(--bg-msg); }
+
+/* ── Tasks View ──────────────────────────────────────── */
+#tasks-container {
+  display: none;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+#tasks-container.active { display: flex; }
+
+/* Tasks Header / Toolbar */
+#tasks-header {
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+#tasks-header h2 {
+  font-size: 15px;
+  font-weight: 700;
+  margin-right: auto;
+}
+
+.task-filter {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12px;
+  padding: 5px 8px;
+  outline: none;
+  cursor: pointer;
+}
+
+.task-filter:focus { border-color: var(--accent); }
+
+.task-filter option { background: var(--bg-sidebar); }
+
+#new-task-btn {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+#new-task-btn:hover { background: var(--accent-dim); }
+
+/* Tasks List */
+#tasks-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 24px;
+}
+
+.task-card {
+  background: var(--bg-msg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.task-card:hover { background: var(--bg-msg-hover); border-color: var(--accent); }
+
+.task-card-body { flex: 1; min-width: 0; }
+
+.task-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  line-height: 1.3;
+}
+
+.task-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* Status Badge */
+.status-badge {
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.status-todo { background: rgba(92,96,120,0.25); color: #8b8fa3; }
+.status-doing { background: rgba(91,127,245,0.2); color: #5b7ff5; }
+.status-done { background: rgba(61,214,140,0.2); color: #3dd68c; }
+
+/* Priority Badge */
+.priority-badge {
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.priority-urgent { background: rgba(229,83,75,0.2); color: #e5534b; }
+.priority-high { background: rgba(212,132,62,0.2); color: #d4843e; }
+.priority-medium { background: rgba(201,180,74,0.2); color: #c9b44a; }
+.priority-low { background: rgba(92,96,120,0.2); color: #8b8fa3; }
+
+.task-assignee {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.task-due {
+  color: var(--text-muted);
+}
+
+.task-due.overdue { color: var(--red); }
+
+/* Task Detail Panel */
+#task-detail {
+  display: none;
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 420px;
+  height: 100vh;
+  background: var(--bg-sidebar);
+  border-left: 1px solid var(--border);
+  z-index: 500;
+  flex-direction: column;
+  box-shadow: -4px 0 24px rgba(0,0,0,0.3);
+  overflow-y: auto;
+}
+
+#task-detail.active { display: flex; }
+
+.detail-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.detail-header h3 {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.detail-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 20px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.detail-close:hover { color: var(--text); }
+
+.detail-body {
+  padding: 20px;
+  flex: 1;
+}
+
+.detail-field {
+  margin-bottom: 16px;
+}
+
+.detail-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.detail-value {
+  font-size: 14px;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.detail-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.detail-actions button {
+  padding: 5px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.detail-actions button:hover { background: var(--bg-msg-hover); color: var(--text); }
+.detail-actions button.active-status { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+.detail-result-input {
+  width: 100%;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  padding: 8px 10px;
+  resize: vertical;
+  min-height: 60px;
+  outline: none;
+}
+
+.detail-result-input:focus { border-color: var(--accent); }
+
+.detail-delete-btn {
+  margin-top: 16px;
+  padding: 6px 14px;
+  background: rgba(229,83,75,0.15);
+  color: var(--red);
+  border: 1px solid rgba(229,83,75,0.3);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.detail-delete-btn:hover { background: rgba(229,83,75,0.3); }
+
+/* Create Task Form (overlay) */
+#create-task-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.5);
+  z-index: 600;
+  align-items: center;
+  justify-content: center;
+}
+
+#create-task-overlay.active { display: flex; }
+
+.create-task-card {
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 28px;
+  width: 440px;
+  max-width: 90vw;
+}
+
+.create-task-card h3 {
+  font-size: 16px;
+  font-weight: 700;
+  margin-bottom: 20px;
+}
+
+.form-group {
+  margin-bottom: 14px;
+}
+
+.form-group label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  margin-bottom: 5px;
+}
+
+.form-group input,
+.form-group select {
+  width: 100%;
+  padding: 8px 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+
+.form-group input:focus,
+.form-group select:focus { border-color: var(--accent); }
+
+.form-group select option { background: var(--bg-sidebar); }
+
+.form-buttons {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+
+.form-buttons button {
+  padding: 8px 18px;
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.btn-cancel {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.btn-cancel:hover { background: var(--bg-msg-hover); color: var(--text); }
+
+.btn-create {
+  background: var(--accent);
+  border: none;
+  color: #fff;
+}
+
+.btn-create:hover { background: var(--accent-dim); }
+.btn-create:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Tasks empty state */
+.tasks-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-size: 14px;
+  gap: 8px;
+}
+
+.tasks-empty .icon { font-size: 40px; opacity: 0.5; }
+
+/* ── Long Message Collapse ───────────────────────────── */
+.msg-content-wrapper { position: relative; }
+
+.msg-content-wrapper.collapsed .msg-content {
+  max-height: 9.3em; /* ~6 lines at 1.55 line-height */
+  overflow: hidden;
+}
+
+.msg-content-wrapper.collapsed .msg-fade {
+  display: block;
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 3em;
+  background: linear-gradient(transparent, var(--bg));
+  pointer-events: none;
+}
+
+.msg-toggle {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 0;
+  margin-top: 2px;
+}
+
+.msg-toggle:hover { text-decoration: underline; }
+
+/* ── Reactions ───────────────────────────────────────── */
+.msg-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.reaction-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: var(--bg-msg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 2px 8px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s;
+  line-height: 1.4;
+}
+
+.reaction-chip:hover { background: var(--bg-msg-hover); border-color: var(--accent); }
+.reaction-chip.mine { border-color: var(--accent); background: rgba(91,127,245,0.15); }
+
+.reaction-chip .r-count {
+  font-size: 11px;
+  color: var(--text-dim);
+  min-width: 8px;
+  text-align: center;
+}
+
+.reaction-picker-trigger {
+  opacity: 0;
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  background: var(--bg-msg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  cursor: pointer;
+  font-size: 14px;
+  transition: opacity 0.15s;
+  z-index: 10;
+}
+
+.message { position: relative; }
+.message:hover .reaction-picker-trigger { opacity: 1; }
+.message:hover .pin-action-btn { opacity: 1; }
+.reaction-picker-trigger:hover { background: var(--bg-msg-hover); }
+
+.reaction-picker {
+  display: none;
+  position: absolute;
+  top: -4px;
+  right: 40px;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px;
+  gap: 2px;
+  flex-wrap: wrap;
+  z-index: 20;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+}
+
+.reaction-picker.active { display: flex; }
+
+.reaction-picker-emoji {
+  cursor: pointer;
+  font-size: 18px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  transition: background 0.1s;
+  line-height: 1;
+}
+
+.reaction-picker-emoji:hover { background: var(--bg-msg-hover); }
+
+/* ── Pin Messages ────────────────────────────────────── */
+.pin-bar {
+  display: none;
+  padding: 8px 24px;
+  background: var(--bg-header);
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-dim);
+  align-items: center;
+  gap: 6px;
+  transition: background 0.15s;
+}
+
+.pin-bar:hover { background: var(--bg-msg); }
+.pin-bar.active { display: flex; }
+
+.pin-bar .pin-icon { font-size: 14px; }
+.pin-bar .pin-count { font-weight: 600; color: var(--text); }
+
+.pinned-panel {
+  display: none;
+  max-height: 300px;
+  overflow-y: auto;
+  background: var(--bg-header);
+  border-bottom: 1px solid var(--border);
+  padding: 8px 24px;
+}
+
+.pinned-panel.active { display: block; }
+
+.pinned-msg {
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  margin-bottom: 6px;
+  background: var(--bg-msg);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-size: 13px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.pinned-msg-body { flex: 1; min-width: 0; }
+
+.pinned-msg-sender {
+  font-weight: 600;
+  font-size: 12px;
+  margin-bottom: 2px;
+}
+
+.pinned-msg-content {
+  color: var(--text-dim);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pinned-msg-unpin {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 4px;
+  flex-shrink: 0;
+}
+
+.pinned-msg-unpin:hover { color: var(--red); }
+
+.pin-action-btn {
+  opacity: 0;
+  position: absolute;
+  top: 4px;
+  right: 32px;
+  background: var(--bg-msg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: opacity 0.15s;
+  z-index: 10;
+  color: var(--text-dim);
+}
+
+.pin-action-btn:hover { background: var(--bg-msg-hover); color: var(--text); }
+
+.msg-pinned-badge {
+  font-size: 10px;
+  color: var(--accent);
+  margin-left: 6px;
+}
+
+/* ── State / Observability View ─────────────────────── */
+#state-container {
+  display: none;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+#state-container.active { display: flex; }
+
+#state-header {
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+#state-header h2 {
+  font-size: 15px;
+  font-weight: 700;
+  margin-right: auto;
+}
+
+.state-project-input {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12px;
+  padding: 5px 8px;
+  outline: none;
+  width: 180px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+}
+
+.state-project-input:focus { border-color: var(--accent); }
+
+.state-refresh-btn {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  padding: 5px 10px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.state-refresh-btn:hover { background: var(--bg-msg-hover); color: var(--text); }
+
+#state-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 24px;
+}
+
+/* State Fields Grid */
+.state-fields-section {
+  margin-bottom: 24px;
+}
+
+.state-section-title {
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+}
+
+.state-fields-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 10px;
+}
+
+.state-field-card {
+  background: var(--bg-msg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.state-field-card:hover { background: var(--bg-msg-hover); border-color: var(--accent); }
+
+.state-field-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--accent);
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.state-field-value {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.4;
+  max-height: 3.5em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: break-word;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  background: var(--code-bg);
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 8px;
+}
+
+.state-field-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.state-field-owner {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.state-field-version {
+  background: rgba(91,127,245,0.15);
+  color: var(--accent);
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.state-field-time {
+  color: var(--text-muted);
+}
+
+.state-field-approval-badge {
+  background: rgba(212,132,62,0.2);
+  color: var(--orange);
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+/* Approvals Section */
+.state-approvals-section {
+  margin-bottom: 24px;
+}
+
+.state-approval-card {
+  background: var(--bg-msg);
+  border: 1px solid rgba(212,132,62,0.3);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.state-approval-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.state-approval-field {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: var(--text);
+}
+
+.state-approval-meta {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+
+.state-approval-value {
+  font-size: 12px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  background: var(--code-bg);
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  max-height: 3em;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+
+.state-approval-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.state-approval-actions button {
+  padding: 5px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: all 0.15s;
+}
+
+.state-approve-btn {
+  background: rgba(61,214,140,0.2);
+  color: var(--green);
+}
+.state-approve-btn:hover { background: rgba(61,214,140,0.35); }
+
+.state-reject-btn {
+  background: rgba(229,83,75,0.15);
+  color: var(--red);
+}
+.state-reject-btn:hover { background: rgba(229,83,75,0.3); }
+
+/* Timeline */
+.state-timeline-section {
+  margin-bottom: 24px;
+}
+
+.state-timeline {
+  position: relative;
+  padding-left: 20px;
+}
+
+.state-timeline::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  background: var(--border);
+  border-radius: 1px;
+}
+
+.state-timeline-entry {
+  position: relative;
+  padding: 8px 0 8px 12px;
+  font-size: 13px;
+}
+
+.state-timeline-entry::before {
+  content: '';
+  position: absolute;
+  left: -17px;
+  top: 14px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg);
+}
+
+.state-timeline-field {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.state-timeline-action {
+  color: var(--text-dim);
+}
+
+.state-timeline-by {
+  font-weight: 600;
+}
+
+.state-timeline-time {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+.state-timeline-reason {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-style: italic;
+  margin-top: 2px;
+}
+
+.state-timeline-values {
+  font-size: 12px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  color: var(--text-dim);
+  margin-top: 4px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.state-timeline-old {
+  background: rgba(229,83,75,0.1);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.state-timeline-new {
+  background: rgba(61,214,140,0.1);
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.state-timeline-arrow {
+  color: var(--text-muted);
+}
+
+/* State Field Detail Panel */
+#state-field-detail {
+  display: none;
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: 480px;
+  height: 100vh;
+  background: var(--bg-sidebar);
+  border-left: 1px solid var(--border);
+  z-index: 500;
+  flex-direction: column;
+  box-shadow: -4px 0 24px rgba(0,0,0,0.3);
+  overflow-y: auto;
+}
+
+#state-field-detail.active { display: flex; }
+
+.state-detail-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.state-detail-header h3 {
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.state-detail-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 20px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.state-detail-close:hover { color: var(--text); }
+
+.state-detail-body {
+  padding: 20px;
+  flex: 1;
+}
+
+.state-detail-field {
+  margin-bottom: 16px;
+}
+
+.state-detail-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.state-detail-value {
+  font-size: 14px;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.state-detail-full-value {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 13px;
+  background: var(--code-bg);
+  padding: 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+  line-height: 1.5;
+}
+
+/* State empty states */
+.state-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 40px 20px;
+  color: var(--text-muted);
+  font-size: 14px;
+  gap: 8px;
+}
+
+.state-empty .icon { font-size: 40px; opacity: 0.5; }
+
+/* ── Audit Reports ────────────────────────────────────── */
+.audit-reports-section {
+  margin-bottom: 24px;
+}
+
+.audit-report-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 14px;
+}
+
+.audit-report-tab {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  padding: 5px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.audit-report-tab:hover { background: var(--bg-msg-hover); color: var(--text); }
+.audit-report-tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+.audit-report-card {
+  background: var(--bg-msg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  margin-bottom: 8px;
+  transition: background 0.15s;
+}
+
+.audit-report-card:hover { background: var(--bg-msg-hover); }
+
+.audit-report-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.report-type-badge {
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.report-type-badge.compliance { background: rgba(212,132,62,0.2); color: var(--orange); }
+.report-type-badge.efficiency { background: rgba(91,127,245,0.2); color: var(--accent); }
+.report-type-badge.anomaly { background: rgba(229,83,75,0.2); color: var(--red); }
+
+.audit-report-card-time {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.audit-report-card-by {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-left: auto;
+}
+
+.audit-report-card-summary {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.efficiency-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.metric-card {
+  background: var(--bg-msg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  text-align: center;
+}
+
+.metric-card-value {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+
+.metric-card-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+}
+</style>
+</head>
+<body>
+
+<!-- Auth Overlay -->
+<div id="auth-overlay">
+  <div class="auth-card">
+    <h1>TeamMCP</h1>
+    <p>Enter your API key to access the dashboard</p>
+    <input type="password" id="api-key-input" placeholder="tmcp_..." autocomplete="off" spellcheck="false">
+    <button id="auth-btn" onclick="authenticate()">Connect</button>
+    <div class="auth-error" id="auth-error"></div>
+  </div>
+</div>
+
+<!-- App -->
+<div id="app">
+  <header id="header">
+    <h1>
+      <span class="logo">T</span>
+      TeamMCP Dashboard
+    </h1>
+    <div class="header-right">
+      <div class="connection-status">
+        <span class="connection-dot" id="sse-dot"></span>
+        <span id="sse-label">Disconnected</span>
+      </div>
+      <span class="agent-badge" id="agent-badge"></span>
+    </div>
+  </header>
+
+  <div id="sidebar">
+    <!-- Channels -->
+    <div class="sidebar-section">
+      <div class="sidebar-section-title">Channels</div>
+      <ul class="channel-list" id="channel-list"></ul>
+    </div>
+    <!-- Tasks -->
+    <div class="sidebar-section">
+      <div class="sidebar-section-title">Tasks</div>
+      <ul class="channel-list">
+        <li class="channel-item" id="tasks-nav" onclick="switchToTasks()">
+          <span class="channel-icon">&#128203;</span>
+          <span class="channel-name">All Tasks</span>
+          <span class="unread-badge" id="tasks-count-badge" style="display:none"></span>
+        </li>
+      </ul>
+    </div>
+    <!-- State -->
+    <div class="sidebar-section">
+      <div class="sidebar-section-title">State</div>
+      <ul class="channel-list">
+        <li class="channel-item" id="state-nav" onclick="switchToState()">
+          <span class="channel-icon">&#128202;</span>
+          <span class="channel-name">Project State</span>
+        </li>
+      </ul>
+    </div>
+    <!-- Agents -->
+    <div class="sidebar-section">
+      <div class="sidebar-section-title">Agents</div>
+      <div id="agent-list"></div>
+    </div>
+  </div>
+
+  <div id="main">
+    <div id="channel-header">
+      <span class="ch-icon" id="ch-icon">#</span>
+      <div class="ch-info">
+        <h2 id="ch-name">Select a channel</h2>
+        <p id="ch-desc"></p>
+      </div>
+    </div>
+    <div class="pin-bar" id="pin-bar" onclick="togglePinnedPanel()">
+      <span class="pin-icon">&#128204;</span>
+      <span><span class="pin-count" id="pin-count">0</span> pinned messages</span>
+    </div>
+    <div class="pinned-panel" id="pinned-panel"></div>
+    <div id="messages-container">
+      <div class="empty-state">
+        <div class="icon">&#128172;</div>
+        <div>Select a channel to view messages</div>
+      </div>
+    </div>
+    <!-- Tasks View -->
+    <div id="tasks-container">
+      <div id="tasks-header">
+        <h2>&#128203; Tasks</h2>
+        <select class="task-filter" id="filter-status" onchange="applyTaskFilters()">
+          <option value="">All Status</option>
+          <option value="todo">Todo</option>
+          <option value="doing">Doing</option>
+          <option value="done">Done</option>
+        </select>
+        <select class="task-filter" id="filter-assignee" onchange="applyTaskFilters()">
+          <option value="">All Assignees</option>
+        </select>
+        <button id="new-task-btn" onclick="showCreateTaskForm()">+ New Task</button>
+      </div>
+      <div id="tasks-list">
+        <div class="tasks-empty">
+          <div class="icon">&#128203;</div>
+          <div>Loading tasks...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- State / Observability View -->
+    <div id="state-container">
+      <div id="state-header">
+        <h2>&#128202; Project State</h2>
+        <input type="text" class="state-project-input" id="state-project-input" placeholder="agent-os-mvp" value="agent-os-mvp" onkeydown="if(event.key==='Enter')refreshState()">
+        <button class="state-refresh-btn" onclick="refreshState()" title="Refresh">&#128260;</button>
+      </div>
+      <div id="state-body">
+        <div class="state-empty">
+          <div class="icon">&#128202;</div>
+          <div>Enter a project ID and click refresh to load state</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- State Field Detail Panel -->
+    <div id="state-field-detail">
+      <div class="state-detail-header">
+        <h3>Field Detail</h3>
+        <button class="state-detail-close" onclick="closeFieldDetail()">&times;</button>
+      </div>
+      <div class="state-detail-body" id="state-detail-body"></div>
+    </div>
+
+    <!-- Task Detail Panel -->
+    <div id="task-detail">
+      <div class="detail-header">
+        <h3>Task Detail</h3>
+        <button class="detail-close" onclick="closeTaskDetail()">&times;</button>
+      </div>
+      <div class="detail-body" id="detail-body"></div>
+    </div>
+
+    <div id="compose">
+      <div id="reply-bar">
+        <span>Replying to <strong id="reply-target"></strong></span>
+        <span class="reply-text" id="reply-preview"></span>
+        <button id="reply-cancel" onclick="cancelReply()">&times;</button>
+      </div>
+      <div class="compose-wrapper">
+        <div id="mention-dropdown"></div>
+        <div class="compose-row">
+          <textarea id="compose-input" placeholder="Type a message... (@ to mention)" rows="1"
+            oninput="handleComposeInput(event)" onkeydown="handleComposeKeydown(event)"></textarea>
+          <button id="send-btn" onclick="sendMessage()" disabled>Send</button>
+        </div>
+      </div>
+      <div class="compose-hint">
+        <span id="compose-channel-hint"></span>
+        &nbsp;·&nbsp; Enter to send, Shift+Enter for new line
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Create Task Overlay -->
+<div id="create-task-overlay">
+  <div class="create-task-card">
+    <h3>Create New Task</h3>
+    <div class="form-group">
+      <label>Title *</label>
+      <input type="text" id="ct-title" placeholder="Task title..." autocomplete="off">
+    </div>
+    <div class="form-group">
+      <label>Priority</label>
+      <select id="ct-priority">
+        <option value="medium">Medium</option>
+        <option value="urgent">Urgent</option>
+        <option value="high">High</option>
+        <option value="low">Low</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Assignee</label>
+      <select id="ct-assignee">
+        <option value="">Unassigned</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Due Date</label>
+      <input type="date" id="ct-due-date">
+    </div>
+    <div class="form-buttons">
+      <button class="btn-cancel" onclick="hideCreateTaskForm()">Cancel</button>
+      <button class="btn-create" id="ct-submit" onclick="submitCreateTask()">Create Task</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── State ────────────────────────────────────────────────
+let API_KEY = '';
+let currentChannel = null;
+let channels = [];
+let agents = [];
+let messages = [];  // messages for current channel
+let hasMore = false;
+let loading = false;
+let eventSource = null;
+let agentName = '';
+let currentView = 'messages'; // 'messages', 'tasks', or 'state'
+let currentProjectId = 'agent-os-mvp';
+let stateFields = [];
+let stateApprovals = [];
+let stateChangeLog = [];
+let auditReports = [];
+let auditFilterType = 'all';
+let tasksList = [];
+let tasksTotal = 0;
+let currentTaskDetail = null;
+let pinnedMsgIds = new Set();
+let pinnedMessages = [];
+let pinnedPanelOpen = false;
+
+const REACTION_EMOJIS = ['\u{1F44D}', '\u{1F44E}', '\u{2764}\u{FE0F}', '\u{1F604}', '\u{1F389}', '\u{1F440}', '\u{1F914}', '\u{2705}'];
+
+const COLORS = [
+  '#5b7ff5', '#e5534b', '#3dd68c', '#d4843e', '#c9b44a',
+  '#a371f7', '#e07cda', '#39c5cf', '#6cb6ff', '#57ab5a'
+];
+
+function agentColor(name) {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) | 0;
+  return COLORS[Math.abs(hash) % COLORS.length];
+}
+
+function agentInitial(name) {
+  return name.charAt(0).toUpperCase();
+}
+
+// ── API ──────────────────────────────────────────────────
+async function api(path) {
+  const res = await fetch(path, {
+    headers: { 'Authorization': 'Bearer ' + API_KEY }
+  });
+  if (!res.ok) throw new Error(`API ${res.status}: ${res.statusText}`);
+  return res.json();
+}
+
+// ── Auth ─────────────────────────────────────────────────
+async function authenticate() {
+  const input = document.getElementById('api-key-input');
+  const error = document.getElementById('auth-error');
+  API_KEY = input.value.trim();
+  if (!API_KEY) { error.textContent = 'Please enter an API key'; return; }
+
+  error.textContent = 'Connecting...';
+  try {
+    const agentsData = await api('/api/agents');
+    agents = agentsData;
+    // Figure out who we are from the key (try channels endpoint)
+    const chData = await api('/api/channels');
+    channels = chData;
+
+    // Determine our identity from the agents list by trying to match key
+    // The API doesn't directly tell us who we are, but we can check the
+    // /api/channels endpoint which returns data scoped to our agent.
+    // We'll resolve identity by sending a test to /api/health or matching.
+    // For now, find the agent whose key matches by checking the response
+    // Use a dedicated endpoint or infer from the agent data.
+    agentName = await resolveAgentName();
+
+    error.textContent = '';
+    document.getElementById('auth-overlay').style.display = 'none';
+    document.getElementById('app').classList.add('active');
+    localStorage.setItem('teammcp_key', API_KEY);
+
+    init();
+  } catch (e) {
+    error.textContent = 'Authentication failed: ' + e.message;
+  }
+}
+
+// Auto-fill saved key
+(function() {
+  const saved = localStorage.getItem('teammcp_key');
+  if (saved) {
+    document.getElementById('api-key-input').value = saved;
+  }
+  document.getElementById('api-key-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') authenticate();
+  });
+})();
+
+// ── Init ─────────────────────────────────────────────────
+async function init() {
+  document.getElementById('agent-badge').textContent = agentName;
+  renderChannels();
+  renderAgents();
+  connectSSE();
+
+  // Auto-select first channel
+  if (channels.length > 0) {
+    selectChannel(channels[0].id);
+  }
+
+  // Refresh agents periodically
+  setInterval(refreshAgents, 30000);
+}
+
+// ── Channels ─────────────────────────────────────────────
+function renderChannels() {
+  const list = document.getElementById('channel-list');
+  // Separate by type
+  const groups = channels.filter(c => c.type === 'group');
+  const dms = channels.filter(c => c.type === 'dm');
+  const topics = channels.filter(c => c.type === 'topic');
+
+  let html = '';
+  for (const ch of [...groups, ...topics, ...dms]) {
+    const icon = ch.type === 'dm' ? '&#9993;' : ch.type === 'topic' ? '&#9733;' : '#';
+    const active = ch.id === currentChannel ? 'active' : '';
+    const unread = ch.unread > 0 ? `<span class="unread-badge">${ch.unread > 99 ? '99+' : ch.unread}</span>` : '';
+    const displayName = ch.type === 'dm' ? ch.name.replace('DM ', '').replace(' ↔ ', ' / ') : (ch.name || ch.id);
+    html += `<li class="channel-item ${active}" data-id="${ch.id}" onclick="selectChannel('${ch.id}')">
+      <span class="channel-icon">${icon}</span>
+      <span class="channel-name">${escapeHtml(displayName)}</span>
+      ${unread}
+    </li>`;
+  }
+  list.innerHTML = html;
+}
+
+async function selectChannel(channelId) {
+  if (loading) return;
+  switchToMessages();
+  currentChannel = channelId;
+  const ch = channels.find(c => c.id === channelId);
+
+  // Update header
+  const icon = ch?.type === 'dm' ? '&#9993;' : ch?.type === 'topic' ? '&#9733;' : '#';
+  document.getElementById('ch-icon').innerHTML = icon;
+  document.getElementById('ch-name').textContent = ch?.name || channelId;
+  document.getElementById('ch-desc').textContent = ch?.description || '';
+
+  // Highlight active channel
+  document.querySelectorAll('.channel-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.id === channelId);
+  });
+
+  // Clear unread for this channel locally
+  if (ch) ch.unread = 0;
+  renderChannels();
+
+  // Load messages and pins
+  await loadMessages(channelId);
+  await loadPins(channelId);
+  // Re-render to show pin badges
+  renderMessages(true);
+
+  // Reset pinned panel
+  pinnedPanelOpen = false;
+  document.getElementById('pinned-panel').classList.remove('active');
+
+  // Show compose area
+  updateComposeUI();
+}
+
+async function loadMessages(channelId, before) {
+  loading = true;
+  try {
+    let url = `/api/history?channel=${encodeURIComponent(channelId)}&limit=50`;
+    if (before) url += `&before=${encodeURIComponent(before)}`;
+    const data = await api(url);
+    if (before) {
+      messages = [...data.messages, ...messages];
+    } else {
+      messages = data.messages;
+    }
+    hasMore = data.hasMore;
+    renderMessages(!before); // scroll to bottom only on initial load
+  } catch (e) {
+    console.error('Failed to load messages:', e);
+  }
+  loading = false;
+}
+
+// ── Messages ─────────────────────────────────────────────
+function renderMessages(scrollToBottom) {
+  const container = document.getElementById('messages-container');
+  if (messages.length === 0) {
+    container.innerHTML = '<div class="empty-state"><div class="icon">&#128172;</div><div>No messages yet</div></div>';
+    return;
+  }
+
+  let html = '';
+
+  // Load more button
+  if (hasMore) {
+    html += '<div class="load-more-bar"><button class="load-more-btn" onclick="loadOlder()">Load older messages</button></div>';
+  }
+
+  let lastDate = '';
+  for (const msg of messages) {
+    const date = formatDate(msg.created_at);
+    if (date !== lastDate) {
+      html += `<div class="date-separator">${date}</div>`;
+      lastDate = date;
+    }
+    html += renderMessage(msg);
+  }
+
+  container.innerHTML = html;
+
+  if (scrollToBottom) {
+    container.scrollTop = container.scrollHeight;
+  }
+}
+
+function renderMessage(msg) {
+  const color = agentColor(msg.from_agent);
+  const time = formatTime(msg.created_at);
+  const edited = msg.edited_at ? '<span class="msg-edited">(edited)</span>' : '';
+  const content = renderMarkdown(msg.content);
+
+  let replyHtml = '';
+  if (msg.reply_to) {
+    const parent = messages.find(m => m.id === msg.reply_to);
+    if (parent) {
+      replyHtml = `<div class="msg-reply-indicator">Replying to <strong>${escapeHtml(parent.from_agent)}</strong></div>`;
+    }
+  }
+
+  // Long message collapse: check if > 15 lines or > 800 chars
+  const lineCount = (msg.content || '').split('\n').length;
+  const charCount = (msg.content || '').length;
+  const shouldCollapse = lineCount > 15 || charCount > 800;
+  const collapsedClass = shouldCollapse ? ' collapsed' : '';
+  const fadeHtml = shouldCollapse ? '<div class="msg-fade"></div>' : '';
+  const toggleHtml = shouldCollapse ? `<button class="msg-toggle" onclick="toggleMsgCollapse(this, event)">Show more</button>` : '';
+
+  // Reactions HTML
+  const reactionsHtml = renderReactions(msg);
+
+  // Pin badge
+  const pinBadge = (pinnedMsgIds && pinnedMsgIds.has(msg.id)) ? '<span class="msg-pinned-badge">&#128204; pinned</span>' : '';
+
+  // Pin action button
+  const isPinnedMsg = pinnedMsgIds && pinnedMsgIds.has(msg.id);
+  const pinBtn = isPinnedMsg
+    ? `<button class="pin-action-btn" onclick="unpinMsg('${msg.id}', event)" title="Unpin">&#128204;</button>`
+    : `<button class="pin-action-btn" onclick="pinMsg('${msg.id}', event)" title="Pin">&#128204;</button>`;
+
+  return `<div class="message" data-id="${msg.id}" ondblclick="setReply('${msg.id}')">
+    <div class="msg-avatar" style="background:${color}">${agentInitial(msg.from_agent)}</div>
+    <div class="msg-body">
+      ${replyHtml}
+      <div class="msg-header">
+        <span class="msg-sender" style="color:${color}">${escapeHtml(msg.from_agent)}</span>
+        <span class="msg-time">${time}</span>
+        ${edited}
+        ${pinBadge}
+      </div>
+      <div class="msg-content-wrapper${collapsedClass}">
+        <div class="msg-content">${content}</div>
+        ${fadeHtml}
+      </div>
+      ${toggleHtml}
+      ${reactionsHtml}
+    </div>
+    <button class="reaction-picker-trigger" onclick="toggleReactionPicker('${msg.id}', event)">&#128578;</button>
+    ${pinBtn}
+    <div class="reaction-picker" id="picker-${msg.id}">
+      ${REACTION_EMOJIS.map(e => `<span class="reaction-picker-emoji" onclick="reactToMsg('${msg.id}', '${e}', event)">${e}</span>`).join('')}
+    </div>
+  </div>`;
+}
+
+function loadOlder() {
+  if (loading || !hasMore || messages.length === 0) return;
+  const oldestId = messages[0].id;
+  loadMessages(currentChannel, oldestId);
+}
+
+// ── Markdown Renderer ────────────────────────────────────
+function renderMarkdown(text) {
+  if (!text) return '';
+
+  // Escape HTML first
+  let s = escapeHtml(text);
+
+  // Code blocks (``` ... ```)
+  s = s.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+    return `<pre><code class="lang-${lang}">${code.trim()}</code></pre>`;
+  });
+
+  // Inline code
+  s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+
+  // Bold
+  s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+
+  // Italic
+  s = s.replace(/(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g, '<em>$1</em>');
+
+  // Strikethrough
+  s = s.replace(/~~(.+?)~~/g, '<del>$1</del>');
+
+  // Headings (at start of line)
+  s = s.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  s = s.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  s = s.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+  // Blockquotes
+  s = s.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+
+  // Unordered lists
+  s = s.replace(/^[\-\*] (.+)$/gm, '<li>$1</li>');
+  s = s.replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul>$1</ul>');
+
+  // Ordered lists
+  s = s.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+
+  // Links
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+
+  // URLs
+  s = s.replace(/(?<!["\(href=])(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+
+  // Line breaks to paragraphs
+  s = s.replace(/\n\n/g, '</p><p>');
+  s = s.replace(/\n/g, '<br>');
+
+  // Wrap in paragraph if not already wrapped
+  if (!s.startsWith('<')) {
+    s = '<p>' + s + '</p>';
+  }
+
+  return s;
+}
+
+// ── Agents ───────────────────────────────────────────────
+function renderAgents() {
+  const container = document.getElementById('agent-list');
+  // Sort: online first
+  const sorted = [...agents].sort((a, b) => {
+    if (a.status === 'online' && b.status !== 'online') return -1;
+    if (a.status !== 'online' && b.status === 'online') return 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  let html = '';
+  for (const a of sorted) {
+    const online = a.status === 'online';
+    const roleHtml = a.role ? `<span class="agent-role">${escapeHtml(a.role)}</span>` : '';
+    const isSelf = a.name === agentName;
+    const title = isSelf ? 'You' : 'Click to DM ' + a.name;
+    html += `<div class="agent-item" title="${title}" onclick="${isSelf ? '' : "openDmWithAgent('" + escapeHtml(a.name) + "')"}">
+      <span class="agent-dot ${online ? 'online' : 'offline'}"></span>
+      <span class="agent-name">${escapeHtml(a.name)}${isSelf ? ' (you)' : ''}</span>
+      ${roleHtml}
+    </div>`;
+  }
+  container.innerHTML = html;
+}
+
+async function refreshAgents() {
+  try {
+    agents = await api('/api/agents');
+    renderAgents();
+  } catch {}
+}
+
+async function refreshChannels() {
+  try {
+    const oldChannel = currentChannel;
+    channels = await api('/api/channels');
+    renderChannels();
+    // Re-highlight current
+    if (oldChannel) {
+      document.querySelectorAll('.channel-item').forEach(el => {
+        el.classList.toggle('active', el.dataset.id === oldChannel);
+      });
+    }
+  } catch {}
+}
+
+// ── SSE ──────────────────────────────────────────────────
+function connectSSE() {
+  if (eventSource) {
+    eventSource.close();
+  }
+
+  // Native EventSource doesn't support custom headers.
+  // Use fetch-based SSE instead.
+  const dot = document.getElementById('sse-dot');
+  const label = document.getElementById('sse-label');
+
+  fetchSSE('/api/events', {
+    onOpen() {
+      dot.classList.add('connected');
+      label.textContent = 'Connected';
+    },
+    onMessage(data) {
+      handleSSEEvent(data);
+    },
+    onError() {
+      dot.classList.remove('connected');
+      label.textContent = 'Reconnecting...';
+      // Auto-reconnect after 3s
+      setTimeout(() => connectSSE(), 3000);
+    }
+  });
+}
+
+async function fetchSSE(url, { onOpen, onMessage, onError }) {
+  try {
+    const response = await fetch(url, {
+      headers: { 'Authorization': 'Bearer ' + API_KEY }
+    });
+
+    if (!response.ok) {
+      throw new Error(`SSE connection failed: ${response.status}`);
+    }
+
+    onOpen();
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop(); // Keep incomplete line
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          try {
+            const data = JSON.parse(line.slice(6));
+            onMessage(data);
+          } catch {}
+        }
+      }
+    }
+
+    // Connection closed
+    onError();
+  } catch (e) {
+    console.error('SSE error:', e);
+    onError();
+  }
+}
+
+function handleSSEEvent(data) {
+  switch (data.type) {
+    case 'message':
+      // If it's for the current channel, append to messages (skip duplicates from own sends)
+      if (data.channel === currentChannel) {
+        if (!messages.some(m => m.id === data.id)) {
+          const msg = {
+            id: data.id,
+            channel_id: data.channel,
+            from_agent: data.from,
+            content: data.content,
+            created_at: data.timestamp,
+            reply_to: data.replyTo,
+            mentions: data.mentions
+          };
+          messages.push(msg);
+          renderMessages(true);
+        }
+      }
+      // Bump unread for other channels
+      const ch = channels.find(c => c.id === data.channel);
+      if (ch && data.channel !== currentChannel) {
+        ch.unread = (ch.unread || 0) + 1;
+        renderChannels();
+      }
+      // If channel not in list, refresh
+      if (!ch) {
+        refreshChannels();
+      }
+      break;
+
+    case 'status':
+      const agent = agents.find(a => a.name === data.agent);
+      if (agent) {
+        agent.status = data.status;
+        renderAgents();
+      } else {
+        refreshAgents();
+      }
+      break;
+
+    case 'message_edited':
+      if (data.channel === currentChannel) {
+        const msg = messages.find(m => m.id === data.id);
+        if (msg) {
+          msg.content = data.content;
+          msg.edited_at = data.edited_at;
+          renderMessages(false);
+        }
+      }
+      break;
+
+    case 'message_deleted':
+      if (data.channel === currentChannel) {
+        messages = messages.filter(m => m.id !== data.id);
+        renderMessages(false);
+      }
+      break;
+
+    case 'task_created':
+      if (currentView === 'tasks') {
+        loadTasks();
+      }
+      break;
+
+    case 'task_updated':
+      if (currentView === 'tasks') {
+        loadTasks();
+      }
+      if (currentTaskDetail && data.task_id === currentTaskDetail.id) {
+        showTaskDetail(data.task_id);
+      }
+      break;
+
+    case 'task_deleted':
+      if (currentView === 'tasks') {
+        tasksList = tasksList.filter(t => t.id !== data.task.id);
+        renderTasks();
+      }
+      if (currentTaskDetail && data.task.id === currentTaskDetail.id) {
+        closeTaskDetail();
+      }
+      break;
+
+    case 'reaction_added':
+      if (data.channel === currentChannel) {
+        const rMsg = messages.find(m => m.id === data.message_id);
+        if (rMsg) {
+          if (!rMsg.reactions) rMsg.reactions = [];
+          if (!rMsg.reactions.some(r => r.emoji === data.emoji && r.agent_name === data.agent)) {
+            rMsg.reactions.push({ emoji: data.emoji, agent_name: data.agent });
+          }
+          renderMessages(false);
+        }
+      }
+      break;
+
+    case 'reaction_removed':
+      if (data.channel === currentChannel) {
+        const rrMsg = messages.find(m => m.id === data.message_id);
+        if (rrMsg && rrMsg.reactions) {
+          rrMsg.reactions = rrMsg.reactions.filter(r => !(r.emoji === data.emoji && r.agent_name === data.agent));
+          renderMessages(false);
+        }
+      }
+      break;
+
+    case 'message_pinned':
+      if (data.channel === currentChannel) {
+        loadPins(currentChannel).then(() => renderMessages(false));
+      }
+      break;
+
+    case 'message_unpinned':
+      if (data.channel === currentChannel) {
+        loadPins(currentChannel).then(() => renderMessages(false));
+      }
+      break;
+
+    case 'state_changed':
+      if (currentView === 'state' && data.project_id === currentProjectId) {
+        loadStateFields(currentProjectId);
+        loadApprovals();
+      }
+      break;
+  }
+}
+
+// ── Helpers ──────────────────────────────────────────────
+function escapeHtml(str) {
+  if (!str) return '';
+  const div = document.createElement('div');
+  div.textContent = str;
+  return div.innerHTML;
+}
+
+function formatTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false });
+}
+
+function formatDate(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(yesterday.getDate() - 1);
+
+  if (d.toDateString() === today.toDateString()) return 'Today';
+  if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+// ── Resolve Agent Name ──────────────────────────────────
+async function resolveAgentName() {
+  try {
+    const data = await api('/api/me');
+    return data.name || 'Dashboard';
+  } catch {
+    return 'Dashboard';
+  }
+}
+
+// ── Compose / Send Messages ─────────────────────────────
+let replyToId = null;
+let mentionQuery = '';
+let mentionStart = -1;
+let mentionDropdownIdx = 0;
+
+function updateComposeUI() {
+  const compose = document.getElementById('compose');
+  const hint = document.getElementById('compose-channel-hint');
+  if (!currentChannel) {
+    compose.classList.remove('active');
+    return;
+  }
+  compose.classList.add('active');
+  const ch = channels.find(c => c.id === currentChannel);
+  const label = ch ? (ch.type === 'dm' ? ch.name : '#' + (ch.name || ch.id)) : currentChannel;
+  hint.textContent = `Sending to ${label} as ${agentName}`;
+}
+
+function handleComposeInput(e) {
+  const input = document.getElementById('compose-input');
+  const btn = document.getElementById('send-btn');
+  btn.disabled = !input.value.trim();
+
+  // Auto-resize textarea
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+
+  // Mention detection
+  const val = input.value;
+  const pos = input.selectionStart;
+  const textBefore = val.slice(0, pos);
+  const atMatch = textBefore.match(/@(\w*)$/);
+
+  if (atMatch) {
+    mentionStart = pos - atMatch[0].length;
+    mentionQuery = atMatch[1].toLowerCase();
+    showMentionDropdown();
+  } else {
+    hideMentionDropdown();
+  }
+}
+
+function showMentionDropdown() {
+  const dropdown = document.getElementById('mention-dropdown');
+  const filtered = agents.filter(a =>
+    a.name.toLowerCase().includes(mentionQuery) && a.name !== agentName
+  );
+
+  if (filtered.length === 0) {
+    hideMentionDropdown();
+    return;
+  }
+
+  mentionDropdownIdx = 0;
+  let html = '';
+  for (let i = 0; i < filtered.length; i++) {
+    const a = filtered[i];
+    const online = a.status === 'online';
+    const sel = i === 0 ? 'selected' : '';
+    html += `<div class="mention-item ${sel}" data-name="${escapeHtml(a.name)}" onclick="selectMention('${escapeHtml(a.name)}')">
+      <span class="agent-dot ${online ? 'online' : 'offline'}"></span>
+      <span>${escapeHtml(a.name)}</span>
+      ${a.role ? '<span style="color:var(--text-muted);font-size:11px">' + escapeHtml(a.role) + '</span>' : ''}
+    </div>`;
+  }
+  dropdown.innerHTML = html;
+  dropdown.classList.add('active');
+}
+
+function hideMentionDropdown() {
+  document.getElementById('mention-dropdown').classList.remove('active');
+  mentionStart = -1;
+}
+
+function selectMention(name) {
+  const input = document.getElementById('compose-input');
+  const before = input.value.slice(0, mentionStart);
+  const after = input.value.slice(input.selectionStart);
+  input.value = before + '@' + name + ' ' + after;
+  input.focus();
+  const newPos = mentionStart + name.length + 2;
+  input.setSelectionRange(newPos, newPos);
+  hideMentionDropdown();
+  document.getElementById('send-btn').disabled = !input.value.trim();
+}
+
+function handleComposeKeydown(e) {
+  const dropdown = document.getElementById('mention-dropdown');
+
+  // Mention dropdown navigation
+  if (dropdown.classList.contains('active')) {
+    const items = dropdown.querySelectorAll('.mention-item');
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      mentionDropdownIdx = Math.min(mentionDropdownIdx + 1, items.length - 1);
+      items.forEach((el, i) => el.classList.toggle('selected', i === mentionDropdownIdx));
+      return;
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      mentionDropdownIdx = Math.max(mentionDropdownIdx - 1, 0);
+      items.forEach((el, i) => el.classList.toggle('selected', i === mentionDropdownIdx));
+      return;
+    }
+    if (e.key === 'Tab' || e.key === 'Enter') {
+      e.preventDefault();
+      const selected = items[mentionDropdownIdx];
+      if (selected) selectMention(selected.dataset.name);
+      return;
+    }
+    if (e.key === 'Escape') {
+      hideMentionDropdown();
+      return;
+    }
+  }
+
+  // Enter to send (Shift+Enter for newline)
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+}
+
+async function sendMessage() {
+  const input = document.getElementById('compose-input');
+  const btn = document.getElementById('send-btn');
+  const content = input.value.trim();
+  if (!content || !currentChannel) return;
+
+  // Extract @mentions from content
+  const mentionRegex = /@(\w+)/g;
+  const mentions = [];
+  let match;
+  while ((match = mentionRegex.exec(content)) !== null) {
+    const name = match[1];
+    if (agents.some(a => a.name === name)) {
+      mentions.push(name);
+    }
+  }
+
+  btn.disabled = true;
+  try {
+    const body = {
+      channel: currentChannel,
+      content: content,
+    };
+    if (mentions.length > 0) body.mentions = mentions;
+    if (replyToId) body.replyTo = replyToId;
+
+    const res = await fetch('/api/send', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + API_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Send failed: ${res.status}`);
+    }
+
+    const result = await res.json();
+
+    // Add message locally (SSE will also deliver it for other channels)
+    const msg = {
+      id: result.id,
+      channel_id: currentChannel,
+      from_agent: agentName,
+      content: content,
+      created_at: result.timestamp,
+      reply_to: replyToId,
+      mentions: mentions
+    };
+    messages.push(msg);
+    renderMessages(true);
+
+    // Clear input
+    input.value = '';
+    input.style.height = 'auto';
+    cancelReply();
+  } catch (e) {
+    console.error('Send failed:', e);
+    alert('Failed to send: ' + e.message);
+  }
+  btn.disabled = !input.value.trim();
+}
+
+// ── Reply ────────────────────────────────────────────────
+function setReply(msgId) {
+  const msg = messages.find(m => m.id === msgId);
+  if (!msg) return;
+  replyToId = msgId;
+  document.getElementById('reply-target').textContent = msg.from_agent;
+  document.getElementById('reply-preview').textContent = msg.content.slice(0, 80);
+  document.getElementById('reply-bar').classList.add('active');
+  document.getElementById('compose-input').focus();
+}
+
+function cancelReply() {
+  replyToId = null;
+  document.getElementById('reply-bar').classList.remove('active');
+}
+
+// ── Click agent to open DM ───────────────────────────────
+function openDmWithAgent(name) {
+  if (name === agentName) return;
+  // Find existing DM channel
+  const dmId1 = 'dm:' + [agentName, name].sort().join(':');
+  const existing = channels.find(c => c.id === dmId1);
+  if (existing) {
+    selectChannel(existing.id);
+  } else {
+    // Send to dm:Name shorthand - the server will create the channel
+    // For now, just set the current channel to dm:Name and refresh
+    currentChannel = 'dm:' + name;
+    updateComposeUI();
+    document.getElementById('ch-icon').innerHTML = '&#9993;';
+    document.getElementById('ch-name').textContent = 'DM with ' + name;
+    document.getElementById('ch-desc').textContent = '';
+    document.getElementById('messages-container').innerHTML = '<div class="empty-state"><div class="icon">&#9993;</div><div>Start a conversation with ' + escapeHtml(name) + '</div></div>';
+    messages = [];
+    // Try to load history for this DM
+    loadMessages('dm:' + name).then(() => refreshChannels());
+  }
+}
+
+// ── Tasks View ──────────────────────────────────────────────
+function switchToTasks() {
+  currentView = 'tasks';
+  // Hide messages view
+  document.getElementById('messages-container').style.display = 'none';
+  document.getElementById('compose').classList.remove('active');
+  document.getElementById('channel-header').style.display = 'none';
+  document.getElementById('pin-bar').classList.remove('active');
+  document.getElementById('pinned-panel').classList.remove('active');
+  // Hide state view
+  document.getElementById('state-container').classList.remove('active');
+  closeFieldDetail();
+  // Show tasks view
+  document.getElementById('tasks-container').classList.add('active');
+  // Update sidebar highlights
+  document.querySelectorAll('.channel-item').forEach(el => el.classList.remove('active'));
+  document.getElementById('tasks-nav').classList.add('active');
+  // Populate assignee filter
+  populateAssigneeFilter();
+  loadTasks();
+}
+
+function switchToMessages() {
+  if (currentView === 'messages') return;
+  currentView = 'messages';
+  // Show messages view
+  document.getElementById('messages-container').style.display = '';
+  document.getElementById('channel-header').style.display = '';
+  updatePinBar();
+  updateComposeUI();
+  // Hide tasks view
+  document.getElementById('tasks-container').classList.remove('active');
+  closeTaskDetail();
+  // Hide state view
+  document.getElementById('state-container').classList.remove('active');
+  closeFieldDetail();
+  // Remove tasks/state nav highlight
+  document.getElementById('tasks-nav').classList.remove('active');
+  document.getElementById('state-nav').classList.remove('active');
+}
+
+function populateAssigneeFilter() {
+  const select = document.getElementById('filter-assignee');
+  const current = select.value;
+  let html = '<option value="">All Assignees</option>';
+  for (const a of agents) {
+    html += '<option value="' + escapeHtml(a.name) + '">' + escapeHtml(a.name) + '</option>';
+  }
+  select.innerHTML = html;
+  select.value = current;
+
+  // Also populate create form assignee
+  const ctSelect = document.getElementById('ct-assignee');
+  let ctHtml = '<option value="">Unassigned</option>';
+  for (const a of agents) {
+    ctHtml += '<option value="' + escapeHtml(a.name) + '">' + escapeHtml(a.name) + '</option>';
+  }
+  ctSelect.innerHTML = ctHtml;
+}
+
+function applyTaskFilters() {
+  loadTasks();
+}
+
+async function loadTasks() {
+  const status = document.getElementById('filter-status').value;
+  const assignee = document.getElementById('filter-assignee').value;
+  let url = '/api/tasks?limit=50&sort=-priority';
+  if (status) url += '&status=' + encodeURIComponent(status);
+  if (assignee) url += '&assignee=' + encodeURIComponent(assignee);
+  try {
+    const data = await api(url);
+    tasksList = data.tasks || [];
+    tasksTotal = data.total || 0;
+    renderTasks();
+  } catch (e) {
+    console.error('Failed to load tasks:', e);
+    document.getElementById('tasks-list').innerHTML = '<div class="tasks-empty"><div class="icon">&#9888;</div><div>Failed to load tasks</div></div>';
+  }
+}
+
+function renderTasks() {
+  const container = document.getElementById('tasks-list');
+  if (tasksList.length === 0) {
+    container.innerHTML = '<div class="tasks-empty"><div class="icon">&#128203;</div><div>No tasks yet. Click <strong>+ New Task</strong> to create one.</div></div>';
+    return;
+  }
+  let html = '';
+  for (const task of tasksList) {
+    html += renderTaskCard(task);
+  }
+  container.innerHTML = html;
+}
+
+function renderTaskCard(task) {
+  const statusClass = 'status-' + (task.status || 'todo');
+  const priorityClass = 'priority-' + (task.priority || 'medium');
+  const statusLabel = (task.status || 'todo').toUpperCase();
+  const priorityLabel = (task.priority || 'medium').charAt(0).toUpperCase() + (task.priority || 'medium').slice(1);
+
+  let metaHtml = '';
+  metaHtml += '<span class="status-badge ' + statusClass + '">' + statusLabel + '</span>';
+  metaHtml += '<span class="priority-badge ' + priorityClass + '">' + escapeHtml(priorityLabel) + '</span>';
+
+  if (task.assignee) {
+    metaHtml += '<span class="task-assignee"><span class="agent-dot online" style="width:6px;height:6px;background:' + agentColor(task.assignee) + '"></span>' + escapeHtml(task.assignee) + '</span>';
+  }
+
+  if (task.due_date) {
+    const isOverdue = new Date(task.due_date) < new Date() && task.status !== 'done';
+    metaHtml += '<span class="task-due' + (isOverdue ? ' overdue' : '') + '">Due: ' + escapeHtml(task.due_date) + '</span>';
+  }
+
+  return '<div class="task-card" onclick="showTaskDetail(\'' + escapeHtml(task.id) + '\')">' +
+    '<div class="task-card-body">' +
+      '<div class="task-card-title">' + escapeHtml(task.title) + '</div>' +
+      '<div class="task-card-meta">' + metaHtml + '</div>' +
+    '</div>' +
+  '</div>';
+}
+
+async function showTaskDetail(taskId) {
+  try {
+    const data = await api('/api/tasks/' + encodeURIComponent(taskId));
+    const task = data.task;
+    if (!task) return;
+    currentTaskDetail = task;
+
+    const statusClass = 'status-' + (task.status || 'todo');
+    const priorityClass = 'priority-' + (task.priority || 'medium');
+
+    let html = '';
+
+    // Title
+    html += '<div class="detail-field">';
+    html += '<div class="detail-label">Title</div>';
+    html += '<div class="detail-value">' + escapeHtml(task.title) + '</div>';
+    html += '</div>';
+
+    // Status with action buttons
+    html += '<div class="detail-field">';
+    html += '<div class="detail-label">Status</div>';
+    html += '<div class="detail-actions">';
+    ['todo', 'doing', 'done'].forEach(s => {
+      const active = task.status === s ? ' active-status' : '';
+      html += '<button class="' + active + '" onclick="updateTaskField(\'' + task.id + '\', \'status\', \'' + s + '\')">' + s.toUpperCase() + '</button>';
+    });
+    html += '</div>';
+    html += '</div>';
+
+    // Priority
+    html += '<div class="detail-field">';
+    html += '<div class="detail-label">Priority</div>';
+    html += '<div class="detail-value"><span class="priority-badge ' + priorityClass + '">' + escapeHtml((task.priority || 'medium').charAt(0).toUpperCase() + (task.priority || 'medium').slice(1)) + '</span></div>';
+    html += '</div>';
+
+    // Creator
+    html += '<div class="detail-field">';
+    html += '<div class="detail-label">Creator</div>';
+    html += '<div class="detail-value">' + escapeHtml(task.creator || '-') + '</div>';
+    html += '</div>';
+
+    // Assignee
+    html += '<div class="detail-field">';
+    html += '<div class="detail-label">Assignee</div>';
+    html += '<div class="detail-value">' + escapeHtml(task.assignee || 'Unassigned') + '</div>';
+    html += '</div>';
+
+    // Due date
+    if (task.due_date) {
+      html += '<div class="detail-field">';
+      html += '<div class="detail-label">Due Date</div>';
+      html += '<div class="detail-value">' + escapeHtml(task.due_date) + '</div>';
+      html += '</div>';
+    }
+
+    // Labels
+    const labelsArr = Array.isArray(task.labels) ? task.labels : (typeof task.labels === 'string' && task.labels !== '[]' && task.labels.trim() ? JSON.parse(task.labels) : []);
+    if (labelsArr.length > 0) {
+      html += '<div class="detail-field">';
+      html += '<div class="detail-label">Labels</div>';
+      html += '<div class="detail-value">' + escapeHtml(labelsArr.join(', ')) + '</div>';
+      html += '</div>';
+    }
+
+    // Result
+    html += '<div class="detail-field">';
+    html += '<div class="detail-label">Result</div>';
+    html += '<textarea class="detail-result-input" id="detail-result" placeholder="Enter result..." onchange="updateTaskField(\'' + task.id + '\', \'result\', this.value)">' + escapeHtml(task.result || '') + '</textarea>';
+    html += '</div>';
+
+    // Sub-tasks
+    if (task.sub_tasks && task.sub_tasks.length > 0) {
+      html += '<div class="detail-field">';
+      html += '<div class="detail-label">Sub-tasks</div>';
+      for (const sub of task.sub_tasks) {
+        const subStatusClass = 'status-' + (sub.status || 'todo');
+        html += '<div style="padding:6px 0;border-bottom:1px solid var(--border);font-size:13px;display:flex;align-items:center;gap:8px;">';
+        html += '<span class="status-badge ' + subStatusClass + '" style="font-size:10px">' + (sub.status || 'todo').toUpperCase() + '</span>';
+        html += '<span>' + escapeHtml(sub.title) + '</span>';
+        html += '</div>';
+      }
+      html += '</div>';
+    }
+
+    // Created at
+    html += '<div class="detail-field">';
+    html += '<div class="detail-label">Created</div>';
+    html += '<div class="detail-value" style="font-size:12px;color:var(--text-muted)">' + escapeHtml(task.created_at || '') + '</div>';
+    html += '</div>';
+
+    // Delete button
+    html += '<button class="detail-delete-btn" onclick="confirmDeleteTask(\'' + task.id + '\')">Delete Task</button>';
+
+    document.getElementById('detail-body').innerHTML = html;
+    document.getElementById('task-detail').classList.add('active');
+  } catch (e) {
+    console.error('Failed to load task detail:', e);
+    if (e.message && e.message.includes('403')) {
+      alert('Permission denied: you cannot view this task.');
+    }
+  }
+}
+
+function closeTaskDetail() {
+  currentTaskDetail = null;
+  document.getElementById('task-detail').classList.remove('active');
+}
+
+async function updateTaskField(taskId, field, value) {
+  try {
+    const body = {};
+    body[field] = value;
+    const res = await fetch('/api/tasks/' + encodeURIComponent(taskId), {
+      method: 'PATCH',
+      headers: {
+        'Authorization': 'Bearer ' + API_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      if (res.status === 403) {
+        alert('Permission denied: ' + (err.error || 'you cannot modify this field'));
+        return;
+      }
+      throw new Error(err.error || 'Update failed');
+    }
+    // Refresh
+    loadTasks();
+    if (currentTaskDetail && currentTaskDetail.id === taskId) {
+      showTaskDetail(taskId);
+    }
+  } catch (e) {
+    console.error('Failed to update task:', e);
+    alert('Failed to update: ' + e.message);
+  }
+}
+
+async function confirmDeleteTask(taskId) {
+  if (!confirm('Are you sure you want to delete this task?')) return;
+  try {
+    const res = await fetch('/api/tasks/' + encodeURIComponent(taskId), {
+      method: 'DELETE',
+      headers: { 'Authorization': 'Bearer ' + API_KEY }
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      if (res.status === 403) {
+        alert('Permission denied: ' + (err.error || 'only creator or managers can delete'));
+        return;
+      }
+      throw new Error(err.error || 'Delete failed');
+    }
+    closeTaskDetail();
+    loadTasks();
+  } catch (e) {
+    console.error('Failed to delete task:', e);
+    alert('Failed to delete: ' + e.message);
+  }
+}
+
+// ── Create Task Form ────────────────────────────────────────
+function showCreateTaskForm() {
+  populateAssigneeFilter();
+  document.getElementById('ct-title').value = '';
+  document.getElementById('ct-priority').value = 'medium';
+  document.getElementById('ct-assignee').value = '';
+  document.getElementById('ct-due-date').value = '';
+  document.getElementById('create-task-overlay').classList.add('active');
+  document.getElementById('ct-title').focus();
+}
+
+function hideCreateTaskForm() {
+  document.getElementById('create-task-overlay').classList.remove('active');
+}
+
+async function submitCreateTask() {
+  const title = document.getElementById('ct-title').value.trim();
+  if (!title) {
+    document.getElementById('ct-title').focus();
+    return;
+  }
+
+  const body = { title: title };
+  const priority = document.getElementById('ct-priority').value;
+  if (priority) body.priority = priority;
+  const assignee = document.getElementById('ct-assignee').value;
+  if (assignee) body.assignee = assignee;
+  const dueDate = document.getElementById('ct-due-date').value;
+  if (dueDate) body.due_date = dueDate;
+
+  const btn = document.getElementById('ct-submit');
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/tasks', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + API_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      if (res.status === 403) {
+        alert('Permission denied: ' + (err.error || 'you cannot create tasks'));
+        btn.disabled = false;
+        return;
+      }
+      throw new Error(err.error || 'Create failed');
+    }
+    hideCreateTaskForm();
+    loadTasks();
+  } catch (e) {
+    console.error('Failed to create task:', e);
+    alert('Failed to create task: ' + e.message);
+  }
+  btn.disabled = false;
+}
+
+// Close create overlay on Escape or background click
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    if (document.getElementById('create-task-overlay').classList.contains('active')) {
+      hideCreateTaskForm();
+    } else if (document.getElementById('state-field-detail').classList.contains('active')) {
+      closeFieldDetail();
+    } else if (document.getElementById('task-detail').classList.contains('active')) {
+      closeTaskDetail();
+    }
+  }
+});
+
+document.getElementById('create-task-overlay').addEventListener('click', e => {
+  if (e.target === document.getElementById('create-task-overlay')) {
+    hideCreateTaskForm();
+  }
+});
+
+// ── Long Message Collapse ────────────────────────────────
+function toggleMsgCollapse(btn, e) {
+  e.stopPropagation();
+  const wrapper = btn.previousElementSibling;
+  if (wrapper.classList.contains('collapsed')) {
+    wrapper.classList.remove('collapsed');
+    btn.textContent = 'Show less';
+  } else {
+    wrapper.classList.add('collapsed');
+    btn.textContent = 'Show more';
+  }
+}
+
+// ── Reactions ────────────────────────────────────────────
+function renderReactions(msg) {
+  const reactions = msg.reactions || [];
+  if (reactions.length === 0) return '<div class="msg-reactions" data-msgid="' + msg.id + '"></div>';
+
+  // Group by emoji
+  const groups = {};
+  for (const r of reactions) {
+    if (!groups[r.emoji]) groups[r.emoji] = [];
+    groups[r.emoji].push(r.agent_name);
+  }
+
+  let html = '<div class="msg-reactions" data-msgid="' + msg.id + '">';
+  for (const [emoji, agents_list] of Object.entries(groups)) {
+    const isMine = agents_list.includes(agentName);
+    const mineClass = isMine ? ' mine' : '';
+    const title = agents_list.join(', ');
+    html += '<span class="reaction-chip' + mineClass + '" title="' + escapeHtml(title) + '" onclick="toggleReaction(\'' + msg.id + '\', \'' + emoji + '\', event)">';
+    html += '<span class="r-emoji">' + emoji + '</span>';
+    html += '<span class="r-count">' + agents_list.length + '</span>';
+    html += '</span>';
+  }
+  html += '</div>';
+  return html;
+}
+
+function toggleReactionPicker(msgId, e) {
+  e.stopPropagation();
+  // Close all other pickers
+  document.querySelectorAll('.reaction-picker.active').forEach(p => {
+    if (p.id !== 'picker-' + msgId) p.classList.remove('active');
+  });
+  const picker = document.getElementById('picker-' + msgId);
+  picker.classList.toggle('active');
+}
+
+// Close reaction pickers when clicking elsewhere
+document.addEventListener('click', () => {
+  document.querySelectorAll('.reaction-picker.active').forEach(p => p.classList.remove('active'));
+});
+
+async function reactToMsg(msgId, emoji, e) {
+  if (e) e.stopPropagation();
+  // Close picker
+  document.querySelectorAll('.reaction-picker.active').forEach(p => p.classList.remove('active'));
+
+  // Check if already reacted — toggle
+  const msg = messages.find(m => m.id === msgId);
+  if (!msg) return;
+  const reactions = msg.reactions || [];
+  const existing = reactions.find(r => r.emoji === emoji && r.agent_name === agentName);
+
+  try {
+    if (existing) {
+      await fetch('/api/messages/' + encodeURIComponent(msgId) + '/reactions/' + encodeURIComponent(emoji), {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer ' + API_KEY }
+      });
+      msg.reactions = reactions.filter(r => !(r.emoji === emoji && r.agent_name === agentName));
+    } else {
+      await fetch('/api/messages/' + encodeURIComponent(msgId) + '/reactions', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + API_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ emoji })
+      });
+      if (!msg.reactions) msg.reactions = [];
+      msg.reactions.push({ emoji, agent_name: agentName });
+    }
+    renderMessages(false);
+  } catch (err) {
+    console.error('Reaction failed:', err);
+  }
+}
+
+function toggleReaction(msgId, emoji, e) {
+  e.stopPropagation();
+  reactToMsg(msgId, emoji, null);
+}
+
+// ── Pin Messages ──────────────────────────────────────────
+async function loadPins(channelId) {
+  if (!channelId) return;
+  try {
+    const data = await api('/api/channels/' + encodeURIComponent(channelId) + '/pins');
+    pinnedMessages = data.pins || [];
+    pinnedMsgIds = new Set(pinnedMessages.map(p => p.message_id));
+    updatePinBar();
+  } catch (err) {
+    console.error('Failed to load pins:', err);
+    pinnedMessages = [];
+    pinnedMsgIds = new Set();
+    updatePinBar();
+  }
+}
+
+function updatePinBar() {
+  const bar = document.getElementById('pin-bar');
+  const count = document.getElementById('pin-count');
+  if (pinnedMessages.length > 0) {
+    bar.classList.add('active');
+    count.textContent = pinnedMessages.length;
+  } else {
+    bar.classList.remove('active');
+    document.getElementById('pinned-panel').classList.remove('active');
+    pinnedPanelOpen = false;
+  }
+}
+
+function togglePinnedPanel() {
+  pinnedPanelOpen = !pinnedPanelOpen;
+  const panel = document.getElementById('pinned-panel');
+  if (pinnedPanelOpen) {
+    renderPinnedPanel();
+    panel.classList.add('active');
+  } else {
+    panel.classList.remove('active');
+  }
+}
+
+function renderPinnedPanel() {
+  const panel = document.getElementById('pinned-panel');
+  if (pinnedMessages.length === 0) {
+    panel.innerHTML = '<div style="padding:8px;color:var(--text-muted);font-size:13px;">No pinned messages</div>';
+    return;
+  }
+  let html = '';
+  for (const p of pinnedMessages) {
+    const color = agentColor(p.from_agent);
+    html += '<div class="pinned-msg">';
+    html += '<div class="pinned-msg-body">';
+    html += '<div class="pinned-msg-sender" style="color:' + color + '">' + escapeHtml(p.from_agent) + '</div>';
+    html += '<div class="pinned-msg-content">' + escapeHtml((p.content || '').slice(0, 150)) + '</div>';
+    html += '</div>';
+    html += '<button class="pinned-msg-unpin" onclick="unpinMsg(\'' + p.message_id + '\', event)" title="Unpin">&times;</button>';
+    html += '</div>';
+  }
+  panel.innerHTML = html;
+}
+
+async function pinMsg(msgId, e) {
+  if (e) e.stopPropagation();
+  try {
+    await fetch('/api/messages/' + encodeURIComponent(msgId) + '/pin', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + API_KEY, 'Content-Type': 'application/json' },
+      body: '{}'
+    });
+    await loadPins(currentChannel);
+    renderMessages(false);
+  } catch (err) {
+    console.error('Pin failed:', err);
+  }
+}
+
+async function unpinMsg(msgId, e) {
+  if (e) e.stopPropagation();
+  try {
+    await fetch('/api/messages/' + encodeURIComponent(msgId) + '/pin', {
+      method: 'DELETE',
+      headers: { 'Authorization': 'Bearer ' + API_KEY }
+    });
+    await loadPins(currentChannel);
+    renderMessages(false);
+    if (pinnedPanelOpen) renderPinnedPanel();
+  } catch (err) {
+    console.error('Unpin failed:', err);
+  }
+}
+
+// ── State / Observability View ──────────────────────────────
+function switchToState() {
+  currentView = 'state';
+  // Hide messages view
+  document.getElementById('messages-container').style.display = 'none';
+  document.getElementById('compose').classList.remove('active');
+  document.getElementById('channel-header').style.display = 'none';
+  document.getElementById('pin-bar').classList.remove('active');
+  document.getElementById('pinned-panel').classList.remove('active');
+  // Hide tasks view
+  document.getElementById('tasks-container').classList.remove('active');
+  closeTaskDetail();
+  // Show state view
+  document.getElementById('state-container').classList.add('active');
+  // Update sidebar highlights
+  document.querySelectorAll('.channel-item').forEach(el => el.classList.remove('active'));
+  document.getElementById('state-nav').classList.add('active');
+  // Load state
+  const input = document.getElementById('state-project-input');
+  currentProjectId = input.value.trim() || 'agent-os-mvp';
+  refreshState();
+}
+
+function refreshState() {
+  const input = document.getElementById('state-project-input');
+  currentProjectId = input.value.trim() || 'agent-os-mvp';
+  if (!currentProjectId) {
+    document.getElementById('state-body').innerHTML = '<div class="state-empty"><div class="icon">&#128202;</div><div>Enter a project ID to load state</div></div>';
+    return;
+  }
+  loadStateFields(currentProjectId);
+  loadApprovals();
+  loadAuditReports(currentProjectId);
+}
+
+async function loadStateFields(projectId) {
+  try {
+    const data = await api('/api/state?project_id=' + encodeURIComponent(projectId));
+    stateFields = data.items || [];
+    renderStateView();
+    // Load recent change log for all fields
+    loadRecentChangeLog(projectId);
+  } catch (e) {
+    console.error('Failed to load state fields:', e);
+    document.getElementById('state-body').innerHTML = '<div class="state-empty"><div class="icon">&#9888;</div><div>Failed to load state: ' + escapeHtml(e.message) + '</div></div>';
+  }
+}
+
+function renderStateView() {
+  const body = document.getElementById('state-body');
+  let html = '';
+
+  // Fields section
+  html += '<div class="state-fields-section">';
+  html += '<div class="state-section-title">State Fields</div>';
+  if (stateFields.length === 0) {
+    html += '<div class="state-empty"><div class="icon">&#128202;</div><div>No state fields found for this project</div></div>';
+  } else {
+    html += '<div class="state-fields-grid">';
+    html += renderStateFields(stateFields);
+    html += '</div>';
+  }
+  html += '</div>';
+
+  // Approvals section
+  html += '<div class="state-approvals-section" id="state-approvals-container">';
+  html += renderApprovals(stateApprovals);
+  html += '</div>';
+
+  // Audit Reports section
+  html += '<div class="audit-reports-section" id="audit-reports-container">';
+  html += renderAuditReports(auditReports, auditFilterType);
+  html += '</div>';
+
+  // Timeline section
+  html += '<div class="state-timeline-section">';
+  html += '<div class="state-section-title">&#128220; Recent Changes</div>';
+  html += '<div id="state-changelog-container">';
+  html += '<div style="color:var(--text-muted);font-size:13px;">Loading...</div>';
+  html += '</div>';
+  html += '</div>';
+
+  body.innerHTML = html;
+}
+
+function renderStateFields(fields) {
+  let html = '';
+  for (const field of fields) {
+    const valueTruncated = truncateValue(field.value, 100);
+    const ownerHtml = field.owner ? '<span class="state-field-owner"><span class="agent-dot online" style="width:6px;height:6px;background:' + agentColor(field.owner) + '"></span>' + escapeHtml(field.owner) + '</span>' : '';
+    const versionHtml = '<span class="state-field-version">v' + (field.version || 1) + '</span>';
+    const timeHtml = field.updated_at ? '<span class="state-field-time">' + formatTime(field.updated_at) + '</span>' : '';
+    const approvalHtml = field.approval_required ? '<span class="state-field-approval-badge">approval required</span>' : '';
+
+    html += '<div class="state-field-card" onclick="showFieldDetail(\'' + escapeHtml(currentProjectId) + '\', \'' + escapeHtml(field.field) + '\')">';
+    html += '<div class="state-field-name">' + escapeHtml(field.field) + ' ' + approvalHtml + '</div>';
+    html += '<div class="state-field-value">' + escapeHtml(valueTruncated) + '</div>';
+    html += '<div class="state-field-meta">' + ownerHtml + versionHtml + timeHtml + '</div>';
+    html += '</div>';
+  }
+  return html;
+}
+
+function truncateValue(value, maxLen) {
+  if (!value) return '(empty)';
+  let display = value;
+  // Try to parse JSON for nice display
+  try {
+    const parsed = JSON.parse(value);
+    display = JSON.stringify(parsed, null, 2);
+  } catch {
+    display = value;
+  }
+  if (display.length > maxLen) {
+    return display.slice(0, maxLen) + '...';
+  }
+  return display;
+}
+
+async function loadRecentChangeLog(projectId) {
+  try {
+    // Load change log for all fields (fetch history for each field, or if no specific field, get general)
+    // We'll try loading history without a field param first; if that fails, load per-field
+    let allEntries = [];
+    for (const field of stateFields.slice(0, 10)) { // limit to first 10 fields
+      try {
+        const entries = await api('/api/state/history?project_id=' + encodeURIComponent(projectId) + '&field=' + encodeURIComponent(field.field) + '&limit=5');
+        if (Array.isArray(entries)) {
+          allEntries = allEntries.concat(entries);
+        }
+      } catch {}
+    }
+    // Sort by timestamp descending
+    allEntries.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    stateChangeLog = allEntries.slice(0, 20);
+    const container = document.getElementById('state-changelog-container');
+    if (container) {
+      container.innerHTML = renderChangeLog(stateChangeLog);
+    }
+  } catch (e) {
+    console.error('Failed to load change log:', e);
+    const container = document.getElementById('state-changelog-container');
+    if (container) {
+      container.innerHTML = '<div style="color:var(--text-muted);font-size:13px;">Failed to load change log</div>';
+    }
+  }
+}
+
+function renderChangeLog(entries) {
+  if (!entries || entries.length === 0) {
+    return '<div style="color:var(--text-muted);font-size:13px;">No recent changes</div>';
+  }
+  let html = '<div class="state-timeline">';
+  for (const entry of entries) {
+    const isCreate = !entry.old_value;
+    const actionText = isCreate ? 'created' : 'changed';
+    html += '<div class="state-timeline-entry">';
+    html += '<div><span class="state-timeline-field">' + escapeHtml(entry.field) + '</span> ';
+    html += '<span class="state-timeline-action">' + actionText + ' by </span>';
+    html += '<span class="state-timeline-by" style="color:' + agentColor(entry.changed_by || 'unknown') + '">' + escapeHtml(entry.changed_by || 'unknown') + '</span>';
+    html += ' <span class="state-field-version">v' + (entry.version || '?') + '</span>';
+    html += '</div>';
+    if (!isCreate && entry.old_value) {
+      html += '<div class="state-timeline-values">';
+      html += '<span class="state-timeline-old">' + escapeHtml(truncateValue(entry.old_value, 40)) + '</span>';
+      html += '<span class="state-timeline-arrow">&rarr;</span>';
+      html += '<span class="state-timeline-new">' + escapeHtml(truncateValue(entry.new_value, 40)) + '</span>';
+      html += '</div>';
+    } else if (isCreate) {
+      html += '<div class="state-timeline-values">';
+      html += '<span class="state-timeline-new">' + escapeHtml(truncateValue(entry.new_value, 60)) + '</span>';
+      html += '</div>';
+    }
+    if (entry.reason) {
+      html += '<div class="state-timeline-reason">' + escapeHtml(entry.reason) + '</div>';
+    }
+    html += '<div class="state-timeline-time">' + escapeHtml(entry.timestamp ? formatDate(entry.timestamp) + ' ' + formatTime(entry.timestamp) : '') + '</div>';
+    html += '</div>';
+  }
+  html += '</div>';
+  return html;
+}
+
+async function loadApprovals() {
+  try {
+    const data = await api('/api/state/approvals');
+    stateApprovals = Array.isArray(data) ? data : (data.items || []);
+    const container = document.getElementById('state-approvals-container');
+    if (container) {
+      container.innerHTML = renderApprovals(stateApprovals);
+    }
+  } catch (e) {
+    console.error('Failed to load approvals:', e);
+    stateApprovals = [];
+  }
+}
+
+function renderApprovals(approvals) {
+  if (!approvals || approvals.length === 0) return '';
+  let html = '<div class="state-section-title">&#128203; Pending Approvals</div>';
+  for (const a of approvals) {
+    html += '<div class="state-approval-card">';
+    html += '<div class="state-approval-body">';
+    html += '<div class="state-approval-field">' + escapeHtml(a.field || a.key || '') + '</div>';
+    html += '<div class="state-approval-meta">Requested by <strong>' + escapeHtml(a.updated_by || a.requested_by || 'unknown') + '</strong>';
+    if (a.project_id) html += ' in <em>' + escapeHtml(a.project_id) + '</em>';
+    html += '</div>';
+    if (a.new_value || a.value) {
+      html += '<div class="state-approval-value">' + escapeHtml(truncateValue(a.new_value || a.value, 120)) + '</div>';
+    }
+    html += '<div class="state-approval-actions">';
+    html += '<button class="state-approve-btn" onclick="resolveApprovalAction(\'' + (a.id || '') + '\', true)">&#10003; Approve</button>';
+    html += '<button class="state-reject-btn" onclick="resolveApprovalAction(\'' + (a.id || '') + '\', false)">&#10007; Reject</button>';
+    html += '</div>';
+    html += '</div>';
+    html += '</div>';
+  }
+  return html;
+}
+
+async function resolveApprovalAction(id, approved) {
+  if (!id) return;
+  try {
+    const res = await fetch('/api/state/approvals/' + encodeURIComponent(id) + '/resolve', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + API_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ approved: approved })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || 'Resolve failed: ' + res.status);
+    }
+    // Refresh
+    loadApprovals();
+    loadStateFields(currentProjectId);
+  } catch (e) {
+    console.error('Failed to resolve approval:', e);
+    alert('Failed to resolve approval: ' + e.message);
+  }
+}
+
+// ── Audit Reports ──────────────────────────────────────────
+async function loadAuditReports(projectId) {
+  try {
+    const data = await api('/api/reports/public?project_id=' + encodeURIComponent(projectId) + '&limit=20');
+    auditReports = Array.isArray(data) ? data : [];
+    const container = document.getElementById('audit-reports-container');
+    if (container) {
+      container.innerHTML = renderAuditReports(auditReports, auditFilterType);
+    }
+  } catch (e) {
+    console.error('Failed to load audit reports:', e);
+    auditReports = [];
+    const container = document.getElementById('audit-reports-container');
+    if (container) {
+      container.innerHTML = '';
+    }
+  }
+}
+
+function renderAuditReports(reports, filterType) {
+  if (!reports || reports.length === 0) return '';
+  const filtered = filterType === 'all' ? reports : reports.filter(r => r.report_type === filterType);
+
+  let html = '<div class="state-section-title">&#128209; Audit Reports</div>';
+
+  // Efficiency metrics panel (always show if we have efficiency reports)
+  html += renderEfficiencyMetrics(reports);
+
+  // Tabs
+  html += '<div class="audit-report-tabs">';
+  const tabs = ['all', 'compliance', 'efficiency', 'anomaly'];
+  const tabLabels = { all: 'All', compliance: 'Compliance', efficiency: 'Efficiency', anomaly: 'Anomaly' };
+  for (const t of tabs) {
+    const activeClass = t === filterType ? ' active' : '';
+    html += '<button class="audit-report-tab' + activeClass + '" onclick="filterAuditReports(\'' + t + '\')">' + tabLabels[t] + '</button>';
+  }
+  html += '</div>';
+
+  // Report cards
+  if (filtered.length === 0) {
+    html += '<div style="color:var(--text-muted);font-size:13px;padding:12px 0;">No ' + (filterType === 'all' ? '' : filterType + ' ') + 'reports found</div>';
+  } else {
+    for (const report of filtered) {
+      const badgeClass = report.report_type || 'compliance';
+      const timeStr = report.generated_at ? formatDate(report.generated_at) + ' ' + formatTime(report.generated_at) : '';
+      const summary = getReportSummary(report);
+
+      html += '<div class="audit-report-card">';
+      html += '<div class="audit-report-card-header">';
+      html += '<span class="report-type-badge ' + escapeHtml(badgeClass) + '">' + escapeHtml(report.report_type || 'unknown') + '</span>';
+      html += '<span class="audit-report-card-time">' + escapeHtml(timeStr) + '</span>';
+      if (report.generated_by) {
+        html += '<span class="audit-report-card-by">by ' + escapeHtml(report.generated_by) + '</span>';
+      }
+      html += '</div>';
+      html += '<div class="audit-report-card-summary">' + escapeHtml(summary) + '</div>';
+      html += '</div>';
+    }
+  }
+  return html;
+}
+
+function getReportSummary(report) {
+  try {
+    const content = typeof report.content === 'string' ? JSON.parse(report.content) : report.content;
+    if (!content) return '(no content)';
+
+    if (report.report_type === 'compliance') {
+      const findings = content.findings || content.issues || [];
+      const count = Array.isArray(findings) ? findings.length : 0;
+      const status = content.status || content.result || '';
+      return (status ? status + ' - ' : '') + count + ' finding(s)' + (content.summary ? ': ' + content.summary : '');
+    }
+
+    if (report.report_type === 'efficiency') {
+      const parts = [];
+      if (content.avg_resolution_time != null) parts.push('Avg resolution: ' + content.avg_resolution_time);
+      if (content.total_changes != null) parts.push('Total changes: ' + content.total_changes);
+      if (content.high_frequency_fields && content.high_frequency_fields.length > 0) {
+        parts.push('Hot fields: ' + content.high_frequency_fields.slice(0, 3).join(', '));
+      }
+      return parts.length > 0 ? parts.join(' | ') : (content.summary || JSON.stringify(content).slice(0, 150));
+    }
+
+    if (report.report_type === 'anomaly') {
+      const anomalies = content.anomalies || content.items || [];
+      const count = Array.isArray(anomalies) ? anomalies.length : 0;
+      return count + ' anomaly(ies) detected' + (content.summary ? ': ' + content.summary : '');
+    }
+
+    return content.summary || JSON.stringify(content).slice(0, 150);
+  } catch (e) {
+    // content is not valid JSON, return as-is truncated
+    const raw = String(report.content || '');
+    return raw.length > 150 ? raw.slice(0, 150) + '...' : raw;
+  }
+}
+
+function renderEfficiencyMetrics(reports) {
+  const efficiencyReports = reports.filter(r => r.report_type === 'efficiency');
+  if (efficiencyReports.length === 0) return '';
+
+  let avgResolution = '-';
+  let hotFields = '-';
+  let totalChanges = '-';
+
+  // Aggregate from the most recent efficiency report
+  for (const report of efficiencyReports) {
+    try {
+      const content = typeof report.content === 'string' ? JSON.parse(report.content) : report.content;
+      if (!content) continue;
+      if (content.avg_resolution_time != null && avgResolution === '-') {
+        avgResolution = String(content.avg_resolution_time);
+      }
+      if (content.high_frequency_fields && content.high_frequency_fields.length > 0 && hotFields === '-') {
+        hotFields = content.high_frequency_fields.slice(0, 3).join(', ');
+      }
+      if (content.total_changes != null && totalChanges === '-') {
+        totalChanges = String(content.total_changes);
+      }
+    } catch (e) {
+      // skip unparseable
+    }
+  }
+
+  // Only render if we found at least one metric
+  if (avgResolution === '-' && hotFields === '-' && totalChanges === '-') return '';
+
+  let html = '<div class="efficiency-metrics">';
+  html += '<div class="metric-card"><div class="metric-card-value">' + escapeHtml(avgResolution) + '</div><div class="metric-card-label">Avg Approval Resolution</div></div>';
+  html += '<div class="metric-card"><div class="metric-card-value">' + escapeHtml(totalChanges) + '</div><div class="metric-card-label">Total State Changes</div></div>';
+  html += '<div class="metric-card"><div class="metric-card-value" style="font-size:14px;">' + escapeHtml(hotFields) + '</div><div class="metric-card-label">High Frequency Fields</div></div>';
+  html += '</div>';
+  return html;
+}
+
+function filterAuditReports(type) {
+  auditFilterType = type;
+  const container = document.getElementById('audit-reports-container');
+  if (container) {
+    container.innerHTML = renderAuditReports(auditReports, auditFilterType);
+  }
+}
+
+async function showFieldDetail(projectId, field) {
+  try {
+    // Load field data
+    const data = await api('/api/state?project_id=' + encodeURIComponent(projectId) + '&field=' + encodeURIComponent(field));
+    const fieldData = data.items ? data.items[0] : data;
+    if (!fieldData) return;
+
+    // Load history for this field
+    let history = [];
+    try {
+      const histData = await api('/api/state/history?project_id=' + encodeURIComponent(projectId) + '&field=' + encodeURIComponent(field) + '&limit=20');
+      history = Array.isArray(histData) ? histData : (histData.items || []);
+    } catch {}
+
+    let html = '';
+
+    // Field name
+    html += '<div class="state-detail-field">';
+    html += '<div class="state-detail-label">Field</div>';
+    html += '<div class="state-detail-value" style="font-weight:700;color:var(--accent)">' + escapeHtml(fieldData.field) + '</div>';
+    html += '</div>';
+
+    // Full value
+    html += '<div class="state-detail-field">';
+    html += '<div class="state-detail-label">Value</div>';
+    let displayValue = fieldData.value || '(empty)';
+    try {
+      const parsed = JSON.parse(displayValue);
+      displayValue = JSON.stringify(parsed, null, 2);
+    } catch {}
+    html += '<div class="state-detail-full-value">' + escapeHtml(displayValue) + '</div>';
+    html += '</div>';
+
+    // Owner
+    html += '<div class="state-detail-field">';
+    html += '<div class="state-detail-label">Owner</div>';
+    html += '<div class="state-detail-value">' + escapeHtml(fieldData.owner || 'None') + '</div>';
+    html += '</div>';
+
+    // Version
+    html += '<div class="state-detail-field">';
+    html += '<div class="state-detail-label">Version</div>';
+    html += '<div class="state-detail-value"><span class="state-field-version">v' + (fieldData.version || 1) + '</span></div>';
+    html += '</div>';
+
+    // Approval required
+    if (fieldData.approval_required) {
+      html += '<div class="state-detail-field">';
+      html += '<div class="state-detail-label">Approval</div>';
+      html += '<div class="state-detail-value"><span class="state-field-approval-badge">approval required</span></div>';
+      html += '</div>';
+    }
+
+    // Subscribers
+    if (fieldData.subscribers && fieldData.subscribers.length > 0) {
+      const subs = Array.isArray(fieldData.subscribers) ? fieldData.subscribers : JSON.parse(fieldData.subscribers || '[]');
+      if (subs.length > 0) {
+        html += '<div class="state-detail-field">';
+        html += '<div class="state-detail-label">Subscribers</div>';
+        html += '<div class="state-detail-value">' + escapeHtml(subs.join(', ')) + '</div>';
+        html += '</div>';
+      }
+    }
+
+    // Updated by / at
+    html += '<div class="state-detail-field">';
+    html += '<div class="state-detail-label">Last Updated</div>';
+    html += '<div class="state-detail-value" style="font-size:12px;color:var(--text-dim)">';
+    html += escapeHtml(fieldData.updated_by || '') + ' &middot; ' + escapeHtml(fieldData.updated_at || '');
+    html += '</div>';
+    html += '</div>';
+
+    // Change history
+    if (history.length > 0) {
+      html += '<div class="state-detail-field">';
+      html += '<div class="state-detail-label">Change History</div>';
+      html += renderChangeLog(history);
+      html += '</div>';
+    }
+
+    document.getElementById('state-detail-body').innerHTML = html;
+    document.getElementById('state-field-detail').classList.add('active');
+  } catch (e) {
+    console.error('Failed to load field detail:', e);
+    alert('Failed to load field detail: ' + e.message);
+  }
+}
+
+function closeFieldDetail() {
+  document.getElementById('state-field-detail').classList.remove('active');
+}
+
+async function loadChangeLog(projectId, field) {
+  try {
+    const data = await api('/api/state/history?project_id=' + encodeURIComponent(projectId) + '&field=' + encodeURIComponent(field) + '&limit=20');
+    return Array.isArray(data) ? data : (data.items || []);
+  } catch (e) {
+    console.error('Failed to load change log:', e);
+    return [];
+  }
+}
+
+</script>
+</body>
+</html>

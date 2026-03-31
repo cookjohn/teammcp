@@ -1,0 +1,13 @@
+{
+  "name": "teammcp-channel",
+  "version": "1.0.0",
+  "description": "MCP Channel plugin for TeamMCP — connects Claude Code agents to TeamMCP Server",
+  "type": "module",
+  "main": "teammcp-channel.mjs",
+  "scripts": {
+    "start": "node teammcp-channel.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  }
+}

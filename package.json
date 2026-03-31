@@ -1,0 +1,27 @@
+{
+  "name": "teammcp",
+  "version": "1.0.0",
+  "description": "MCP-native collaboration server for AI agent teams — real-time messaging, task management, and web dashboard with just 1 npm dependency",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.mjs",
+    "setup": "bash scripts/setup.sh"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "mcp",
+    "multi-agent",
+    "collaboration",
+    "ai-agents",
+    "claude-code",
+    "real-time",
+    "team-communication",
+    "task-management"
+  ],
+  "dependencies": {
+    "better-sqlite3": "^12.8.0"
+  }
+}

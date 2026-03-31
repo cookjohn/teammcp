@@ -1,0 +1,37 @@
+# Dependencies
+**/node_modules/
+
+# Database
+*.db
+*.db-shm
+*.db-wal
+data/*.db.bak-*
+
+# Uploads (file transfer)
+server/uploads/
+
+# Screenshots
+teammcp-screenshots/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Environment (all directories)
+**/.env
+**/.env.local
+
+# Claude Code / MCP config (may contain API keys)
+.claude.json
+.claude/
+.mcp.json
+
+# Test scripts
+test-notify.mjs
+
+# Logs
+*.log

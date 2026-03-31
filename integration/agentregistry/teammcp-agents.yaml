@@ -1,0 +1,195 @@
+# TeamMCP Agent Role Artifacts
+# Register with: arctl agent publish -f teammcp-agents.yaml
+#
+# Defines the 14 agent roles that form a complete AI team.
+# Each agent is an autonomous Claude Code process with its own
+# context, memory, and tools — communicating through TeamMCP.
+
+apiVersion: v1
+kind: AgentCatalog
+metadata:
+  name: teammcp-agent-team
+  displayName: "TeamMCP Agent Team"
+  description: >
+    A complete organizational structure of 14 AI agent roles,
+    from C-suite to engineering to QA, designed for autonomous
+    team collaboration through TeamMCP.
+  version: "1.0.0"
+
+agents:
+  # === C-Suite ===
+  - name: CEO
+    role: "Chief Executive Officer"
+    description: "Strategic decision-maker. Approves budgets, timelines, and major initiatives. Manages agent processes."
+    reports_to: null
+    permissions: [manager, process_control]
+    mcpServer: teammcp
+    capabilities:
+      - strategic-planning
+      - decision-making
+      - agent-lifecycle-management
+
+  - name: CTO
+    role: "Chief Technology Officer"
+    description: "Technical authority. Reviews architecture, evaluates technical feasibility, makes technology decisions."
+    reports_to: CEO
+    permissions: [manager]
+    mcpServer: teammcp
+    capabilities:
+      - architecture-review
+      - technical-evaluation
+      - code-review
+      - security-assessment
+
+  # === Product & Project ===
+  - name: Product
+    role: "Product Manager"
+    description: "Defines product vision and requirements. Conducts market research and competitive analysis."
+    reports_to: CEO
+    permissions: [manager]
+    mcpServer: teammcp
+    capabilities:
+      - requirements-analysis
+      - market-research
+      - competitive-analysis
+      - prd-writing
+
+  - name: PM
+    role: "Project Manager"
+    description: "Coordinates execution. Tracks progress, manages timelines, facilitates cross-role communication."
+    reports_to: CEO
+    permissions: [manager]
+    mcpServer: teammcp
+    capabilities:
+      - project-coordination
+      - task-tracking
+      - timeline-management
+      - risk-assessment
+
+  # === Engineering ===
+  - name: A
+    role: "Backend Engineer"
+    description: "Backend development and data collection. Python, FastAPI, SQLite, API design."
+    reports_to: CTO
+    permissions: [developer]
+    mcpServer: teammcp
+    capabilities:
+      - python-development
+      - api-design
+      - database-design
+      - data-collection
+
+  - name: B
+    role: "Frontend Engineer"
+    description: "Frontend development. Nuxt 3, Vue 3, Tailwind CSS, ECharts, Nginx deployment."
+    reports_to: CTO
+    permissions: [developer]
+    mcpServer: teammcp
+    capabilities:
+      - frontend-development
+      - vue-nuxt
+      - ui-implementation
+      - deployment
+
+  - name: C
+    role: "Full-Stack Engineer"
+    description: "Full-stack development and feature integration across frontend and backend."
+    reports_to: CTO
+    permissions: [developer]
+    mcpServer: teammcp
+    capabilities:
+      - fullstack-development
+      - feature-integration
+
+  # === Design ===
+  - name: Figma
+    role: "UI/UX Designer"
+    description: "Visual design, UI specifications, architecture diagrams, and design assets."
+    reports_to: Product
+    permissions: [developer]
+    mcpServer: teammcp
+    capabilities:
+      - ui-design
+      - visual-specifications
+      - diagram-creation
+      - asset-production
+
+  # === Quality Assurance ===
+  - name: QA
+    role: "QA Lead"
+    description: "QA strategy and test coordination. Manages functional, security, and stress testing."
+    reports_to: PM
+    permissions: [developer]
+    mcpServer: teammcp
+    capabilities:
+      - test-strategy
+      - qa-coordination
+      - bug-triage
+
+  - name: SecTest
+    role: "Security Tester"
+    description: "Penetration testing, vulnerability discovery, code security audits."
+    reports_to: QA
+    permissions: [developer]
+    mcpServer: teammcp
+    capabilities:
+      - penetration-testing
+      - vulnerability-discovery
+      - security-audit
+
+  - name: StressTest
+    role: "Stress Test Engineer"
+    description: "Load testing, concurrency testing, performance benchmarking."
+    reports_to: QA
+    permissions: [developer]
+    mcpServer: teammcp
+    capabilities:
+      - load-testing
+      - concurrency-testing
+      - performance-analysis
+
+  # === Operations ===
+  - name: HR
+    role: "Human Resources"
+    description: "Agent lifecycle management, onboarding, team configuration."
+    reports_to: CEO
+    permissions: [process_control]
+    mcpServer: teammcp
+    capabilities:
+      - agent-management
+      - onboarding
+      - configuration
+
+  - name: Audit
+    role: "Internal Audit"
+    description: "Compliance verification, security audits, process reviews."
+    reports_to: CEO
+    permissions: [developer]
+    mcpServer: teammcp
+    capabilities:
+      - compliance-audit
+      - security-review
+      - process-verification
+
+  # === Intelligence ===
+  - name: Marketing
+    role: "Marketing"
+    description: "Content creation, messaging frameworks, launch communications."
+    reports_to: Product
+    permissions: [developer]
+    mcpServer: teammcp
+    capabilities:
+      - content-writing
+      - messaging-strategy
+      - launch-planning
+
+  - name: MarketIntel
+    role: "Market Intelligence"
+    description: "Market research, competitive analysis, data-driven strategic insights."
+    reports_to: Product
+    permissions: [developer]
+    mcpServer: teammcp
+    capabilities:
+      - market-research
+      - competitive-intelligence
+      - data-analysis
