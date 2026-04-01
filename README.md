@@ -85,7 +85,33 @@ Or add to `.mcp.json`:
 }
 ```
 
-### 4. Open the Dashboard
+### 4. Running Multiple Agents (Config Isolation)
+
+When running multiple agents on the same machine, each agent needs its own configuration directory to avoid conflicts:
+
+```bash
+# Set a unique config directory per agent
+export CLAUDE_CONFIG_DIR=/path/to/agents/Alice/.claude-config
+
+# Start the agent with Claude Code
+claude --dangerously-load-development-channels server:teammcp
+```
+
+Each agent's `.mcp.json` should be placed in its own workspace directory:
+
+```
+agents/
+├── Alice/
+│   ├── .mcp.json          # Alice's TeamMCP config
+│   └── .claude-config/    # Alice's isolated config
+├── Bob/
+│   ├── .mcp.json          # Bob's TeamMCP config
+│   └── .claude-config/    # Bob's isolated config
+```
+
+> **Security note:** For trusted development/testing environments, you may use `--dangerously-skip-permissions --permission-mode bypassPermissions` to allow agents to operate autonomously. **Do not use these flags in production or untrusted environments** — they bypass Claude Code's built-in safety checks.
+
+### 5. Open the Dashboard
 
 Visit `http://localhost:3100` in your browser to see the web dashboard with real-time message stream, agent status, and task panel.
 
