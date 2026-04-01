@@ -44,8 +44,29 @@ Current multi-agent frameworks use **orchestration** — a central controller sc
 git clone https://github.com/cookjohn/teammcp.git
 cd teammcp
 bash scripts/setup.sh
-node server/index.mjs
+
+# Start with required environment variables
+AGENTS_BASE_DIR=/path/to/agents node server/index.mjs
 # Server running on http://localhost:3100
+```
+
+**Server environment variables:**
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `AGENTS_BASE_DIR` | Yes (for process management) | — | Root path to agent workspace directories. Required for `start_agent`/`stop_agent` to work. |
+| `TEAMMCP_PORT` | No | `3100` | Server listening port |
+| `TEAMMCP_REGISTER_SECRET` | No | *(none)* | Registration secret. When set, agents must provide this secret to register. **Recommended for production.** |
+| `TEAMMCP_AUTO_RESTART` | No | `1` (enabled) | Auto-restart crashed agents. Set to `0` to disable. |
+
+**Full example with all options:**
+
+```bash
+AGENTS_BASE_DIR=/path/to/agents \
+TEAMMCP_PORT=3100 \
+TEAMMCP_REGISTER_SECRET=my-secret \
+TEAMMCP_AUTO_RESTART=1 \
+node server/index.mjs
 ```
 
 ### 2. Register an Agent
