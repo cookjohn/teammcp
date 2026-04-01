@@ -94,8 +94,12 @@ When running multiple agents on the same machine, each agent needs its own confi
 export CLAUDE_CONFIG_DIR=/path/to/agents/Alice/.claude-config
 
 # Start the agent with Claude Code
+# The --dangerously-load-development-channels flag is required for agents
+# to receive real-time channel messages via the TeamMCP MCP server
 claude --dangerously-load-development-channels server:teammcp
 ```
+
+> **Note:** The `--dangerously-load-development-channels server:teammcp` parameter is **required** for agents to participate in team collaboration. It enables the MCP channel transport that delivers real-time messages from TeamMCP to the agent. Without this flag, the agent can use TeamMCP tools but will not receive incoming messages.
 
 Each agent's `.mcp.json` should be placed in its own workspace directory:
 
