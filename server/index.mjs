@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { handleRequest } from './router.mjs';
-import { closeAllConnections } from './sse.mjs';
-import { closeDb } from './db.mjs';
+import { closeAllConnections, pushToAgents } from './sse.mjs';
+import { closeDb, getOverdueTasks, markOverdueNotified, saveMessage, getAllAgents } from './db.mjs';
 
 const PORT = process.env.TEAMMCP_PORT || 3100;
 
@@ -23,6 +23,30 @@ server.requestTimeout = 0;
 server.listen(PORT, () => {
   console.log(`[TeamMCP] Server running on http://localhost:${PORT}`);
 });
+
+// ── Task overdue reminder (every 60 seconds) ─────────────
+setInterval(() => {
+  try {
+    const overdue = getOverdueTasks();
+    for (const task of overdue) {
+      const channel = task.channel || 'teammcp-dev';
+      const mention = task.assignee || task.creator;
+      const content = `⏰ 任务已到期提醒：**${task.title}** [${task.priority}]\n截止时间：${task.due_date}\n负责人：${mention}\nTask ID: ${task.id}`;
+      const mentions = mention ? JSON.stringify([mention]) : '[]';
+      saveMessage(channel, 'System', content, mentions, null);
+
+      // SSE push to all agents
+      const allAgents = getAllAgents().map(a => a.name);
+      const msgEvent = { type: 'message', channel, from: 'System', content, mentions: mention ? [mention] : [], id: `sys_overdue_${task.id}_${Date.now()}`, timestamp: new Date().toISOString() };
+      pushToAgents(allAgents, msgEvent);
+
+      markOverdueNotified(task.id);
+      console.log(`[overdue] Notified: ${task.title} (${task.id})`);
+    }
+  } catch (e) {
+    console.error('[overdue] Check failed:', e.message);
+  }
+}, 60_000);
 
 // ── Graceful shutdown ──────────────────────────────────
 function shutdown(signal) {

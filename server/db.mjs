@@ -826,6 +826,24 @@ export function getTaskHistory(taskId) {
   ).all(taskId);
 }
 
+export function getOverdueTasks() {
+  return db.prepare(
+    `SELECT * FROM tasks
+     WHERE status != 'done' AND deleted = 0
+       AND due_date IS NOT NULL AND due_date != ''
+       AND due_date <= datetime('now')
+       AND (metadata NOT LIKE '%"overdue_notified":true%' OR metadata IS NULL)`
+  ).all();
+}
+
+export function markOverdueNotified(taskId) {
+  const task = db.prepare('SELECT metadata FROM tasks WHERE id = ?').get(taskId);
+  let meta = {};
+  try { meta = JSON.parse(task?.metadata || '{}'); } catch {}
+  meta.overdue_notified = true;
+  db.prepare('UPDATE tasks SET metadata = ? WHERE id = ?').run(JSON.stringify(meta), taskId);
+}
+
 // ── Shared State Layer Schema ────────────────────────────
 
 db.exec(`
