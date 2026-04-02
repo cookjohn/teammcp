@@ -29,6 +29,7 @@ const CORRECT_ROLES = {
   'StressTest': '压力测试工程师',
   'Marketing': '营销/宣传专员',
   'MarketIntel': '市场情报分析师',
+  'Chairman': '董事长',
 };
 
 const db = new Database(DB_PATH);

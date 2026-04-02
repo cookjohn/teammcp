@@ -599,6 +599,16 @@ body {
   align-items: flex-end;
 }
 
+#typing-indicator {
+  padding: 2px 16px;
+  font-size: 12px;
+  color: var(--text-muted);
+  min-height: 0;
+  transition: min-height 0.15s;
+}
+#typing-indicator:not(:empty) { min-height: 20px; }
+#typing-indicator span { margin-right: 12px; }
+
 #compose-input {
   flex: 1;
   background: var(--bg-input);
@@ -1953,6 +1963,7 @@ body {
       <div class="detail-body" id="detail-body"></div>
     </div>
 
+    <div id="typing-indicator"></div>
     <div id="compose">
       <div id="reply-bar">
         <span>Replying to <strong id="reply-target"></strong></span>
@@ -2264,12 +2275,19 @@ function renderMessage(msg) {
     ? `<button class="pin-action-btn" onclick="unpinMsg('${msg.id}', event)" title="Unpin">&#128204;</button>`
     : `<button class="pin-action-btn" onclick="pinMsg('${msg.id}', event)" title="Pin">&#128204;</button>`;
 
-  return `<div class="message" data-id="${msg.id}" ondblclick="setReply('${msg.id}')">
-    <div class="msg-avatar" style="background:${color}">${agentInitial(msg.from_agent)}</div>
+  // Dashboard (chairman) message badge
+  let meta = {};
+  try { meta = typeof msg.metadata === 'string' ? JSON.parse(msg.metadata) : (msg.metadata || {}); } catch {}
+  const isDashboard = meta.source === 'dashboard';
+  const chairmanBadge = isDashboard ? '<span style="background:var(--orange);color:#fff;font-size:10px;padding:1px 5px;border-radius:3px;margin-left:4px;">Chairman</span>' : '';
+
+  return `<div class="message${isDashboard ? ' chairman-msg' : ''}" data-id="${msg.id}" ondblclick="setReply('${msg.id}')">
+    <div class="msg-avatar" style="background:${isDashboard ? 'var(--orange)' : color}">${agentInitial(msg.from_agent)}</div>
     <div class="msg-body">
       ${replyHtml}
       <div class="msg-header">
-        <span class="msg-sender" style="color:${color}">${escapeHtml(msg.from_agent)}</span>
+        <span class="msg-sender" style="color:${isDashboard ? 'var(--orange)' : color}">${escapeHtml(msg.from_agent)}</span>
+        ${chairmanBadge}
         <span class="msg-time">${time}</span>
         ${edited}
         ${pinBadge}
@@ -2461,12 +2479,49 @@ async function agentStop(name, btn) {
 let currentOutputAgent = null;
 const agentOutputData = {}; // agentName → [entries]
 
+// Agent activity/typing indicator
+const agentActivity = {}; // agentName → { text, timer }
+const ACTIVITY_TIMEOUT_MS = 30000;
+
+function updateTypingIndicator() {
+  const el = document.getElementById('typing-indicator');
+  const active = Object.entries(agentActivity)
+    .filter(([, v]) => v.text)
+    .map(([name, v]) => `<span>${escapeHtml(name)} ${escapeHtml(v.text)}</span>`);
+  el.innerHTML = active.join('');
+}
+
+function setAgentActivity(name, text) {
+  if (agentActivity[name]?.timer) clearTimeout(agentActivity[name].timer);
+  const timer = setTimeout(() => {
+    delete agentActivity[name];
+    updateTypingIndicator();
+  }, ACTIVITY_TIMEOUT_MS);
+  agentActivity[name] = { text, timer };
+  updateTypingIndicator();
+}
+
+function clearAgentActivity(name) {
+  if (agentActivity[name]?.timer) clearTimeout(agentActivity[name].timer);
+  delete agentActivity[name];
+  updateTypingIndicator();
+}
+
 function handleAgentOutput(data) {
   const name = data.agent;
   if (!agentOutputData[name]) agentOutputData[name] = [];
   agentOutputData[name].push(data);
   if (agentOutputData[name].length > 100) agentOutputData[name].shift();
   if (currentOutputAgent === name) renderAgentOutput();
+
+  // Update typing indicator
+  if (data.event === 'Stop' || data.event === 'stop') {
+    clearAgentActivity(name);
+  } else if (data.tool_name) {
+    setAgentActivity(name, `正在使用 ${data.tool_name}...`);
+  } else {
+    setAgentActivity(name, '正在思考...');
+  }
 }
 
 function openAgentOutput(name) {
@@ -2915,6 +2970,7 @@ async function sendMessage() {
     const body = {
       channel: currentChannel,
       content: content,
+      metadata: { source: 'dashboard', role: 'chairman' },
     };
     if (mentions.length > 0) body.mentions = mentions;
     if (replyToId) body.replyTo = replyToId;

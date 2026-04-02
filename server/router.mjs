@@ -68,6 +68,7 @@ function formatInboxMessage(msg) {
 // ── Rate limiter (10 msg/s per agent) ───────────────────
 
 const rateBuckets = new Map();
+const offlineNotifyCache = new Map(); // "offline_notify_{agent}" → timestamp (5 min debounce)
 
 function checkRate(agentName) {
   const now = Date.now();
@@ -264,6 +265,14 @@ export async function handleRequest(req, res) {
         return json(res, { error: 'Rate limit exceeded (10 msg/s)' }, 429);
       }
 
+      // Server-side validation: strip source=dashboard from non-CEO agents
+      if (body.metadata && typeof body.metadata === 'object' && body.metadata.source === 'dashboard') {
+        if (req.agent.name !== 'Chairman' && req.agent.name !== 'CEO') {
+          delete body.metadata.source;
+          delete body.metadata.role;
+        }
+      }
+
       let channelId = body.channel;
       let channel;
 
@@ -339,6 +348,34 @@ export async function handleRequest(req, res) {
         // Update read_status for online recipients
         for (const a of targets) {
           if (isOnline(a)) updateReadStatus(a, channelId, msg.id);
+        }
+      }
+
+      // Notify CEO when mentioned/targeted agents are offline
+      const offlineTargets = new Set();
+      if (channel.type === 'dm') {
+        const parts = channelId.split(':');
+        const other = parts[1] === req.agent.name ? parts[2] : parts[1];
+        if (!isOnline(other) && other !== 'CEO' && other !== 'Chairman') offlineTargets.add(other);
+      } else if (body.mentions && Array.isArray(body.mentions)) {
+        for (const m of body.mentions) {
+          if (!isOnline(m) && m !== 'CEO' && m !== 'Chairman' && m !== req.agent.name) offlineTargets.add(m);
+        }
+      }
+      // Send DM to Chairman (and CEO) for each offline target (debounced: 5 min)
+      for (const target of offlineTargets) {
+        const cacheKey = `offline_notify_${target}`;
+        if (!offlineNotifyCache.has(cacheKey) || Date.now() - offlineNotifyCache.get(cacheKey) > 300_000) {
+          offlineNotifyCache.set(cacheKey, Date.now());
+          const notifyContent = `Agent ${target} 当前离线，有来自 ${req.agent.name} 的消息待处理。是否需要启动？`;
+          // Notify Chairman
+          const chairDm = getOrCreateDmChannel('System', 'Chairman');
+          const chairMsg = saveMessage(chairDm.id, 'System', notifyContent, JSON.stringify(['Chairman']), null);
+          pushToAgent('Chairman', { type: 'message', channel: chairDm.id, from: 'System', content: notifyContent, mentions: ['Chairman'], id: chairMsg.id, timestamp: chairMsg.created_at });
+          // Also notify CEO
+          const ceoDm = getOrCreateDmChannel('System', 'CEO');
+          const ceoMsg = saveMessage(ceoDm.id, 'System', notifyContent, JSON.stringify(['CEO']), null);
+          pushToAgent('CEO', { type: 'message', channel: ceoDm.id, from: 'System', content: notifyContent, mentions: ['CEO'], id: ceoMsg.id, timestamp: ceoMsg.created_at });
         }
       }
 

@@ -57,7 +57,7 @@ export function getAgentErrorBuffer(agentName) {
 // Crash detection: track pending restart timers to avoid duplicate restarts
 const crashTimers = new Map(); // agentName → timerId
 const CRASH_DETECT_DELAY_MS = 30_000; // 30 seconds before declaring crash
-const AUTO_RESTART_ENABLED = process.env.TEAMMCP_AUTO_RESTART !== '0';
+const AUTO_RESTART_ENABLED = process.env.TEAMMCP_AUTO_RESTART === '1';
 
 // Restart rate limiting: max 3 restarts per 5 minutes per agent
 const MAX_RESTARTS = 3;

@@ -485,7 +485,7 @@ export function getAgentProcessStatus(name) {
 const ALLOWED_ROLES = ['CEO', '人力资源'];
 
 export function checkProcessPermission(agent) {
-  return agent.name === 'CEO' || agent.name === 'HR' || ALLOWED_ROLES.includes(agent.role);
+  return agent.name === 'Chairman' || agent.name === 'CEO' || agent.name === 'HR' || ALLOWED_ROLES.includes(agent.role);
 }
 
 // P1: Periodic credential sync — copy ~/.claude/.credentials.json to all agent config dirs every 30 min
