@@ -1,7 +1,34 @@
 import { setAgentStatus, getUnreadMessages, getUnreadCount, getUnreadMentions, getLastNMessages, getStateChangesSince, getAgentByName, batchUpdateReadStatus, saveMessage } from './db.mjs';
+import { isStopped } from './process-manager.mjs';
 
 // Map: agentName → Set<res>  (one agent may have multiple SSE connections)
 const connections = new Map();
+
+// Agent output ring buffer: agentName → Array (max 100 entries per agent)
+const AGENT_OUTPUT_MAX = 100;
+const agentOutputBuffers = new Map();
+
+export function pushAgentOutput(agentName, data) {
+  // Store in ring buffer
+  if (!agentOutputBuffers.has(agentName)) {
+    agentOutputBuffers.set(agentName, []);
+  }
+  const buf = agentOutputBuffers.get(agentName);
+  buf.push(data);
+  if (buf.length > AGENT_OUTPUT_MAX) buf.shift();
+
+  // Push to all SSE connections (Dashboard will filter by agent)
+  const payload = `data: ${JSON.stringify({ type: 'agent-output', agent: agentName, ...data })}\n\n`;
+  for (const [, set] of connections) {
+    for (const r of set) {
+      try { r.write(payload); } catch {}
+    }
+  }
+}
+
+export function getAgentOutputBuffer(agentName) {
+  return agentOutputBuffers.get(agentName) || [];
+}
 
 // Crash detection: track pending restart timers to avoid duplicate restarts
 const crashTimers = new Map(); // agentName → timerId
@@ -49,6 +76,12 @@ function scheduleCrashDetection(agentName) {
 
     // Check if agent reconnected during the wait
     if (isOnline(agentName)) return;
+
+    // Skip crash alert for agents that were intentionally stopped
+    if (isStopped(agentName)) {
+      log(`${agentName}: skipping crash detection (intentionally stopped)`);
+      return;
+    }
 
     log(`${agentName} failed to reconnect within ${CRASH_DETECT_DELAY_MS / 1000}s — declaring crash`);
 

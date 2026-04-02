@@ -250,13 +250,45 @@ body {
 }
 
 /* Agents section */
+.agent-group-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  padding: 8px 12px 4px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+.agent-group-title:hover { color: var(--text-dim); }
+.agent-group-title .toggle-arrow {
+  font-size: 9px;
+  transition: transform 0.15s;
+}
+.agent-group-title .toggle-arrow.collapsed { transform: rotate(-90deg); }
+.agent-group-count {
+  font-weight: 400;
+  color: var(--text-muted);
+}
+
+.agent-grid {
+  padding: 0 4px;
+}
+.agent-grid.offline-grid { margin-top: 4px; }
+.agent-grid.offline-grid .agent-item { padding: 3px 12px; }
+
 .agent-item {
   display: flex;
   align-items: center;
-  padding: 6px 12px;
+  padding: 5px 12px;
   gap: 8px;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-dim);
+  position: relative;
+  min-width: 0;
 }
 
 .agent-dot {
@@ -265,16 +297,85 @@ body {
   flex-shrink: 0;
 }
 
-.agent-dot.online { background: var(--green); }
+.agent-dot.online { background: var(--green); box-shadow: 0 0 4px var(--green); }
 .agent-dot.offline { background: var(--text-muted); }
 
-.agent-name { flex: 1; }
-.agent-role {
-  font-size: 11px;
-  color: var(--text-muted);
-  background: var(--bg);
-  padding: 2px 6px;
+.agent-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.agent-self-tag { color: var(--accent); font-size: 12px; }
+.agent-actions {
+  display: none;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.agent-item:hover .agent-actions { display: flex; }
+.agent-btn {
+  font-size: 12px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.agent-btn:hover { background: var(--bg-msg-hover); color: var(--text); }
+.agent-btn.start { border-color: var(--green); color: var(--green); }
+.agent-btn.start:hover { background: rgba(61,214,140,0.15); }
+.agent-btn.stop { border-color: var(--red); color: var(--red); }
+.agent-btn.stop:hover { background: rgba(229,83,75,0.15); }
+.agent-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+/* Agent Output Panel */
+#agent-output-panel {
+  display: none;
+  position: fixed;
+  right: 0; top: 0; bottom: 0;
+  width: 420px;
+  background: var(--bg-sidebar);
+  border-left: 1px solid var(--border);
+  z-index: 100;
+  flex-direction: column;
+}
+#agent-output-panel.visible { display: flex; }
+#agent-output-header {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600; font-size: 14px;
+}
+#agent-output-header .close-btn {
+  margin-left: auto; cursor: pointer; color: var(--text-dim);
+  background: none; border: none; font-size: 18px;
+}
+#agent-output-header .close-btn:hover { color: var(--text); }
+#agent-output-log {
+  flex: 1; overflow-y: auto; padding: 8px 12px;
+  font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px;
+}
+.output-entry { padding: 6px 0; border-bottom: 1px solid var(--border); }
+.output-entry .output-meta { color: var(--text-muted); font-size: 11px; margin-bottom: 2px; }
+.output-entry .output-tool { color: var(--accent); }
+.output-entry .output-result {
+  color: var(--text-dim); white-space: pre-wrap; word-break: break-all;
+  max-height: 100px; overflow: hidden;
+}
+.output-entry .output-result.expanded { max-height: none; }
+.output-entry .output-expand {
+  color: var(--accent); cursor: pointer; font-size: 11px; background: none; border: none;
+}
+.agent-role {
+  font-size: 12px;
+  color: var(--text-dim);
+  max-width: 160px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 0 1 auto;
 }
 
 /* ── Main Content ─────────────────────────────────────── */
@@ -627,6 +728,7 @@ body {
 }
 
 .agent-item:hover { background: var(--bg-msg); }
+.agent-item.self { cursor: default; border-left: 2px solid var(--accent); }
 
 /* ── Tasks View ──────────────────────────────────────── */
 #tasks-container {
@@ -1770,8 +1872,8 @@ body {
       </ul>
     </div>
     <!-- Agents -->
-    <div class="sidebar-section">
-      <div class="sidebar-section-title">Agents</div>
+    <div class="sidebar-section" style="border-top: 1px solid var(--border); margin-top: 4px; padding-top: 12px;">
+      <div class="sidebar-section-title" id="agents-title">Agents</div>
       <div id="agent-list"></div>
     </div>
   </div>
@@ -2251,28 +2353,161 @@ function renderMarkdown(text) {
 }
 
 // ── Agents ───────────────────────────────────────────────
+let offlineCollapsed = true;
+
 function renderAgents() {
   const container = document.getElementById('agent-list');
-  // Sort: online first
-  const sorted = [...agents].sort((a, b) => {
-    if (a.status === 'online' && b.status !== 'online') return -1;
-    if (a.status !== 'online' && b.status === 'online') return 1;
-    return a.name.localeCompare(b.name);
-  });
+  const online = agents.filter(a => a.status === 'online').sort((a, b) => a.name.localeCompare(b.name));
+  const offline = agents.filter(a => a.status !== 'online').sort((a, b) => a.name.localeCompare(b.name));
+
+  // Update title with count
+  document.getElementById('agents-title').textContent = `Agents (${online.length}/${agents.length})`;
 
   let html = '';
-  for (const a of sorted) {
-    const online = a.status === 'online';
-    const roleHtml = a.role ? `<span class="agent-role">${escapeHtml(a.role)}</span>` : '';
-    const isSelf = a.name === agentName;
-    const title = isSelf ? 'You' : 'Click to DM ' + a.name;
-    html += `<div class="agent-item" title="${title}" onclick="${isSelf ? '' : "openDmWithAgent('" + escapeHtml(a.name) + "')"}">
-      <span class="agent-dot ${online ? 'online' : 'offline'}"></span>
-      <span class="agent-name">${escapeHtml(a.name)}${isSelf ? ' (you)' : ''}</span>
-      ${roleHtml}
+
+  // Online agents
+  if (online.length > 0) {
+    html += `<div class="agent-group-title" style="cursor:default">
+      <span style="color:var(--green)">●</span> Online <span class="agent-group-count">${online.length}</span>
+    </div>`;
+    html += '<div class="agent-grid">';
+    for (const a of online) html += renderAgentItem(a);
+    html += '</div>';
+  }
+
+  // Offline agents (collapsible)
+  if (offline.length > 0) {
+    html += `<div class="agent-group-title" onclick="toggleOfflineAgents()">
+      <span class="toggle-arrow ${offlineCollapsed ? 'collapsed' : ''}">▼</span>
+      Offline <span class="agent-group-count">${offline.length}</span>
+    </div>`;
+    if (!offlineCollapsed) {
+      html += '<div class="agent-grid offline-grid">';
+      for (const a of offline) html += renderAgentItem(a);
+      html += '</div>';
+    }
+  }
+
+  container.innerHTML = html;
+}
+
+function renderAgentItem(a) {
+  const online = a.status === 'online';
+  const isSelf = a.name === agentName;
+  const title = isSelf ? 'You' : 'Click to DM ' + a.name;
+  const roleHtml = a.role ? `<span class="agent-role" title="${escapeHtml(a.role)}">${escapeHtml(a.role)}</span>` : '';
+  const actionBtn = online
+    ? `<button class="agent-btn stop" onclick="event.stopPropagation(); agentStop('${escapeHtml(a.name)}', this)">Stop</button>`
+    : `<button class="agent-btn start" onclick="event.stopPropagation(); agentStart('${escapeHtml(a.name)}', this)">Start</button>`;
+
+  return `<div class="agent-item ${isSelf ? 'self' : ''}" title="${title}" onclick="${isSelf ? '' : "openDmWithAgent('" + escapeHtml(a.name) + "')"}">
+    <span class="agent-dot ${online ? 'online' : 'offline'}"></span>
+    <span class="agent-name">${escapeHtml(a.name)}${isSelf ? ' <span class="agent-self-tag">(you)</span>' : ''}</span>
+    ${roleHtml}
+    <span class="agent-actions">
+      <button class="agent-btn" onclick="event.stopPropagation(); openAgentOutput('${escapeHtml(a.name)}')" title="View output">Log</button>
+      ${actionBtn}
+    </span>
+  </div>`;
+}
+
+function toggleOfflineAgents() {
+  offlineCollapsed = !offlineCollapsed;
+  renderAgents();
+}
+
+async function agentStart(name, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Starting...';
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(name)}/start`, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + API_KEY }
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Failed: ${res.status}`);
+    }
+    await refreshAgents();
+  } catch (e) {
+    alert(`Start ${name} failed: ${e.message}`);
+    btn.disabled = false;
+    btn.textContent = 'Start';
+  }
+}
+
+async function agentStop(name, btn) {
+  if (!confirm(`Stop agent ${name}?`)) return;
+  btn.disabled = true;
+  btn.textContent = 'Stopping...';
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(name)}/stop`, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + API_KEY }
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.error || `Failed: ${res.status}`);
+    }
+    await refreshAgents();
+  } catch (e) {
+    alert(`Stop ${name} failed: ${e.message}`);
+    btn.disabled = false;
+    btn.textContent = 'Stop';
+  }
+}
+
+// Agent Output Panel
+let currentOutputAgent = null;
+const agentOutputData = {}; // agentName → [entries]
+
+function handleAgentOutput(data) {
+  const name = data.agent;
+  if (!agentOutputData[name]) agentOutputData[name] = [];
+  agentOutputData[name].push(data);
+  if (agentOutputData[name].length > 100) agentOutputData[name].shift();
+  if (currentOutputAgent === name) renderAgentOutput();
+}
+
+function openAgentOutput(name) {
+  currentOutputAgent = name;
+  document.getElementById('agent-output-panel').classList.add('visible');
+  document.getElementById('agent-output-title').textContent = `${name} Output`;
+  // Load history if empty
+  if (!agentOutputData[name]) {
+    agentOutputData[name] = [];
+    api(`/api/agent-output/${encodeURIComponent(name)}`).then(res => {
+      if (res.output) agentOutputData[name] = res.output;
+      renderAgentOutput();
+    }).catch(() => {});
+  }
+  renderAgentOutput();
+}
+
+function closeAgentOutput() {
+  currentOutputAgent = null;
+  document.getElementById('agent-output-panel').classList.remove('visible');
+}
+
+function renderAgentOutput() {
+  const log = document.getElementById('agent-output-log');
+  const entries = agentOutputData[currentOutputAgent] || [];
+  if (!entries.length) {
+    log.innerHTML = '<div style="color:var(--text-muted);padding:20px;text-align:center;">No output yet</div>';
+    return;
+  }
+  let html = '';
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    const time = e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : '';
+    const tool = e.tool_name ? `<span class="output-tool">${escapeHtml(e.tool_name)}</span>` : '';
+    const result = e.tool_result ? escapeHtml(String(e.tool_result)) : (e.message ? escapeHtml(String(e.message).slice(0, 500)) : '');
+    html += `<div class="output-entry">
+      <div class="output-meta">${time} ${escapeHtml(e.event || '')} ${tool}</div>
+      ${result ? `<div class="output-result">${result}</div>` : ''}
     </div>`;
   }
-  container.innerHTML = html;
+  log.innerHTML = html;
 }
 
 async function refreshAgents() {
@@ -2490,6 +2725,10 @@ function handleSSEEvent(data) {
         loadStateFields(currentProjectId);
         loadApprovals();
       }
+      break;
+
+    case 'agent-output':
+      handleAgentOutput(data);
       break;
   }
 }
@@ -2709,6 +2948,11 @@ async function sendMessage() {
     messages.push(msg);
     renderMessages(true);
 
+    // Refresh channels so new DM channels appear in sidebar
+    if (currentChannel.startsWith('dm:') && !channels.find(c => c.id === currentChannel)) {
+      refreshChannels();
+    }
+
     // Clear input
     input.value = '';
     input.style.height = 'auto';
@@ -2745,9 +2989,9 @@ function openDmWithAgent(name) {
   if (existing) {
     selectChannel(existing.id);
   } else {
-    // Send to dm:Name shorthand - the server will create the channel
-    // For now, just set the current channel to dm:Name and refresh
-    currentChannel = 'dm:' + name;
+    // Use full sorted channel ID so SSE events match
+    currentChannel = dmId1;
+    switchToMessages();
     updateComposeUI();
     document.getElementById('ch-icon').innerHTML = '&#9993;';
     document.getElementById('ch-name').textContent = 'DM with ' + name;
@@ -2755,7 +2999,7 @@ function openDmWithAgent(name) {
     document.getElementById('messages-container').innerHTML = '<div class="empty-state"><div class="icon">&#9993;</div><div>Start a conversation with ' + escapeHtml(name) + '</div></div>';
     messages = [];
     // Try to load history for this DM
-    loadMessages('dm:' + name).then(() => refreshChannels());
+    loadMessages(dmId1).then(() => refreshChannels());
   }
 }
 
@@ -3793,5 +4037,15 @@ async function loadChangeLog(projectId, field) {
 }
 
 </script>
+
+<!-- Agent Output Panel -->
+<div id="agent-output-panel">
+  <div id="agent-output-header">
+    <span id="agent-output-title">Agent Output</span>
+    <button class="close-btn" onclick="closeAgentOutput()">&times;</button>
+  </div>
+  <div id="agent-output-log"></div>
+</div>
+
 </body>
 </html>

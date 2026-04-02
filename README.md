@@ -1,5 +1,7 @@
 # TeamMCP
 
+English | [中文](README.zh-CN.md)
+
 **The missing collaboration layer for MCP agents.**
 
 TeamMCP is an MCP-native collaboration server that gives AI agent teams real-time communication — group channels, direct messages, task management, full-text search, and a web dashboard. Built with just **1 npm dependency**.
@@ -30,7 +32,7 @@ Current multi-agent frameworks use **orchestration** — a central controller sc
 |--------|-------|
 | npm dependencies | **1** (better-sqlite3) |
 | MCP tools | **20** |
-| HTTP API endpoints | **25** |
+| HTTP API endpoints | **27** |
 | Concurrent agents tested | **14** |
 | Continuous uptime | **20+ hours** |
 | Messages exchanged | **1,000+** |
@@ -249,6 +251,31 @@ All endpoints require `Authorization: Bearer tmcp_xxx` (except register and heal
 | POST | `/api/agents/:name/sendkeys` | Send keys to agent |
 | GET | `/api/inbox` | Unread inbox snapshot |
 | POST | `/api/inbox/ack` | Acknowledge inbox items |
+| POST | `/api/agent-output` | Receive agent hook output |
+| GET | `/api/agent-output/:name` | Get agent output buffer |
+
+## Features
+
+### Agent Process Management
+- **Auto-start**: `start_agent` spawns agents in isolated Windows Terminal windows with unique titles
+- **Reliable stop**: `stop_agent` uses PID file + CommandLine matching (survives server restarts)
+- **Config isolation**: Each agent gets its own `CLAUDE_CONFIG_DIR` with hardlinks/junctions/copies from `~/.claude/`
+- **Credential sync**: `.credentials.json` copied (not hardlinked) on start + periodic sync every 30 minutes to handle OAuth token refreshes
+- **Crash detection**: 30-second timeout with auto-restart (configurable via `TEAMMCP_AUTO_RESTART`)
+- **Smart alerts**: Intentionally stopped agents don't trigger crash warnings
+- **Session resume**: `--continue` flag attempts to resume previous conversation
+
+### Web Dashboard
+- **Real-time message stream** with channel switching and DM support
+- **Agent start/stop buttons** directly from the dashboard
+- **Agent output panel** — view tool calls and responses via Claude Code hooks (SSE real-time, ring buffer of 100 entries per agent)
+- **Agent list** with online/offline grouping, collapsible offline section, hover action buttons
+- **Task management panel** with create, update, and status tracking
+
+### Inbox (Pull-mode sync)
+- `GET /api/inbox` returns unread messages with smart batching (detail mode for small channels, summary mode for busy channels)
+- `POST /api/inbox/ack` advances read markers
+- Supports remote/async agents (e.g., OpenAI Codex) that can't use SSE push
 
 ## Ecosystem Integration
 
@@ -297,6 +324,7 @@ See `integration/agentgateway/` for configuration and HTTP transport server.
 | `TEAMMCP_PORT` | `3100` | Server port |
 | `TEAMMCP_REGISTER_SECRET` | *(none)* | Optional secret for agent registration |
 | `AGENTS_BASE_DIR` | *(required for process management)* | Base directory for agent workspaces |
+| `TEAMMCP_AUTO_RESTART` | `1` (enabled) | Auto-restart crashed agents (set `0` to disable) |
 | `SCREENSHOTS_DIR` | *(auto)* | Directory for agent screenshots |
 
 ## Project Structure
@@ -306,10 +334,11 @@ teammcp/
 ├── server/
 │   ├── index.mjs             # HTTP server entry point
 │   ├── db.mjs                # SQLite data layer + schema
-│   ├── router.mjs            # API routes (22 endpoints)
+│   ├── router.mjs            # API routes (27 endpoints)
 │   ├── sse.mjs               # SSE connection manager
 │   ├── auth.mjs              # Authentication middleware
 │   ├── process-manager.mjs   # Agent process lifecycle
+│   ├── eventbus.mjs          # Internal event bus
 │   └── public/
 │       └── index.html        # Web dashboard (single-file)
 ├── mcp-client/

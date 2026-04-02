@@ -4,12 +4,18 @@
  */
 
 import { exec } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync, unlinkSync, copyFileSync, readdirSync, statSync, cpSync, symlinkSync, linkSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, copyFileSync, readdirSync, statSync, cpSync, symlinkSync, linkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
 
 // agentName → { pid, startedAt }
 const processes = new Map();
+
+// Track agents that were intentionally stopped (to suppress crash detection)
+const stoppedAgents = new Set();
+export function markStopped(name) { stoppedAgents.add(name); }
+export function clearStopped(name) { stoppedAgents.delete(name); }
+export function isStopped(name) { return stoppedAgents.has(name); }
 
 const AGENTS_BASE_DIR = process.env.AGENTS_BASE_DIR;
 const SCREENSHOTS_DIR = process.env.SCREENSHOTS_DIR || (AGENTS_BASE_DIR ? join(AGENTS_BASE_DIR, '..', 'teammcp-screenshots') : null);
@@ -59,6 +65,8 @@ export async function startAgent(name) {
     throw Object.assign(new Error('Invalid agent name'), { statusCode: 400 });
   }
 
+  clearStopped(name); // Clear intentional-stop flag on restart
+
   if (processes.has(name)) {
     throw Object.assign(new Error(`Agent "${name}" process already tracked (PID: ${processes.get(name).pid})`), { statusCode: 400 });
   }
@@ -83,13 +91,17 @@ export async function startAgent(name) {
         if (entry === 'settings.local.json') continue; // let project-level .claude/settings.local.json take precedence
         const src = join(defaultClaudeDir, entry);
         const dst = join(configDir, entry);
-        if (existsSync(dst)) continue; // don't overwrite existing per-agent state
         try {
-          if (statSync(src).isDirectory()) {
+          if (entry === '.credentials.json') {
+            // Credentials: always copy (hardlinks break when OAuth token refreshes via file replacement)
+            copyFileSync(src, dst);
+          } else if (existsSync(dst)) {
+            continue; // don't overwrite existing per-agent state for other files
+          } else if (statSync(src).isDirectory()) {
             // Directories use junctions (no admin needed on Windows)
             symlinkSync(src, dst, 'junction');
           } else {
-            // Files use hardlinks (no admin needed, stays in sync with original)
+            // Other files use hardlinks (no admin needed, stays in sync with original)
             linkSync(src, dst);
           }
         } catch {}
@@ -105,40 +117,148 @@ export async function startAgent(name) {
     try { copyFileSync(globalClaudeJson, agentClaudeJson); } catch {}
   }
 
+  // Read agent's TEAMMCP_KEY from .mcp.json for hook authentication and _start.cmd
+  let agentKey = '';
+  const mcpJsonPath = join(agentDir, '.mcp.json');
+  if (existsSync(mcpJsonPath)) {
+    try {
+      const mcpConfig = JSON.parse(readFileSync(mcpJsonPath, 'utf-8'));
+      agentKey = mcpConfig?.mcpServers?.teammcp?.env?.TEAMMCP_KEY || '';
+    } catch {}
+  }
+
+  // Auto-configure HTTP hooks for agent-output reporting to Dashboard
+  // Write actual token value into hooks config (avoids env var substitution issues)
+  const serverUrl = process.env.TEAMMCP_URL || 'http://localhost:3100';
+  const settingsDir = join(agentDir, '.claude');
+  if (!existsSync(settingsDir)) mkdirSync(settingsDir, { recursive: true });
+  const settingsPath = join(settingsDir, 'settings.local.json');
+  let settings = {};
+  if (existsSync(settingsPath)) {
+    try { settings = JSON.parse(readFileSync(settingsPath, 'utf-8')); } catch {}
+  }
+  if (!settings.hooks) settings.hooks = {};
+  if (agentKey) {
+    const httpHook = [{
+      hooks: [{
+        type: 'http',
+        url: `${serverUrl}/api/agent-output?key=${agentKey}`
+      }]
+    }];
+    settings.hooks.PostToolUse = httpHook;
+    settings.hooks.Stop = httpHook;
+  }
+  try { writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8'); } catch {}
+
+  // Also write hooks to CLAUDE_CONFIG_DIR settings (in case Claude Code reads from there)
+  const configSettingsPath = join(configDir, 'settings.local.json');
+  let configSettings = {};
+  if (existsSync(configSettingsPath)) {
+    try { configSettings = JSON.parse(readFileSync(configSettingsPath, 'utf-8')); } catch {}
+  }
+  if (agentKey) {
+    if (!configSettings.hooks) configSettings.hooks = {};
+    const httpHook = [{
+      hooks: [{
+        type: 'http',
+        url: `${serverUrl}/api/agent-output?key=${agentKey}`
+      }]
+    }];
+    configSettings.hooks.PostToolUse = httpHook;
+    configSettings.hooks.Stop = httpHook;
+    try { writeFileSync(configSettingsPath, JSON.stringify(configSettings, null, 2), 'utf-8'); } catch {}
+  }
+
   // Windows: use Windows Terminal with new window and title for tracking
   // Generate a startup script to avoid multi-layer argument escaping issues
   const windowTitle = `Agent-${name}`;
   const startScript = join(agentDir, '_start.cmd');
-  writeFileSync(startScript, `@echo off\r\ncd /d "${agentDir}"\r\nset "CLAUDE_CONFIG_DIR=${configDir}"\r\nset "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"\r\nclaude --dangerously-skip-permissions --permission-mode bypassPermissions --dangerously-load-development-channels server:teammcp\r\n`, 'utf-8');
+  const pidFile = join(agentDir, '.agent.pid');
+  writeFileSync(startScript, `@echo off\r\ncd /d "${agentDir}"\r\nset "CLAUDE_CONFIG_DIR=${configDir}"\r\nset "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"\r\n${agentKey ? `set "TEAMMCP_KEY=${agentKey}"\r\nset "AGENT_NAME=${name}"\r\n` : ''}claude --continue --dangerously-skip-permissions --permission-mode bypassPermissions --dangerously-load-development-channels server:teammcp || claude --dangerously-skip-permissions --permission-mode bypassPermissions --dangerously-load-development-channels server:teammcp\r\n`, 'utf-8');
 
-  const psCmd = `$p = Start-Process -FilePath 'wt.exe' -ArgumentList '--window new --title ${windowTitle} cmd /k ""${startScript}""' -PassThru; Write-Output $p.Id`;
+  const psCmd = `$p = Start-Process -FilePath 'wt.exe' -ArgumentList '--window new --title ${windowTitle} cmd /c ""${startScript}""' -PassThru; Write-Output $p.Id`;
 
   const stdout = await execPS(psCmd);
-  const pid = parseInt(stdout, 10);
-  if (!pid || isNaN(pid)) {
+  const wtPid = parseInt(stdout, 10);
+  if (!wtPid || isNaN(wtPid)) {
     throw Object.assign(new Error('Failed to get process PID'), { statusCode: 500 });
   }
-  processes.set(name, { pid, windowTitle: `Agent-${name}`, startedAt: new Date().toISOString() });
-  return { pid };
+
+  // Wait briefly then find the cmd.exe child running _start.cmd and save its PID
+  await new Promise(r => setTimeout(r, 3000));
+  try {
+    const findPid = await execPSFile(`Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${name}\\_start.cmd*' -and $_.Name -eq 'cmd.exe' } | Select-Object -First 1 -ExpandProperty ProcessId`);
+    const cmdPid = parseInt(findPid.trim(), 10);
+    if (cmdPid && !isNaN(cmdPid)) {
+      writeFileSync(pidFile, String(cmdPid), 'utf-8');
+    }
+  } catch {}
+
+  processes.set(name, { pid: wtPid, windowTitle: `Agent-${name}`, startedAt: new Date().toISOString() });
+  return { pid: wtPid };
 }
 
 /**
- * Stop an agent process by killing its tracked PID.
+ * Stop an agent process by finding its window title.
+ * Uses window title "Agent-{name}" to locate the process, independent of
+ * in-memory PID tracking. Works even after server restart or for manually
+ * started agents, as long as the window title matches.
  */
-export function stopAgent(name) {
+export async function stopAgent(name) {
   if (!SAFE_NAME_RE.test(name)) {
     throw Object.assign(new Error('Invalid agent name'), { statusCode: 400 });
   }
 
-  const proc = processes.get(name);
-  if (!proc) {
-    throw Object.assign(new Error(`No tracked process for agent "${name}"`), { statusCode: 400 });
+  if (!AGENTS_BASE_DIR) {
+    throw Object.assign(new Error('AGENTS_BASE_DIR not set'), { statusCode: 500 });
   }
 
-  // Windows: taskkill with /T (tree) and /F (force) on the tracked PID
-  exec(`taskkill /PID ${proc.pid} /T /F`, { shell: 'cmd.exe' });
+  const agentDir = join(AGENTS_BASE_DIR, name);
+  const pidFile = join(agentDir, '.agent.pid');
+  const safeName = name.replace(/'/g, "''");
+  let killed = false;
 
+  // Method 1: Read .agent.pid file and kill process tree
+  if (existsSync(pidFile)) {
+    try {
+      const pid = parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
+      if (pid && !isNaN(pid)) {
+        exec(`taskkill /PID ${pid} /T /F`, { shell: 'cmd.exe' });
+        killed = true;
+      }
+    } catch {}
+    try { unlinkSync(pidFile); } catch {}
+  }
+
+  // Method 2: Find by CommandLine matching (fallback)
+  if (!killed) {
+    try {
+      const psScript = `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*agents\\${safeName}*' -or $_.CommandLine -like '*Agent-${safeName}*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; $_.ProcessId }`;
+      const stdout = await execPSFile(psScript);
+      const killedPids = stdout.trim().split('\n').filter(s => s.trim()).map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
+      if (killedPids.length > 0) killed = true;
+    } catch {}
+  }
+
+  // Method 3: Tracked PID from memory (last resort)
+  const proc = processes.get(name);
+  if (proc && proc.pid) {
+    exec(`taskkill /PID ${proc.pid} /T /F`, { shell: 'cmd.exe' });
+    killed = true;
+  }
   processes.delete(name);
+
+  // Close the Windows Terminal window by finding it via CommandLine
+  try {
+    await execPSFile(`Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'WindowsTerminal.exe' -and $_.CommandLine -like '*Agent-${safeName}*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`);
+  } catch {}
+
+  if (!killed) {
+    throw Object.assign(new Error(`No process found for agent "${name}"`), { statusCode: 400 });
+  }
+
+  markStopped(name); // Suppress crash detection for intentional stops
+  return { stopped: name };
 }
 
 /**
@@ -351,3 +471,28 @@ const ALLOWED_ROLES = ['CEO', '人力资源'];
 export function checkProcessPermission(agent) {
   return agent.name === 'CEO' || agent.name === 'HR' || ALLOWED_ROLES.includes(agent.role);
 }
+
+// P1: Periodic credential sync — copy ~/.claude/.credentials.json to all agent config dirs every 30 min
+const CREDENTIAL_SYNC_INTERVAL_MS = 30 * 60_000;
+
+function syncCredentials() {
+  if (!AGENTS_BASE_DIR) return;
+  const defaultCreds = join(homedir(), '.claude', '.credentials.json');
+  if (!existsSync(defaultCreds)) return;
+
+  let synced = 0;
+  for (const [name] of processes) {
+    const configDir = join(AGENTS_BASE_DIR, name, '.claude-config');
+    if (!existsSync(configDir)) continue;
+    const dst = join(configDir, '.credentials.json');
+    try {
+      copyFileSync(defaultCreds, dst);
+      synced++;
+    } catch {}
+  }
+  if (synced > 0) {
+    console.log(`[credential-sync] Synced .credentials.json to ${synced} agent(s)`);
+  }
+}
+
+setInterval(syncCredentials, CREDENTIAL_SYNC_INTERVAL_MS);

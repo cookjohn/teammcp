@@ -26,7 +26,8 @@ import {
 import { requireAuth } from './auth.mjs';
 import {
   addConnection, pushToAgent, pushToAgents,
-  broadcastStatus, sendMissedMessages, isOnline, getOnlineAgents
+  broadcastStatus, sendMissedMessages, isOnline, getOnlineAgents,
+  pushAgentOutput, getAgentOutputBuffer
 } from './sse.mjs';
 import { startAgent, stopAgent, screenshotAgent, sendKeysToAgent, getAgentProcessStatus, checkProcessPermission } from './process-manager.mjs';
 import { publish } from './eventbus.mjs';
@@ -605,6 +606,43 @@ export async function handleRequest(req, res) {
       });
     }
 
+    // ── POST /api/agent-output ────────────────────────
+    // Accepts both direct POSTs and Claude Code HTTP hook payloads
+    if (method === 'POST' && path === '/api/agent-output') {
+      const body = await readBody(req);
+      const agentName = req.agent.name;
+
+      // Map Claude Code hook payload fields to our format
+      const event = body.hook_event_name || body.event || 'unknown';
+      const toolName = body.tool_name || null;
+      const toolInput = body.tool_input || null;
+      const rawResult = body.tool_result || body.output || null;
+      const message = body.last_assistant_message || body.message || null;
+
+      // Truncate tool_result to 500 chars (Audit requirement)
+      const toolResult = typeof rawResult === 'string' && rawResult.length > 500
+        ? rawResult.slice(0, 500) + '... [truncated]'
+        : rawResult;
+
+      pushAgentOutput(agentName, {
+        event,
+        tool_name: toolName,
+        tool_input: toolInput,
+        tool_result: toolResult,
+        message: typeof message === 'string' && message.length > 500
+          ? message.slice(0, 500) + '... [truncated]'
+          : message,
+        timestamp: new Date().toISOString()
+      });
+      return json(res, { ok: true });
+    }
+
+    // ── GET /api/agent-output/:name ─────────────────
+    if (method === 'GET' && path.startsWith('/api/agent-output/') && path.split('/').length === 4) {
+      const name = path.split('/')[3];
+      return json(res, { agent: name, output: getAgentOutputBuffer(name) });
+    }
+
     // ── GET /api/channels ─────────────────────────────
     if (method === 'GET' && path === '/api/channels') {
       const channels = getChannelsForAgent(req.agent.name);
@@ -650,8 +688,8 @@ export async function handleRequest(req, res) {
       if (!target) return json(res, { error: `Agent "${name}" not registered` }, 404);
 
       try {
-        stopAgent(name);
-        return json(res, { name, status: 'stopped' });
+        const result = await stopAgent(name);
+        return json(res, { name, status: 'stopped', ...result });
       } catch (err) {
         return json(res, { error: err.message }, err.statusCode || 500);
       }
