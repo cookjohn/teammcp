@@ -306,6 +306,8 @@ const TOOLS = [
         parent_id: { type: "string", description: "父任务 ID" },
         due_date:  { type: "string", description: "截止时间" },
         labels:    { type: "array", items: { type: "string" }, description: "标签" },
+        task_type: { type: "string", enum: ["task", "milestone"], description: "任务类型" },
+        checkin_interval: { type: "string", enum: ["daily", "weekly", "biweekly"], description: "定期 check-in 频率" },
       },
       required: ["title"],
     },
@@ -338,6 +340,7 @@ const TOOLS = [
         result:   { type: "string", description: "完成成果" },
         due_date: { type: "string", description: "截止时间" },
         labels:   { type: "array", items: { type: "string" }, description: "标签" },
+        progress: { type: "number", description: "进度百分比 (0-100)" },
       },
       required: ["task_id"],
     },
@@ -606,6 +609,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (args.parent_id) body.parent_id = args.parent_id;
         if (args.due_date) body.due_date = args.due_date;
         if (args.labels) body.labels = args.labels;
+        if (args.task_type) body.task_type = args.task_type;
+        if (args.checkin_interval) body.checkin_interval = args.checkin_interval;
         const result = await apiRequest("POST", "/api/tasks", body);
         const task = result.task;
         return { content: [{ type: "text", text: `Task created: ${task.id} — ${task.title} [${task.status}]${task.assignee ? ` assigned to ${task.assignee}` : ''}` }] };
@@ -631,7 +636,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "update_task": {
         const body = {};
-        for (const f of ["status", "assignee", "priority", "title", "result", "due_date", "labels"]) {
+        for (const f of ["status", "assignee", "priority", "title", "result", "due_date", "labels", "progress"]) {
           if (args[f] !== undefined) body[f] = args[f];
         }
         const result = await apiRequest("PATCH", `/api/tasks/${args.task_id}`, body);

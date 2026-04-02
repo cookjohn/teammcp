@@ -844,6 +844,54 @@ export function markOverdueNotified(taskId) {
   db.prepare('UPDATE tasks SET metadata = ? WHERE id = ?').run(JSON.stringify(meta), taskId);
 }
 
+// ── Long-term task tracking helpers ──────────────────────
+
+// Get task with children info
+export function getTaskWithChildren(taskId) {
+  const task = getTask(taskId);
+  if (!task) return null;
+  const children = db.prepare(
+    'SELECT * FROM tasks WHERE parent_id = ? AND deleted = 0'
+  ).all(taskId);
+  const childrenDone = children.filter(c => c.status === 'done').length;
+  const autoProgress = children.length > 0 ? Math.round((childrenDone / children.length) * 100) : null;
+  return { ...task, children, children_count: children.length, children_done: childrenDone, auto_progress: autoProgress };
+}
+
+// Get tasks that need check-in reminders
+export function getCheckInDueTasks() {
+  return db.prepare(
+    `SELECT * FROM tasks WHERE status != 'done' AND deleted = 0`
+  ).all().filter(t => {
+    try {
+      const meta = JSON.parse(t.metadata || '{}');
+      if (!meta.checkin_interval || !meta.next_checkin) return false;
+      return new Date(meta.next_checkin) <= new Date();
+    } catch { return false; }
+  });
+}
+
+// Update check-in timestamps in metadata
+export function updateCheckIn(taskId) {
+  const task = db.prepare('SELECT metadata FROM tasks WHERE id = ?').get(taskId);
+  if (!task) return;
+  let meta = {};
+  try { meta = JSON.parse(task.metadata || '{}'); } catch {}
+
+  const now = new Date();
+  meta.last_checkin = now.toISOString();
+
+  // Calculate next check-in based on interval
+  const interval = meta.checkin_interval;
+  const next = new Date(now);
+  if (interval === 'daily') next.setDate(next.getDate() + 1);
+  else if (interval === 'weekly') next.setDate(next.getDate() + 7);
+  else if (interval === 'biweekly') next.setDate(next.getDate() + 14);
+  meta.next_checkin = next.toISOString();
+
+  db.prepare('UPDATE tasks SET metadata = ? WHERE id = ?').run(JSON.stringify(meta), taskId);
+}
+
 // ── Shared State Layer Schema ────────────────────────────
 
 db.exec(`

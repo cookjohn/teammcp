@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { handleRequest } from './router.mjs';
 import { closeAllConnections, pushToAgents } from './sse.mjs';
-import { closeDb, getOverdueTasks, markOverdueNotified, saveMessage, getAllAgents, getSchedulesDue, updateScheduleNextRun, getNextCronRun } from './db.mjs';
+import { closeDb, getOverdueTasks, markOverdueNotified, saveMessage, getAllAgents, getSchedulesDue, updateScheduleNextRun, getNextCronRun, getCheckInDueTasks, updateCheckIn } from './db.mjs';
 
 const PORT = process.env.TEAMMCP_PORT || 3100;
 
@@ -42,6 +42,23 @@ setInterval(() => {
 
       markOverdueNotified(task.id);
       console.log(`[overdue] Notified: ${task.title} (${task.id})`);
+    }
+
+    // Check-in reminders
+    const checkins = getCheckInDueTasks();
+    for (const task of checkins) {
+      const channel = task.channel || 'teammcp-dev';
+      const mention = task.assignee || task.creator;
+      let meta = {};
+      try { meta = JSON.parse(task.metadata || '{}'); } catch {}
+      const progress = meta.progress !== undefined ? ` (进度: ${meta.progress}%)` : '';
+      const content = `📋 定期 Check-in 提醒：**${task.title}**${progress}\n请汇报当前进展。\n负责人：${mention}\nTask ID: ${task.id}`;
+      const mentions = mention ? JSON.stringify([mention]) : '[]';
+      saveMessage(channel, 'System', content, mentions, null);
+      const allAgents = getAllAgents().map(a => a.name);
+      pushToAgents(allAgents, { type: 'message', channel, from: 'System', content, mentions: mention ? [mention] : [], id: `sys_checkin_${task.id}_${Date.now()}`, timestamp: new Date().toISOString() });
+      updateCheckIn(task.id);
+      console.log(`[checkin] Reminded: ${task.title} (${task.id})`);
     }
   } catch (e) {
     console.error('[overdue] Check failed:', e.message);

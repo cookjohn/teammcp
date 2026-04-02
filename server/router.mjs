@@ -8,6 +8,7 @@ import {
   getChannel, createChannel, getChannelsForAgent, getChannelMembers, addChannelMember,
   getOrCreateDmChannel, updateReadStatus, setAgentStatus,
   createTask, getTask, getTasks, updateTask, deleteTask, getTaskHistory, updateMessageMetadata,
+  getTaskWithChildren, getCheckInDueTasks, updateCheckIn,
   MANAGERS,
   getState, setState, getStateHistory, subscribeToState,
   getPendingApprovals, resolveApproval,
@@ -856,6 +857,23 @@ export async function handleRequest(req, res) {
 
       if (!title) return json(res, { error: 'title is required (or provide source_msg)' }, 400);
 
+      // Merge long-term task metadata
+      if (body.task_type || body.checkin_interval || body.progress !== undefined) {
+        let meta = {};
+        try { meta = JSON.parse(body.metadata || '{}'); } catch {}
+        if (body.task_type) meta.task_type = body.task_type;
+        if (body.progress !== undefined) meta.progress = body.progress;
+        if (body.checkin_interval) {
+          meta.checkin_interval = body.checkin_interval;
+          const next = new Date();
+          if (body.checkin_interval === 'daily') next.setDate(next.getDate() + 1);
+          else if (body.checkin_interval === 'weekly') next.setDate(next.getDate() + 7);
+          else if (body.checkin_interval === 'biweekly') next.setDate(next.getDate() + 14);
+          meta.next_checkin = next.toISOString();
+        }
+        body.metadata = JSON.stringify(meta);
+      }
+
       const task = createTask({
         title,
         status: body.status,
@@ -909,6 +927,26 @@ export async function handleRequest(req, res) {
         offset,
       });
 
+      // Enrich tasks with progress info
+      if (result.tasks) {
+        for (const t of result.tasks) {
+          let meta = {};
+          try { meta = JSON.parse(t.metadata || '{}'); } catch {}
+          if (meta.progress !== undefined) {
+            t.progress = meta.progress;
+          } else if (t.parent_id === null) {
+            // Calculate auto_progress from children
+            const children = getTasks({ parent_id: t.id, limit: 100 });
+            if (children.tasks && children.tasks.length > 0) {
+              const done = children.tasks.filter(c => c.status === 'done').length;
+              t.progress = Math.round((done / children.tasks.length) * 100);
+            }
+          }
+          if (meta.task_type) t.task_type = meta.task_type;
+          if (meta.checkin_interval) t.checkin_interval = meta.checkin_interval;
+        }
+      }
+
       return json(res, result);
     }
 
@@ -925,7 +963,7 @@ export async function handleRequest(req, res) {
     // ── GET /api/tasks/:id (task detail) ────────────────
     if (method === 'GET' && path.startsWith('/api/tasks/') && path.split('/').length === 4) {
       const taskId = path.split('/')[3];
-      const task = getTask(taskId);
+      const task = getTaskWithChildren(taskId);
       if (!task) return json(res, { error: 'Task not found' }, 404);
 
       // Get sub-tasks
@@ -937,7 +975,12 @@ export async function handleRequest(req, res) {
         source_message = getMessage(task.source_msg) || null;
       }
 
-      return json(res, { task: { ...task, sub_tasks, source_message } });
+      // Include progress from metadata
+      let meta = {};
+      try { meta = JSON.parse(task.metadata || '{}'); } catch {}
+      const progress = meta.progress !== undefined ? meta.progress : task.auto_progress;
+
+      return json(res, { task: { ...task, sub_tasks, source_message, progress } });
     }
 
     // ── PATCH /api/tasks/:id (update task) ──────────────
@@ -968,8 +1011,8 @@ export async function handleRequest(req, res) {
         if (!isCreator && !isAssignee) {
           return json(res, { error: 'Permission denied: only creator, assignee, or managers can update' }, 403);
         }
-        const creatorFields = ['title', 'status', 'priority', 'assignee', 'due_date', 'labels', 'result'];
-        const assigneeFields = ['status', 'result'];
+        const creatorFields = ['title', 'status', 'priority', 'assignee', 'due_date', 'labels', 'result', 'progress'];
+        const assigneeFields = ['status', 'result', 'progress'];
         const requestedFields = Object.keys(body).filter(k => k !== 'comment');
 
         for (const field of requestedFields) {
@@ -979,6 +1022,15 @@ export async function handleRequest(req, res) {
             return json(res, { error: `Permission denied: you cannot modify '${field}'` }, 403);
           }
         }
+      }
+
+      // Merge progress into metadata
+      if (body.progress !== undefined) {
+        let meta = {};
+        try { meta = JSON.parse(task.metadata || '{}'); } catch {}
+        meta.progress = body.progress;
+        body.metadata = JSON.stringify(meta);
+        delete body.progress;
       }
 
       const oldStatus = task.status;
