@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { handleRequest } from './router.mjs';
 import { closeAllConnections, pushToAgents } from './sse.mjs';
-import { closeDb, getOverdueTasks, markOverdueNotified, saveMessage, getAllAgents } from './db.mjs';
+import { closeDb, getOverdueTasks, markOverdueNotified, saveMessage, getAllAgents, getSchedulesDue, updateScheduleNextRun, getNextCronRun } from './db.mjs';
 
 const PORT = process.env.TEAMMCP_PORT || 3100;
 
@@ -45,6 +45,40 @@ setInterval(() => {
     }
   } catch (e) {
     console.error('[overdue] Check failed:', e.message);
+  }
+}, 60_000);
+
+// ── Scheduled message dispatcher (every 60 seconds) ──────
+setInterval(() => {
+  try {
+    const due = getSchedulesDue();
+    for (const sched of due) {
+      // Save the message to the channel
+      saveMessage(sched.channel, sched.created_by, sched.content, '[]', null);
+
+      // SSE push to all agents
+      const allAgents = getAllAgents().map(a => a.name);
+      const msgEvent = {
+        type: 'message',
+        channel: sched.channel,
+        from: sched.created_by,
+        content: sched.content,
+        mentions: [],
+        id: `sched_msg_${sched.id}_${Date.now()}`,
+        timestamp: new Date().toISOString(),
+      };
+      pushToAgents(allAgents, msgEvent);
+
+      // Calculate next run and update
+      const nextRun = getNextCronRun(sched.cron_expr, new Date());
+      if (nextRun) {
+        updateScheduleNextRun(sched.id, nextRun.toISOString());
+      }
+
+      console.log(`[schedule] Fired: ${sched.id} → #${sched.channel}`);
+    }
+  } catch (e) {
+    console.error('[schedule] Check failed:', e.message);
   }
 }, 60_000);
 

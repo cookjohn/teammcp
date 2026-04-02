@@ -434,6 +434,35 @@ const TOOLS = [
       },
     },
   },
+  {
+    name: "schedule_message",
+    description: "创建定时消息，按 cron 表达式定期发送到指定频道",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel:   { type: "string", description: "目标频道 ID" },
+        content:   { type: "string", description: "消息内容" },
+        cron_expr: { type: "string", description: "Cron 表达式，如 '0 9 * * *'（每天9点）, '0 9 * * 1'（每周一9点）, '*/30 * * * *'（每30分钟）" },
+      },
+      required: ["channel", "content", "cron_expr"],
+    },
+  },
+  {
+    name: "list_schedules",
+    description: "查看自己创建的定时消息列表",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "cancel_schedule",
+    description: "取消一个定时消息",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: { type: "string", description: "定时消息 ID" },
+      },
+      required: ["id"],
+    },
+  },
 ];
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
@@ -678,6 +707,32 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "ack_inbox": {
         const result = await apiRequest("POST", "/api/inbox/ack", { items: args.items || [] });
         return { content: [{ type: "text", text: `Acknowledged ${result.acknowledged} inbox item(s)` }] };
+      }
+
+      case "schedule_message": {
+        const result = await apiRequest("POST", "/api/schedules", {
+          channel: args.channel,
+          content: args.content,
+          cron_expr: args.cron_expr,
+        });
+        const s = result.schedule;
+        return { content: [{ type: "text", text: `Schedule created: ${s.id} — next run: ${s.next_run} (cron: ${s.cron_expr})` }] };
+      }
+
+      case "list_schedules": {
+        const result = await apiRequest("GET", "/api/schedules");
+        if (!result.schedules || result.schedules.length === 0) {
+          return { content: [{ type: "text", text: "(no scheduled messages)" }] };
+        }
+        const formatted = result.schedules.map(s =>
+          `${s.id} [${s.enabled ? 'ON' : 'OFF'}] #${s.channel} cron=${s.cron_expr} next=${s.next_run}\n  → ${s.content.slice(0, 80)}`
+        ).join("\n");
+        return { content: [{ type: "text", text: `${result.schedules.length} schedule(s):\n\n${formatted}` }] };
+      }
+
+      case "cancel_schedule": {
+        const result = await apiRequest("DELETE", `/api/schedules/${args.id}`);
+        return { content: [{ type: "text", text: `Schedule ${result.id} deleted` }] };
       }
 
       default:

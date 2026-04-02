@@ -21,13 +21,15 @@ import {
   checkKnowledgeGaps, updateLastKnownVersions,
   routeTask, concludeDiscussion, getPublicAuditReports,
   getUnreadCount, getUnreadMessages, getUnreadMentions, getLastNMessages,
-  getLastUnreadMessageId, getStateChangesSince
+  getLastUnreadMessageId, getStateChangesSince,
+  createSchedule, getSchedules, deleteSchedule
 } from './db.mjs';
 import { requireAuth } from './auth.mjs';
 import {
   addConnection, pushToAgent, pushToAgents,
   broadcastStatus, sendMissedMessages, isOnline, getOnlineAgents,
-  pushAgentOutput, getAgentOutputBuffer
+  pushAgentOutput, getAgentOutputBuffer,
+  pushAgentError, getAgentErrorBuffer
 } from './sse.mjs';
 import { startAgent, stopAgent, screenshotAgent, sendKeysToAgent, getAgentProcessStatus, checkProcessPermission } from './process-manager.mjs';
 import { publish } from './eventbus.mjs';
@@ -641,6 +643,72 @@ export async function handleRequest(req, res) {
     if (method === 'GET' && path.startsWith('/api/agent-output/') && path.split('/').length === 4) {
       const name = path.split('/')[3];
       return json(res, { agent: name, output: getAgentOutputBuffer(name) });
+    }
+
+    // ── POST /api/agent-error ──────────────────────────
+    // Receives error/failure events from Claude Code hooks (StopFailure, rate limits, etc.)
+    if (method === 'POST' && path === '/api/agent-error') {
+      const body = await readBody(req);
+      const agentName = req.agent.name;
+      const reason = typeof body.stop_reason === 'string' ? body.stop_reason : (body.reason || 'unknown');
+      const message = typeof body.message === 'string' && body.message.length > 500
+        ? body.message.slice(0, 500) + '... [truncated]'
+        : (body.message || '');
+
+      pushAgentError(agentName, {
+        reason,
+        message,
+        event: body.hook_event_name || body.event || 'StopFailure',
+        timestamp: new Date().toISOString()
+      });
+
+      // Also broadcast as a system message to teammcp-dev for visibility
+      if (reason === 'rate_limit' || reason.includes('rate') || reason.includes('limit')) {
+        const content = `⚠️ Agent ${agentName} 触发 rate limit: ${message || reason}`;
+        saveMessage('teammcp-dev', 'System', content, JSON.stringify([agentName]), null);
+        const allAgents = getAllAgents().map(a => a.name);
+        pushToAgents(allAgents, { type: 'message', channel: 'teammcp-dev', from: 'System', content, mentions: [agentName], id: `sys_error_${agentName}_${Date.now()}`, timestamp: new Date().toISOString() });
+      }
+
+      return json(res, { ok: true });
+    }
+
+    // ── GET /api/agent-errors/:name ─────────────────
+    if (method === 'GET' && path.startsWith('/api/agent-errors/') && path.split('/').length === 4) {
+      const name = path.split('/')[3];
+      return json(res, { agent: name, errors: getAgentErrorBuffer(name) });
+    }
+
+    // ── POST /api/schedules ─────────────────────────────
+    if (method === 'POST' && path === '/api/schedules') {
+      const body = await readBody(req);
+      if (!body.channel || !body.content || !body.cron_expr) {
+        return json(res, { error: 'channel, content, and cron_expr are required' }, 400);
+      }
+      try {
+        const schedule = createSchedule(body.channel, body.content, body.cron_expr, req.agent.name);
+        return json(res, { schedule }, 201);
+      } catch (e) {
+        return json(res, { error: e.message }, 400);
+      }
+    }
+
+    // ── GET /api/schedules ──────────────────────────────
+    if (method === 'GET' && path === '/api/schedules') {
+      const schedules = getSchedules(req.agent.name);
+      return json(res, { schedules });
+    }
+
+    // ── DELETE /api/schedules/:id ───────────────────────
+    if (method === 'DELETE' && path.startsWith('/api/schedules/') && path.split('/').length === 4) {
+      const id = path.split('/')[3];
+      try {
+        const result = deleteSchedule(id, req.agent.name);
+        return json(res, result);
+      } catch (e) {
+        const status = e.message.includes('Not authorized') ? 403 : 404;
+        return json(res, { error: e.message }, status);
+      }
     }
 
     // ── GET /api/channels ─────────────────────────────

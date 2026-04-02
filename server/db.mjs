@@ -1705,6 +1705,124 @@ export function getPublicAuditReports(projectId, reportType, limit = 20) {
   return db.prepare(`SELECT * FROM audit_reports ${where} ORDER BY generated_at DESC LIMIT ?`).all(...params, limit);
 }
 
+// ── Scheduled Messages ───────────────────────────────────
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS scheduled_messages (
+  id TEXT PRIMARY KEY,
+  channel TEXT NOT NULL,
+  content TEXT NOT NULL,
+  cron_expr TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  next_run TEXT,
+  enabled INTEGER DEFAULT 1,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+`);
+
+/**
+ * Simple cron parser — supports a small subset of cron expressions.
+ * Returns the next Date when the cron should fire, after `fromDate`.
+ */
+export function getNextCronRun(cronExpr, fromDate = new Date()) {
+  const parts = cronExpr.trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+  const [minPart, hourPart, domPart, , dowPart] = parts;
+
+  // every N minutes: */N * * * *
+  const everyMatch = minPart.match(/^\*\/(\d+)$/);
+  if (everyMatch && hourPart === '*' && domPart === '*' && dowPart === '*') {
+    const interval = parseInt(everyMatch[1], 10);
+    const next = new Date(fromDate);
+    next.setSeconds(0, 0);
+    next.setMinutes(next.getMinutes() + 1); // at least 1 minute ahead
+    // Round up to next interval boundary
+    const rem = next.getMinutes() % interval;
+    if (rem !== 0) next.setMinutes(next.getMinutes() + (interval - rem));
+    return next;
+  }
+
+  const minute = parseInt(minPart, 10);
+  const hour = parseInt(hourPart, 10);
+  if (isNaN(minute) || isNaN(hour)) return null;
+
+  // monthly: 0 H D * *
+  if (domPart !== '*' && dowPart === '*') {
+    const dom = parseInt(domPart, 10);
+    const next = new Date(fromDate);
+    next.setSeconds(0, 0);
+    next.setHours(hour, minute, 0, 0);
+    next.setDate(dom);
+    if (next <= fromDate) {
+      next.setMonth(next.getMonth() + 1);
+      next.setDate(dom);
+    }
+    return next;
+  }
+
+  // weekly: 0 H * * DOW
+  if (domPart === '*' && dowPart !== '*') {
+    const dow = parseInt(dowPart, 10); // 0=Sun, 1=Mon, ... 6=Sat
+    const next = new Date(fromDate);
+    next.setSeconds(0, 0);
+    next.setHours(hour, minute, 0, 0);
+    const currentDow = next.getDay();
+    let daysAhead = dow - currentDow;
+    if (daysAhead < 0) daysAhead += 7;
+    if (daysAhead === 0 && next <= fromDate) daysAhead = 7;
+    next.setDate(next.getDate() + daysAhead);
+    return next;
+  }
+
+  // daily: 0 H * * *
+  if (domPart === '*' && dowPart === '*') {
+    const next = new Date(fromDate);
+    next.setSeconds(0, 0);
+    next.setHours(hour, minute, 0, 0);
+    if (next <= fromDate) {
+      next.setDate(next.getDate() + 1);
+    }
+    return next;
+  }
+
+  return null;
+}
+
+export function createSchedule(channel, content, cronExpr, createdBy) {
+  const id = `sched_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+  const nextRun = getNextCronRun(cronExpr);
+  if (!nextRun) throw new Error(`Unsupported cron expression: ${cronExpr}`);
+  db.prepare(`
+    INSERT INTO scheduled_messages (id, channel, content, cron_expr, created_by, next_run)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(id, channel, content, cronExpr, createdBy, nextRun.toISOString());
+  return { id, channel, content, cron_expr: cronExpr, created_by: createdBy, next_run: nextRun.toISOString(), enabled: 1 };
+}
+
+export function getSchedules(createdBy) {
+  return db.prepare(
+    'SELECT * FROM scheduled_messages WHERE created_by = ? ORDER BY created_at DESC'
+  ).all(createdBy);
+}
+
+export function getSchedulesDue() {
+  return db.prepare(
+    `SELECT * FROM scheduled_messages WHERE enabled = 1 AND next_run <= datetime('now')`
+  ).all();
+}
+
+export function deleteSchedule(id, agentName) {
+  const sched = db.prepare('SELECT * FROM scheduled_messages WHERE id = ?').get(id);
+  if (!sched) throw new Error('Schedule not found');
+  if (sched.created_by !== agentName) throw new Error('Not authorized to delete this schedule');
+  db.prepare('DELETE FROM scheduled_messages WHERE id = ?').run(id);
+  return { id, deleted: true };
+}
+
+export function updateScheduleNextRun(id, nextRun) {
+  db.prepare('UPDATE scheduled_messages SET next_run = ? WHERE id = ?').run(nextRun, id);
+}
+
 export function closeDb() {
   try { db.close(); } catch {}
 }

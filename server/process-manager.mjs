@@ -147,6 +147,15 @@ export async function startAgent(name) {
     }];
     settings.hooks.PostToolUse = httpHook;
     settings.hooks.Stop = httpHook;
+
+    // StopFailure hook for rate limit and error capture
+    const errorHook = [{
+      hooks: [{
+        type: 'http',
+        url: `${serverUrl}/api/agent-error?key=${agentKey}`
+      }]
+    }];
+    settings.hooks.StopFailure = errorHook;
   }
   try { writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8'); } catch {}
 
@@ -166,6 +175,13 @@ export async function startAgent(name) {
     }];
     configSettings.hooks.PostToolUse = httpHook;
     configSettings.hooks.Stop = httpHook;
+    const errorHookConfig = [{
+      hooks: [{
+        type: 'http',
+        url: `${serverUrl}/api/agent-error?key=${agentKey}`
+      }]
+    }];
+    configSettings.hooks.StopFailure = errorHookConfig;
     try { writeFileSync(configSettingsPath, JSON.stringify(configSettings, null, 2), 'utf-8'); } catch {}
   }
 

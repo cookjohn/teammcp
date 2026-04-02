@@ -30,6 +30,30 @@ export function getAgentOutputBuffer(agentName) {
   return agentOutputBuffers.get(agentName) || [];
 }
 
+// Agent error tracking: agentName → Array (max 50 entries)
+const AGENT_ERROR_MAX = 50;
+const agentErrorBuffers = new Map();
+
+export function pushAgentError(agentName, data) {
+  if (!agentErrorBuffers.has(agentName)) {
+    agentErrorBuffers.set(agentName, []);
+  }
+  const buf = agentErrorBuffers.get(agentName);
+  buf.push(data);
+  if (buf.length > AGENT_ERROR_MAX) buf.shift();
+
+  const payload = `data: ${JSON.stringify({ type: 'agent-error', agent: agentName, ...data })}\n\n`;
+  for (const [, set] of connections) {
+    for (const r of set) {
+      try { r.write(payload); } catch {}
+    }
+  }
+}
+
+export function getAgentErrorBuffer(agentName) {
+  return agentErrorBuffers.get(agentName) || [];
+}
+
 // Crash detection: track pending restart timers to avoid duplicate restarts
 const crashTimers = new Map(); // agentName → timerId
 const CRASH_DETECT_DELAY_MS = 30_000; // 30 seconds before declaring crash
