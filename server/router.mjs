@@ -26,7 +26,9 @@ import {
   getLastUnreadMessageId, getStateChangesSince,
   createSchedule, getSchedules, deleteSchedule,
   saveFile, getFile,
-  getReportsTo, setReportsTo, getSubordinates
+  getReportsTo, setReportsTo, getSubordinates,
+  ackMessage, getMessageAcks,
+  setUseResume, getUseResume
 } from './db.mjs';
 import { requireAuth } from './auth.mjs';
 import {
@@ -93,7 +95,7 @@ const REGISTER_SECRET = process.env.TEAMMCP_REGISTER_SECRET || '';
 // Ensure Chairman always receives push events (admin oversight from Dashboard)
 function ensureChairman(targets, excludeName) {
   if (!targets.includes('Chairman') && excludeName !== 'Chairman') {
-    targets.push('Chairman');
+    targets.unshift('Chairman'); // Chairman first — highest priority, no stagger delay
   }
   return targets;
 }
@@ -422,6 +424,17 @@ export async function handleRequest(req, res) {
       }
 
       return json(res, { id: updated.id, content: updated.content, edited_at: updated.edited_at });
+    }
+
+    // ── POST /api/messages/:id/ack (delivery confirmation) ──────
+    if (method === 'POST' && path.match(/^\/api\/messages\/[^/]+\/ack$/) && path.split('/').length === 5) {
+      const msgId = path.split('/')[3];
+      ackMessage(msgId, req.agent.name);
+      // Push ack event to all connections (for Dashboard display)
+      const ackEvent = { type: 'message_acked', message_id: msgId, agent: req.agent.name, timestamp: new Date().toISOString() };
+      // Push to Chairman for Dashboard
+      pushToAgent('Chairman', ackEvent);
+      return json(res, { ok: true, message_id: msgId, agent: req.agent.name });
     }
 
     // ── DELETE /api/messages/:id (soft delete) ──────
@@ -838,7 +851,8 @@ export async function handleRequest(req, res) {
         role: a.role,
         status: isOnline(a.name) ? 'online' : a.status,
         lastSeen: a.last_seen,
-        reports_to: a.reports_to || null
+        reports_to: a.reports_to || null,
+        use_resume: a.use_resume !== 0
       })));
     }
 
@@ -852,7 +866,8 @@ export async function handleRequest(req, res) {
       const target = getAgentByName(name);
       if (!target) return json(res, { error: 'Agent not found' }, 404);
       if (body.reports_to !== undefined) setReportsTo(name, body.reports_to);
-      return json(res, { ok: true, agent: name, reports_to: body.reports_to });
+      if (body.use_resume !== undefined) setUseResume(name, body.use_resume);
+      return json(res, { ok: true, agent: name, reports_to: body.reports_to, use_resume: body.use_resume });
     }
 
     // ── POST /api/agents/:name/start ───────────────────

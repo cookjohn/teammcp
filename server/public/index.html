@@ -330,6 +330,7 @@ body {
 .agent-btn.stop { border-color: var(--red); color: var(--red); }
 .agent-btn.stop:hover { background: rgba(229,83,75,0.15); }
 .agent-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.agent-btn.resume-on { color: var(--green); border-color: var(--green); }
 /* Agent Output Panel */
 #agent-output-panel {
   display: none;
@@ -495,6 +496,9 @@ body {
   font-size: 11px;
   color: var(--text-muted);
 }
+
+.msg-ack { font-size: 10px; color: var(--text-muted); margin-left: 4px; }
+.msg-ack.delivered { color: var(--green); }
 
 .msg-edited {
   font-size: 10px;
@@ -2433,6 +2437,7 @@ function renderMessage(msg) {
         <span class="msg-sender" style="color:${isDashboard ? 'var(--orange)' : color}">${escapeHtml(msg.from_agent)}</span>
         ${chairmanBadge}
         <span class="msg-time">${time}</span>
+        <span class="msg-ack" data-msg-id="${msg.id}"></span>
         ${edited}
         ${pinBadge}
       </div>
@@ -2562,11 +2567,14 @@ function renderAgentItem(a) {
     ? `<button class="agent-btn stop" onclick="event.stopPropagation(); agentStop('${escapeHtml(a.name)}', this)">Stop</button>`
     : `<button class="agent-btn start" onclick="event.stopPropagation(); agentStart('${escapeHtml(a.name)}', this)">Start</button>`;
 
+  const resumeBtn = `<button class="agent-btn ${a.use_resume !== false ? 'resume-on' : ''}" onclick="event.stopPropagation(); toggleResume('${escapeHtml(a.name)}', ${a.use_resume === false})" title="Session Resume">${a.use_resume !== false ? '\u21BB' : '\u2298'}</button>`;
+
   return `<div class="agent-item ${isSelf ? 'self' : ''}" title="${title}" onclick="${isSelf ? '' : "openDmWithAgent('" + escapeHtml(a.name) + "')"}">
     <span class="agent-dot ${online ? 'online' : 'offline'}"></span>
     <span class="agent-name">${escapeHtml(a.name)}${isSelf ? ' <span class="agent-self-tag">(you)</span>' : ''}</span>
     ${roleHtml}
     <span class="agent-actions">
+      ${resumeBtn}
       <button class="agent-btn" onclick="event.stopPropagation(); openAgentOutput('${escapeHtml(a.name)}')" title="View output">Log</button>
       ${actionBtn}
     </span>
@@ -2576,6 +2584,19 @@ function renderAgentItem(a) {
 function toggleOfflineAgents() {
   offlineCollapsed = !offlineCollapsed;
   renderAgents();
+}
+
+async function toggleResume(name, enable) {
+  try {
+    await fetch(`/api/agents/${encodeURIComponent(name)}`, {
+      method: 'PATCH',
+      headers: { 'Authorization': 'Bearer ' + API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ use_resume: enable })
+    });
+    await refreshAgents();
+  } catch (e) {
+    alert('Failed: ' + e.message);
+  }
 }
 
 async function agentStart(name, btn) {
@@ -2867,6 +2888,15 @@ function handleSSEEvent(data) {
       if (data.channel === currentChannel) {
         messages = messages.filter(m => m.id !== data.id);
         renderMessages(false);
+      }
+      break;
+
+    case 'message_acked':
+      const ackEl = document.querySelector(`.msg-ack[data-msg-id="${data.message_id}"]`);
+      if (ackEl) {
+        const current = ackEl.textContent;
+        ackEl.classList.add('delivered');
+        ackEl.textContent = current ? `${current}, ${data.agent}` : `\u2713 ${data.agent}`;
       }
       break;
 

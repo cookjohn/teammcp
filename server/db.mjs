@@ -81,6 +81,9 @@ try {
   db.exec('ALTER TABLE agents ADD COLUMN reports_to TEXT DEFAULT NULL');
 } catch { /* column already exists */ }
 
+// Add use_resume column (per-agent --continue toggle, default ON)
+try { db.exec('ALTER TABLE agents ADD COLUMN use_resume INTEGER DEFAULT 1'); } catch {}
+
 // Add source column to change_log for audit categorization
 try {
   db.exec(`ALTER TABLE change_log ADD COLUMN source TEXT DEFAULT 'state'`);
@@ -221,7 +224,16 @@ export function setAgentStatus(name, status) {
 }
 
 export function getAllAgents() {
-  return db.prepare('SELECT name, role, status, last_seen, reports_to FROM agents').all();
+  return db.prepare('SELECT name, role, status, last_seen, reports_to, use_resume FROM agents').all();
+}
+
+export function setUseResume(agentName, useResume) {
+  db.prepare('UPDATE agents SET use_resume = ? WHERE name = ?').run(useResume ? 1 : 0, agentName);
+}
+
+export function getUseResume(agentName) {
+  const row = db.prepare('SELECT use_resume FROM agents WHERE name = ?').get(agentName);
+  return row?.use_resume !== 0; // Default true
 }
 
 export function getReportsTo(agentName) {
@@ -1901,6 +1913,25 @@ export function deleteSchedule(id, agentName) {
 
 export function updateScheduleNextRun(id, nextRun) {
   db.prepare('UPDATE scheduled_messages SET next_run = ? WHERE id = ?').run(nextRun, id);
+}
+
+// ── Message Acks ──────────────────────────────────────────
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS message_acks (
+  message_id TEXT NOT NULL,
+  agent_name TEXT NOT NULL,
+  acked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (message_id, agent_name)
+);
+`);
+
+export function ackMessage(messageId, agentName) {
+  db.prepare('INSERT OR IGNORE INTO message_acks (message_id, agent_name) VALUES (?, ?)').run(messageId, agentName);
+}
+
+export function getMessageAcks(messageId) {
+  return db.prepare('SELECT agent_name, acked_at FROM message_acks WHERE message_id = ?').all(messageId);
 }
 
 // ── Files ─────────────────────────────────────────────────

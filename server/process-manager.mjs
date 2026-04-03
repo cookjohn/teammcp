@@ -7,6 +7,7 @@ import { exec } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, copyFileSync, readdirSync, statSync, cpSync, symlinkSync, linkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir, homedir } from 'node:os';
+import { getUseResume } from './db.mjs';
 
 // agentName → { pid, startedAt }
 const processes = new Map();
@@ -238,7 +239,9 @@ export async function startAgent(name) {
   const windowTitle = `Agent-${name}`;
   const startScript = join(agentDir, '_start.cmd');
   const pidFile = join(agentDir, '.agent.pid');
-  writeFileSync(startScript, `@echo off\r\ncd /d "${agentDir}"\r\nset "CLAUDE_CONFIG_DIR=${configDir}"\r\nset "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"\r\n${agentKey ? `set "TEAMMCP_KEY=${agentKey}"\r\nset "AGENT_NAME=${name}"\r\n` : ''}claude --continue --dangerously-skip-permissions --permission-mode bypassPermissions --dangerously-load-development-channels server:teammcp || claude --dangerously-skip-permissions --permission-mode bypassPermissions --dangerously-load-development-channels server:teammcp\r\n`, 'utf-8');
+  const useResume = getUseResume(name);
+  const continueFlag = useResume ? '--continue ' : '';
+  writeFileSync(startScript, `@echo off\r\ncd /d "${agentDir}"\r\nset "CLAUDE_CONFIG_DIR=${configDir}"\r\nset "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"\r\n${agentKey ? `set "TEAMMCP_KEY=${agentKey}"\r\nset "AGENT_NAME=${name}"\r\n` : ''}claude ${continueFlag}--dangerously-skip-permissions --permission-mode bypassPermissions --dangerously-load-development-channels server:teammcp${useResume ? ` || claude --dangerously-skip-permissions --permission-mode bypassPermissions --dangerously-load-development-channels server:teammcp` : ''}\r\n`, 'utf-8');
 
   const psCmd = `$p = Start-Process -FilePath 'wt.exe' -ArgumentList '--window new --title ${windowTitle} cmd /c ""${startScript}""' -PassThru; Write-Output $p.Id`;
 
@@ -541,21 +544,39 @@ const CREDENTIAL_SYNC_INTERVAL_MS = 30 * 60_000;
 
 function syncCredentials() {
   if (!AGENTS_BASE_DIR) return;
-  const defaultCreds = join(homedir(), '.claude', '.credentials.json');
-  if (!existsSync(defaultCreds)) return;
+  const mainCreds = join(homedir(), '.claude', '.credentials.json');
+  if (!existsSync(mainCreds)) return;
 
-  let synced = 0;
+  let mainTime;
+  try { mainTime = statSync(mainCreds).mtimeMs; } catch { return; }
+
+  let fwdSync = 0, revSync = 0;
   for (const [name] of processes) {
     const configDir = join(AGENTS_BASE_DIR, name, '.claude-config');
     if (!existsSync(configDir)) continue;
-    const dst = join(configDir, '.credentials.json');
+    const agentCreds = join(configDir, '.credentials.json');
     try {
-      copyFileSync(defaultCreds, dst);
-      synced++;
+      if (!existsSync(agentCreds)) {
+        // Agent has no credentials yet — forward sync
+        copyFileSync(mainCreds, agentCreds);
+        fwdSync++;
+      } else {
+        const agentTime = statSync(agentCreds).mtimeMs;
+        if (agentTime > mainTime) {
+          // Agent token is newer — reverse sync to main
+          copyFileSync(agentCreds, mainCreds);
+          mainTime = agentTime; // Update for subsequent comparisons
+          revSync++;
+        } else if (mainTime > agentTime) {
+          // Main token is newer — forward sync to agent
+          copyFileSync(mainCreds, agentCreds);
+          fwdSync++;
+        }
+      }
     } catch {}
   }
-  if (synced > 0) {
-    console.log(`[credential-sync] Synced .credentials.json to ${synced} agent(s)`);
+  if (fwdSync > 0 || revSync > 0) {
+    console.log(`[credential-sync] fwd:${fwdSync} rev:${revSync}`);
   }
 }
 

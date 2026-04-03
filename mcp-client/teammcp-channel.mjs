@@ -1258,6 +1258,9 @@ function connectSSE() {
   if (sseAbort) sseAbort.abort();
   sseAbort = new AbortController();
 
+  // Fetch command chain info on connect
+  fetchMyReportsTo();
+
   const url = `${BASE_URL}/api/events`;
   log(`SSE connecting to ${url}`);
 
@@ -1316,6 +1319,17 @@ function scheduleReconnect() {
   currentDelay = Math.min(currentDelay * 1.5, MAX_RECONNECT_DELAY_MS);
 }
 
+// Command chain: fetch this agent's superior from DB at startup
+let myReportsTo = null; // Will be set from /api/agents on SSE connect
+
+async function fetchMyReportsTo() {
+  try {
+    const agents = await apiRequest("GET", "/api/agents");
+    const me = agents.find(a => a.name === AGENT_NAME);
+    myReportsTo = me?.reports_to || null;
+  } catch {}
+}
+
 // Message injection filter: only inject messages that require Agent attention
 // Reduces API calls by 80-90% by skipping irrelevant messages
 function shouldInject(event) {
@@ -1324,8 +1338,9 @@ function shouldInject(event) {
     const isDm = (event.channel || '').startsWith('dm:');
     if (isDm) return true;                                          // DM — always relevant
     if (event.mentions && event.mentions.includes(AGENT_NAME)) return true; // @ mentioned
-    if (event.from === 'Chairman') return true;                     // Chairman message — highest authority
     if (event.from === 'System') return true;                       // System notifications (overdue, checkin)
+    // Chairman messages: only inject for direct reports (reports_to = Chairman)
+    if (event.from === 'Chairman' && myReportsTo === 'Chairman') return true;
     return false;                                                   // Group chat without mention — skip
   }
   if (event.type === 'approval_requested') return true;             // Approval requests
@@ -1358,6 +1373,10 @@ function handleSSEEvent(data) {
     const msgText = `---\n**${from}** (${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })})\n\n${content}\n`;
 
     sendNotification(msgText, source, channelId);
+    // Send delivery ack
+    if (event.id) {
+      apiRequest("POST", `/api/messages/${event.id}/ack`).catch(() => {});
+    }
   } else if (event.type === "status") {
     // Status changes: only inject when agent comes online (useful context)
     // Skip offline notifications to reduce noise
