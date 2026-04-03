@@ -185,6 +185,54 @@ export async function startAgent(name) {
     try { writeFileSync(configSettingsPath, JSON.stringify(configSettings, null, 2), 'utf-8'); } catch {}
   }
 
+  // Check CLAUDE.md exists
+  const claudeMdPath = join(agentDir, 'CLAUDE.md');
+  if (!existsSync(claudeMdPath)) {
+    console.warn(`[start-agent] WARNING: ${name} has no CLAUDE.md — agent may lack role definition`);
+  }
+
+  // Auto-deploy team rules from templates
+  const possibleRulesDirs = [
+    join(AGENTS_BASE_DIR, '..', 'teammcp', 'templates', 'rules'),
+    join(AGENTS_BASE_DIR, 'PM', 'projects', 'teammcp-templates', 'rules'),
+  ];
+  const rulesTargetDir = join(agentDir, '.claude', 'rules');
+  for (const rulesSourceDir of possibleRulesDirs) {
+    if (existsSync(rulesSourceDir)) {
+      if (!existsSync(rulesTargetDir)) mkdirSync(rulesTargetDir, { recursive: true });
+      try {
+        for (const file of readdirSync(rulesSourceDir)) {
+          const src = join(rulesSourceDir, file);
+          const dst = join(rulesTargetDir, file);
+          if (statSync(src).isFile()) copyFileSync(src, dst);
+        }
+      } catch {}
+      break; // Use first found source
+    }
+  }
+
+  // Auto-deploy shared skills from templates
+  const possibleSkillsDirs = [
+    join(AGENTS_BASE_DIR, '..', 'teammcp', 'templates', 'skills'),
+    join(AGENTS_BASE_DIR, 'PM', 'projects', 'teammcp-templates', 'skills'),
+  ];
+  const skillsTargetDir = join(agentDir, '.claude', 'skills');
+  for (const skillsSourceDir of possibleSkillsDirs) {
+    if (existsSync(skillsSourceDir)) {
+      if (!existsSync(skillsTargetDir)) mkdirSync(skillsTargetDir, { recursive: true });
+      try {
+        for (const entry of readdirSync(skillsSourceDir)) {
+          const src = join(skillsSourceDir, entry);
+          const dst = join(skillsTargetDir, entry);
+          if (statSync(src).isDirectory() && !existsSync(dst)) {
+            cpSync(src, dst, { recursive: true });
+          }
+        }
+      } catch {}
+      break;
+    }
+  }
+
   // Windows: use Windows Terminal with new window and title for tracking
   // Generate a startup script to avoid multi-layer argument escaping issues
   const windowTitle = `Agent-${name}`;

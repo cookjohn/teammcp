@@ -308,6 +308,9 @@ const TOOLS = [
         labels:    { type: "array", items: { type: "string" }, description: "标签" },
         task_type: { type: "string", enum: ["task", "milestone"], description: "任务类型" },
         checkin_interval: { type: "string", enum: ["daily", "weekly", "biweekly"], description: "定期 check-in 频率" },
+        related_state: { type: "string", description: "关联的状态字段名" },
+        related_state_project: { type: "string", description: "状态字段所属项目ID" },
+        target_value: { type: "string", description: "任务完成时自动设置的目标值" },
       },
       required: ["title"],
     },
@@ -466,6 +469,230 @@ const TOOLS = [
       required: ["id"],
     },
   },
+  // -- P0 Approval Flow tools ------------------------------------------------
+  {
+    name: "request_approval",
+    description: "提交状态变更请求（非 owner 时自动转审批）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id:        { type: "string", description: "项目 ID" },
+        field:             { type: "string", description: "要变更的字段" },
+        value:             { type: "string", description: "目标值" },
+        reason:            { type: "string", description: "变更原因" },
+        owner:             { type: "string", description: "字段 owner" },
+        approval_required: { type: "boolean", description: "是否需要审批" },
+      },
+      required: ["project_id", "field", "value"],
+    },
+  },
+  {
+    name: "get_pending_approvals",
+    description: "查看待我审批的请求列表",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "resolve_approval",
+    description: "批准或拒绝审批请求",
+    inputSchema: {
+      type: "object",
+      properties: {
+        approval_id: { type: "string", description: "审批请求 ID" },
+        approved:    { type: "boolean", description: "是否批准" },
+        comment:     { type: "string", description: "审批意见" },
+      },
+      required: ["approval_id", "approved"],
+    },
+  },
+  // -- P0 Audit tools --------------------------------------------------------
+  {
+    name: "get_changelog",
+    description: "查询变更日志（仅 Audit 角色可用）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string", description: "项目 ID" },
+        field:      { type: "string", description: "字段名" },
+        changed_by: { type: "string", description: "变更人" },
+        source:     { type: "string", description: "来源" },
+        from:       { type: "string", description: "开始日期" },
+        to:         { type: "string", description: "结束日期" },
+        limit:      { type: "number", description: "返回条数" },
+      },
+    },
+  },
+  {
+    name: "generate_audit_report",
+    description: "生成审计报告（仅 Audit 角色可用）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id:  { type: "string", description: "项目 ID" },
+        report_type: { type: "string", enum: ["compliance", "efficiency", "anomaly"], description: "报告类型" },
+      },
+      required: ["project_id", "report_type"],
+    },
+  },
+  {
+    name: "get_audit_reports",
+    description: "查看已生成的审计报告（仅 Audit 角色可用）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id:  { type: "string", description: "项目 ID" },
+        report_type: { type: "string", description: "报告类型" },
+        limit:       { type: "number", description: "返回条数" },
+      },
+    },
+  },
+  {
+    name: "get_public_reports",
+    description: "查看公开审计报告（所有 Agent 可用）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id:  { type: "string", description: "项目 ID" },
+        report_type: { type: "string", description: "报告类型" },
+        limit:       { type: "number", description: "返回条数" },
+      },
+    },
+  },
+  // -- P1 Shared State tools -------------------------------------------------
+  {
+    name: "get_state",
+    description: "读取共享状态",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string", description: "项目 ID" },
+        field:      { type: "string", description: "字段名（可选，不传返回所有字段）" },
+      },
+      required: ["project_id"],
+    },
+  },
+  {
+    name: "set_state",
+    description: "写入共享状态（owner 直接生效，非 owner 自动走审批）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id:       { type: "string", description: "项目 ID" },
+        field:            { type: "string", description: "字段名" },
+        value:            { type: "string", description: "字段值" },
+        reason:           { type: "string", description: "变更原因" },
+        owner:            { type: "string", description: "字段 owner" },
+        approval_required: { type: "boolean", description: "是否需要审批" },
+        expected_version: { type: "number", description: "期望版本号（乐观并发控制）" },
+      },
+      required: ["project_id", "field", "value"],
+    },
+  },
+  {
+    name: "get_state_history",
+    description: "查看状态变更历史",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string", description: "项目 ID" },
+        field:      { type: "string", description: "字段名（可选）" },
+        limit:      { type: "number", description: "返回条数" },
+      },
+      required: ["project_id"],
+    },
+  },
+  {
+    name: "subscribe_state",
+    description: "订阅状态变更通知",
+    inputSchema: {
+      type: "object",
+      properties: {
+        project_id: { type: "string", description: "项目 ID" },
+        fields:     { type: "array", items: { type: "string" }, description: "要订阅的字段列表" },
+      },
+      required: ["project_id", "fields"],
+    },
+  },
+  {
+    name: "add_reaction",
+    description: "给消息添加 emoji 反应",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message_id: { type: "string", description: "消息 ID" },
+        emoji:      { type: "string", description: "Emoji 表情（允许：👍👎❤️😄🎉👀🤔✅）" },
+      },
+      required: ["message_id", "emoji"],
+    },
+  },
+  {
+    name: "remove_reaction",
+    description: "移除 emoji 反应",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message_id: { type: "string", description: "消息 ID" },
+        emoji:      { type: "string", description: "要移除的 Emoji 表情" },
+      },
+      required: ["message_id", "emoji"],
+    },
+  },
+  {
+    name: "pin_message",
+    description: "置顶消息",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message_id: { type: "string", description: "消息 ID" },
+      },
+      required: ["message_id"],
+    },
+  },
+  {
+    name: "unpin_message",
+    description: "取消置顶消息",
+    inputSchema: {
+      type: "object",
+      properties: {
+        message_id: { type: "string", description: "消息 ID" },
+      },
+      required: ["message_id"],
+    },
+  },
+  {
+    name: "get_pinned_messages",
+    description: "获取频道置顶消息列表",
+    inputSchema: {
+      type: "object",
+      properties: {
+        channel_id: { type: "string", description: "频道 ID" },
+      },
+      required: ["channel_id"],
+    },
+  },
+  {
+    name: "upload_file",
+    description: "上传文件到 TeamMCP（base64 编码）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name:    { type: "string", description: "文件名（含扩展名），如 'report.json'" },
+        content: { type: "string", description: "文件内容的 base64 编码" },
+        channel: { type: "string", description: "关联频道 ID（可选，用于权限控制）" },
+      },
+      required: ["name", "content"],
+    },
+  },
+  {
+    name: "download_file",
+    description: "下载文件（返回 base64 内容和元数据）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        file_id: { type: "string", description: "文件 ID，如 'file_abc123'" },
+      },
+      required: ["file_id"],
+    },
+  },
 ];
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
@@ -611,6 +838,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (args.labels) body.labels = args.labels;
         if (args.task_type) body.task_type = args.task_type;
         if (args.checkin_interval) body.checkin_interval = args.checkin_interval;
+        if (args.related_state) body.related_state = args.related_state;
+        if (args.related_state_project) body.related_state_project = args.related_state_project;
+        if (args.target_value) body.target_value = args.target_value;
         const result = await apiRequest("POST", "/api/tasks", body);
         const task = result.task;
         return { content: [{ type: "text", text: `Task created: ${task.id} — ${task.title} [${task.status}]${task.assignee ? ` assigned to ${task.assignee}` : ''}` }] };
@@ -697,6 +927,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (args.participating_projects) body.participating_projects = args.participating_projects;
         if (args.participating_channels) body.participating_channels = args.participating_channels;
         const result = await apiRequest("POST", "/api/state/agent-profile", body);
+        if (result.error) {
+          return { content: [{ type: "text", text: `Error: ${result.error} — ${result.message || ''}` }], isError: true };
+        }
         return { content: [{ type: "text", text: `Agent profile updated for ${result.agent_id}` }] };
       }
 
@@ -738,6 +971,270 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "cancel_schedule": {
         const result = await apiRequest("DELETE", `/api/schedules/${args.id}`);
         return { content: [{ type: "text", text: `Schedule ${result.id} deleted` }] };
+      }
+
+      // -- P0 Approval Flow handlers ------------------------------------------
+
+      case "request_approval": {
+        const body = {
+          project_id: args.project_id,
+          field: args.field,
+          value: args.value,
+        };
+        if (args.reason) body.reason = args.reason;
+        if (args.owner) body.owner = args.owner;
+        if (args.approval_required !== undefined) body.approval_required = args.approval_required;
+        const result = await apiRequest("POST", "/api/state", body);
+        if (result.error) {
+          return { content: [{ type: "text", text: `Error: ${result.error} — ${result.message || ''}` }], isError: true };
+        }
+        if (result.requires_knowledge_check) {
+          return { content: [{ type: "text", text: `Knowledge gaps detected — call check_knowledge_gaps for project ${args.project_id} before updating state.` }] };
+        }
+        if (result.pending_approval || result.approval) {
+          const approvalId = result.approval_id || result.approval?.approval_id || "(unknown)";
+          const approvalStatus = result.approval?.status || result.pending_approval?.status || "pending";
+          return { content: [{ type: "text", text: `Approval created — request id: ${approvalId}, status: ${approvalStatus}` }] };
+        }
+        return { content: [{ type: "text", text: `State updated directly — ${args.project_id}.${args.field} = ${args.value}` }] };
+      }
+
+      case "get_pending_approvals": {
+        const result = await apiRequest("GET", "/api/state/approvals");
+        const approvals = result.approvals || result;
+        if (!Array.isArray(approvals) || approvals.length === 0) {
+          return { content: [{ type: "text", text: "(no pending approvals)" }] };
+        }
+        const formatted = approvals.map(a =>
+          `${a.approval_id} | ${a.project_id}.${a.field} → ${a.proposed_value} | by ${a.proposed_by} | ${formatTimestamp(a.created_at)}`
+        ).join("\n");
+        return { content: [{ type: "text", text: `${approvals.length} pending approval(s):\n\n${formatted}` }] };
+      }
+
+      case "resolve_approval": {
+        const body = { approved: args.approved };
+        if (args.comment) body.comment = args.comment;
+        const result = await apiRequest("POST", `/api/state/approvals/${args.approval_id}/resolve`, body);
+        if (result.error) {
+          return { content: [{ type: "text", text: `Error: ${result.error} — ${result.message || ''}` }], isError: true };
+        }
+        const action = args.approved ? "Approved" : "Rejected";
+        return { content: [{ type: "text", text: `${action} approval ${args.approval_id}${args.comment ? ` — ${args.comment}` : ""}` }] };
+      }
+
+      // -- P0 Audit handlers --------------------------------------------------
+
+      case "get_changelog": {
+        const params = new URLSearchParams();
+        if (args.project_id) params.set("project_id", args.project_id);
+        if (args.field) params.set("field", args.field);
+        if (args.changed_by) params.set("changed_by", args.changed_by);
+        if (args.source) params.set("source", args.source);
+        if (args.from) params.set("from", args.from);
+        if (args.to) params.set("to", args.to);
+        if (args.limit) params.set("limit", String(args.limit));
+        const suffix = params.toString() ? `?${params}` : "";
+        const result = await apiRequest("GET", `/api/audit/changelog${suffix}`);
+        const entries = result.entries || result;
+        if (!Array.isArray(entries) || entries.length === 0) {
+          return { content: [{ type: "text", text: "(no changelog entries)" }] };
+        }
+        const formatted = entries.map(e =>
+          `[${formatTimestamp(e.timestamp)}] ${e.project_id}.${e.field}: ${e.old_value} → ${e.new_value} (by ${e.changed_by}, source: ${e.source || "unknown"})`
+        ).join("\n");
+        return { content: [{ type: "text", text: `${entries.length} changelog entry/entries:\n\n${formatted}` }] };
+      }
+
+      case "generate_audit_report": {
+        const result = await apiRequest("POST", "/api/audit/reports", {
+          project_id: args.project_id,
+          report_type: args.report_type,
+        });
+        if (result.error) {
+          return { content: [{ type: "text", text: `Error: ${result.error} — ${result.message || ''}` }], isError: true };
+        }
+        const report = result.report || result;
+        return { content: [{ type: "text", text: `Audit report generated — id: ${report.id || "(unknown)"}, type: ${args.report_type}, project: ${args.project_id}` }] };
+      }
+
+      case "get_audit_reports": {
+        const params = new URLSearchParams();
+        if (args.project_id) params.set("project_id", args.project_id);
+        if (args.report_type) params.set("report_type", args.report_type);
+        if (args.limit) params.set("limit", String(args.limit));
+        const suffix = params.toString() ? `?${params}` : "";
+        const result = await apiRequest("GET", `/api/audit/reports${suffix}`);
+        const reports = result.reports || result;
+        if (!Array.isArray(reports) || reports.length === 0) {
+          return { content: [{ type: "text", text: "(no audit reports)" }] };
+        }
+        const formatted = reports.map(r =>
+          `${r.id} | ${r.report_type} | ${r.project_id} | ${formatTimestamp(r.created_at)} | ${r.status || "done"}`
+        ).join("\n");
+        return { content: [{ type: "text", text: `${reports.length} audit report(s):\n\n${formatted}` }] };
+      }
+
+      case "get_public_reports": {
+        const params = new URLSearchParams();
+        if (args.project_id) params.set("project_id", args.project_id);
+        if (args.report_type) params.set("report_type", args.report_type);
+        if (args.limit) params.set("limit", String(args.limit));
+        const suffix = params.toString() ? `?${params}` : "";
+        const result = await apiRequest("GET", `/api/reports/public${suffix}`);
+        const reports = result.reports || result;
+        if (!Array.isArray(reports) || reports.length === 0) {
+          return { content: [{ type: "text", text: "(no public reports)" }] };
+        }
+        const formatted = reports.map(r =>
+          `${r.id} | ${r.report_type} | ${r.project_id} | ${formatTimestamp(r.created_at)} | ${r.summary || ""}`
+        ).join("\n");
+        return { content: [{ type: "text", text: `${reports.length} public report(s):\n\n${formatted}` }] };
+      }
+
+      // -- P1 Shared State handlers ---------------------------------------------
+
+      case "get_state": {
+        const params = new URLSearchParams({ project_id: args.project_id });
+        if (args.field) params.set("field", args.field);
+        const result = await apiRequest("GET", `/api/state?${params}`);
+        if (args.field) {
+          const state = result.state || result;
+          const val = state.value !== undefined ? state.value : JSON.stringify(state);
+          return { content: [{ type: "text", text: `${args.project_id}.${args.field} = ${val} (v${state.version || "?"})` }] };
+        }
+        const fields = result.items || (Array.isArray(result) ? result : []);
+        if (!fields.length) {
+          return { content: [{ type: "text", text: `(no state fields for project ${args.project_id})` }] };
+        }
+        const formatted = fields.map(f =>
+          `${f.field}: ${f.value} (v${f.version || "?"}, owner: ${f.owner || "-"})`
+        ).join("\n");
+        return { content: [{ type: "text", text: `State for ${args.project_id}:\n\n${formatted}` }] };
+      }
+
+      case "set_state": {
+        const body = {
+          project_id: args.project_id,
+          field: args.field,
+          value: args.value,
+        };
+        if (args.reason) body.reason = args.reason;
+        if (args.owner) body.owner = args.owner;
+        if (args.approval_required !== undefined) body.approval_required = args.approval_required;
+        if (args.expected_version !== undefined) body.expected_version = args.expected_version;
+        const result = await apiRequest("POST", "/api/state", body);
+        if (result.error) {
+          return { content: [{ type: "text", text: `Error: ${result.error} — ${result.message || ''}` }], isError: true };
+        }
+        if (result.requires_knowledge_check) {
+          return { content: [{ type: "text", text: `Knowledge gaps detected — call check_knowledge_gaps for project ${args.project_id} before updating state.` }] };
+        }
+        if (result.pending_approval || result.approval) {
+          const approvalId = result.approval_id || result.approval?.approval_id || "(unknown)";
+          const approvalStatus = result.approval?.status || result.pending_approval?.status || "pending";
+          return { content: [{ type: "text", text: `Approval created — request id: ${approvalId}, status: ${approvalStatus}` }] };
+        }
+        return { content: [{ type: "text", text: `State updated: ${args.project_id}.${args.field} = ${args.value}` }] };
+      }
+
+      case "get_state_history": {
+        const params = new URLSearchParams({ project_id: args.project_id });
+        if (args.field) params.set("field", args.field);
+        if (args.limit) params.set("limit", String(args.limit));
+        const result = await apiRequest("GET", `/api/state/history?${params}`);
+        const entries = result.history || result.entries || result;
+        if (!Array.isArray(entries) || entries.length === 0) {
+          return { content: [{ type: "text", text: "(no state history)" }] };
+        }
+        const formatted = entries.map(e =>
+          `[${formatTimestamp(e.timestamp)}] ${e.field}: ${e.old_value} → ${e.new_value} (by ${e.changed_by})`
+        ).join("\n");
+        return { content: [{ type: "text", text: `${entries.length} history entry/entries:\n\n${formatted}` }] };
+      }
+
+      case "subscribe_state": {
+        const result = await apiRequest("POST", "/api/state/subscribe", {
+          project_id: args.project_id,
+          fields: args.fields,
+        });
+        if (result.error) {
+          return { content: [{ type: "text", text: `Error: ${result.error} — ${result.message || ''}` }], isError: true };
+        }
+        return { content: [{ type: "text", text: `Subscribed to ${args.fields.length} field(s) in project ${args.project_id}: ${args.fields.join(", ")}` }] };
+      }
+
+      case "add_reaction": {
+        const result = await apiRequest("POST", `/api/messages/${args.message_id}/reactions`, { emoji: args.emoji });
+        if (result.error) {
+          return { content: [{ type: "text", text: `Error: ${result.error} — ${result.message || ''}` }], isError: true };
+        }
+        return { content: [{ type: "text", text: `Reaction ${args.emoji} added to message ${args.message_id}` }] };
+      }
+
+      case "remove_reaction": {
+        const result = await apiRequest("DELETE", `/api/messages/${args.message_id}/reactions/${encodeURIComponent(args.emoji)}`);
+        if (result.error) {
+          return { content: [{ type: "text", text: `Error: ${result.error} — ${result.message || ''}` }], isError: true };
+        }
+        return { content: [{ type: "text", text: `Reaction ${args.emoji} removed from message ${args.message_id}` }] };
+      }
+
+      case "pin_message": {
+        const result = await apiRequest("POST", `/api/messages/${args.message_id}/pin`);
+        if (result.error) {
+          return { content: [{ type: "text", text: `Error: ${result.error} — ${result.message || ''}` }], isError: true };
+        }
+        return { content: [{ type: "text", text: `Message ${args.message_id} pinned` }] };
+      }
+
+      case "unpin_message": {
+        const result = await apiRequest("DELETE", `/api/messages/${args.message_id}/pin`);
+        if (result.error) {
+          return { content: [{ type: "text", text: `Error: ${result.error} — ${result.message || ''}` }], isError: true };
+        }
+        return { content: [{ type: "text", text: `Message ${args.message_id} unpinned` }] };
+      }
+
+      case "get_pinned_messages": {
+        const result = await apiRequest("GET", `/api/channels/${args.channel_id}/pins`);
+        if (result.error) {
+          return { content: [{ type: "text", text: `Error: ${result.error} — ${result.message || ''}` }], isError: true };
+        }
+        const pins = result.pins || result;
+        if (!Array.isArray(pins) || pins.length === 0) {
+          return { content: [{ type: "text", text: `(no pinned messages in #${args.channel_id})` }] };
+        }
+        const formatted = pins.map(p =>
+          `${p.id} | ${p.from_agent}: ${p.content} [${formatTimestamp(p.pinned_at || p.created_at)}]`
+        ).join("\n");
+        return { content: [{ type: "text", text: `${pins.length} pinned message(s):\n\n${formatted}` }] };
+      }
+
+      case "upload_file": {
+        const payload = { name: args.name, content: args.content };
+        if (args.channel) payload.channel = args.channel;
+        const result = await apiRequest("POST", "/api/files", payload);
+        return { content: [{ type: "text", text: `File uploaded: ${result.file_id}\nName: ${result.file_name}\nSize: ${result.file_size} bytes\nMIME: ${result.mime_type}\nSHA256: ${result.sha256}` }] };
+      }
+
+      case "download_file": {
+        // First get metadata
+        const meta = await apiRequest("GET", `/api/files/${args.file_id}/meta`);
+        if (meta.error) {
+          return { content: [{ type: "text", text: `Error: ${meta.error}` }], isError: true };
+        }
+        // Download raw file and convert to base64
+        const dlUrl = `${BASE_URL}/api/files/${args.file_id}`;
+        const dlRes = await fetch(dlUrl, {
+          headers: { Authorization: `Bearer ${API_KEY}` },
+        });
+        if (!dlRes.ok) {
+          const errText = await dlRes.text().catch(() => "");
+          return { content: [{ type: "text", text: `Download failed: ${dlRes.status} ${errText}` }], isError: true };
+        }
+        const arrayBuf = await dlRes.arrayBuffer();
+        const base64Content = Buffer.from(arrayBuf).toString('base64');
+        return { content: [{ type: "text", text: `File: ${meta.original_name}\nSize: ${meta.size} bytes\nMIME: ${meta.mime_type}\nSHA256: ${meta.sha256}\nUploaded by: ${meta.uploaded_by}\n\nContent (base64):\n${base64Content}` }] };
       }
 
       default:
@@ -819,6 +1316,23 @@ function scheduleReconnect() {
   currentDelay = Math.min(currentDelay * 1.5, MAX_RECONNECT_DELAY_MS);
 }
 
+// Message injection filter: only inject messages that require Agent attention
+// Reduces API calls by 80-90% by skipping irrelevant messages
+function shouldInject(event) {
+  // P0: Always inject
+  if (event.type === 'message') {
+    const isDm = (event.channel || '').startsWith('dm:');
+    if (isDm) return true;                                          // DM — always relevant
+    if (event.mentions && event.mentions.includes(AGENT_NAME)) return true; // @ mentioned
+    if (event.from === 'Chairman') return true;                     // Chairman message — highest authority
+    if (event.from === 'System') return true;                       // System notifications (overdue, checkin)
+    return false;                                                   // Group chat without mention — skip
+  }
+  if (event.type === 'approval_requested') return true;             // Approval requests
+  // Everything else: don't inject (status, agent-output, agent-error, reactions, pins, etc.)
+  return false;
+}
+
 function handleSSEEvent(data) {
   let event;
   try {
@@ -829,6 +1343,11 @@ function handleSSEEvent(data) {
   }
 
   if (event.type === "message") {
+    // Apply injection filter
+    if (!shouldInject(event)) {
+      return; // Skip — Agent will see this via check-inbox when needed
+    }
+
     const channelId = event.channel || "unknown";
     const from = event.from || "unknown";
     const content = event.content || "";
@@ -840,10 +1359,14 @@ function handleSSEEvent(data) {
 
     sendNotification(msgText, source, channelId);
   } else if (event.type === "status") {
-    const msgText = `${event.agent} is now ${event.status}`;
-    sendNotification(msgText, "status", "");
+    // Status changes: only inject when agent comes online (useful context)
+    // Skip offline notifications to reduce noise
+    if (event.status === 'online') {
+      const msgText = `${event.agent} is now ${event.status}`;
+      sendNotification(msgText, "status", "");
+    }
   }
-  // Ignore typing, heartbeat, etc.
+  // Ignore agent-output, agent-error, reactions, pins, etc.
 }
 
 function escapeXml(s) {

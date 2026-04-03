@@ -357,6 +357,32 @@ body {
   flex: 1; overflow-y: auto; padding: 8px 12px;
   font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px;
 }
+/* Channel Members Panel */
+#channel-members-panel {
+  display: none; position: fixed; right: 0; top: 0; bottom: 0; width: 320px;
+  background: var(--bg-sidebar); border-left: 1px solid var(--border); z-index: 100;
+  flex-direction: column;
+}
+#channel-members-panel.visible { display: flex; }
+#channel-members-header {
+  display: flex; align-items: center; gap: 8px; padding: 12px 16px;
+  border-bottom: 1px solid var(--border); font-weight: 600; font-size: 14px;
+}
+#channel-members-header .close-btn {
+  margin-left: auto; cursor: pointer; color: var(--text-dim); background: none; border: none; font-size: 18px;
+}
+#channel-members-header .close-btn:hover { color: var(--text); }
+#channel-members-list { flex: 1; overflow-y: auto; padding: 8px 12px; }
+.member-item {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-size: 13px;
+}
+.member-item .remove-btn {
+  margin-left: auto; color: var(--red); background: none; border: none; cursor: pointer; font-size: 12px; display: none;
+}
+.member-item:hover .remove-btn { display: inline; }
+#add-member-form { padding: 8px 12px; border-top: 1px solid var(--border); display: flex; gap: 8px; }
+#add-member-select { flex: 1; background: var(--bg-input); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; color: var(--text); font-size: 13px; }
+#add-member-btn { background: var(--accent); color: white; border: none; border-radius: 4px; padding: 6px 12px; cursor: pointer; font-size: 13px; }
 .output-entry { padding: 6px 0; border-bottom: 1px solid var(--border); }
 .output-entry .output-meta { color: var(--text-muted); font-size: 11px; margin-bottom: 2px; }
 .output-entry .output-tool { color: var(--accent); }
@@ -1327,6 +1353,64 @@ body {
   margin-right: auto;
 }
 
+/* Auto-refresh toggle */
+.state-auto-refresh-btn {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  padding: 5px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.state-auto-refresh-btn.active {
+  background: rgba(61,214,140,0.15);
+  border-color: var(--green);
+  color: var(--green);
+}
+.state-auto-refresh-btn:hover { background: var(--bg-msg-hover); }
+.state-last-updated {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+/* Summary Stats Bar */
+.state-summary-bar {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+.state-summary-stat {
+  background: var(--bg-msg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 18px;
+  min-width: 120px;
+  flex: 1;
+  text-align: center;
+}
+.state-summary-stat .stat-value {
+  font-size: 22px;
+  font-weight: 800;
+  color: var(--text);
+  line-height: 1.2;
+}
+.state-summary-stat .stat-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-top: 2px;
+}
+.state-summary-stat.accent .stat-value { color: var(--accent); }
+.state-summary-stat.green .stat-value { color: var(--green); }
+.state-summary-stat.orange .stat-value { color: var(--orange); }
+
 .state-project-input {
   background: var(--bg-input);
   border: 1px solid var(--border);
@@ -1383,13 +1467,34 @@ body {
 .state-field-card {
   background: var(--bg-msg);
   border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
   border-radius: var(--radius);
   padding: 14px 16px;
   cursor: pointer;
-  transition: background 0.15s, border-color 0.15s;
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
 }
 
-.state-field-card:hover { background: var(--bg-msg-hover); border-color: var(--accent); }
+.state-field-card:hover { background: var(--bg-msg-hover); border-color: var(--accent); box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
+.state-field-card[data-status-color="green"] { border-left-color: var(--green); }
+.state-field-card[data-status-color="red"] { border-left-color: var(--red); }
+.state-field-card[data-status-color="orange"] { border-left-color: var(--orange); }
+.state-field-card[data-status-color="blue"] { border-left-color: var(--accent); }
+.state-field-card[data-status-color="yellow"] { border-left-color: var(--yellow); }
+
+/* Color-coded value pill */
+.state-value-status {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.state-value-status.green { background: rgba(61,214,140,0.15); color: var(--green); }
+.state-value-status.red { background: rgba(229,83,75,0.15); color: var(--red); }
+.state-value-status.orange { background: rgba(212,132,62,0.2); color: var(--orange); }
+.state-value-status.blue { background: rgba(91,127,245,0.15); color: var(--accent); }
+.state-value-status.yellow { background: rgba(201,180,74,0.15); color: var(--yellow); }
 
 .state-field-name {
   font-size: 13px;
@@ -1895,6 +2000,7 @@ body {
         <h2 id="ch-name">Select a channel</h2>
         <p id="ch-desc"></p>
       </div>
+      <button id="members-btn" onclick="openMembersPanel()" style="margin-left:auto; background:none; border:1px solid var(--border); border-radius:4px; padding:4px 10px; color:var(--text-dim); cursor:pointer; font-size:13px; display:none;">&#128101; Members</button>
     </div>
     <div class="pin-bar" id="pin-bar" onclick="togglePinnedPanel()">
       <span class="pin-icon">&#128204;</span>
@@ -1934,7 +2040,9 @@ body {
     <div id="state-container">
       <div id="state-header">
         <h2>&#128202; Project State</h2>
+        <span class="state-last-updated" id="state-last-updated"></span>
         <input type="text" class="state-project-input" id="state-project-input" placeholder="agent-os-mvp" value="agent-os-mvp" onkeydown="if(event.key==='Enter')refreshState()">
+        <button class="state-auto-refresh-btn" id="state-auto-refresh-btn" onclick="toggleStateAutoRefresh()" title="Auto-refresh every 15s">&#9202; Auto</button>
         <button class="state-refresh-btn" onclick="refreshState()" title="Refresh">&#128260;</button>
       </div>
       <div id="state-body">
@@ -2030,12 +2138,14 @@ let messages = [];  // messages for current channel
 let hasMore = false;
 let loading = false;
 let eventSource = null;
+let sseAbortController = null;
 let agentName = '';
 let currentView = 'messages'; // 'messages', 'tasks', or 'state'
 let currentProjectId = 'agent-os-mvp';
 let stateFields = [];
 let stateApprovals = [];
 let stateChangeLog = [];
+let stateAutoRefreshTimer = null;
 let auditReports = [];
 let auditFilterType = 'all';
 let tasksList = [];
@@ -2166,6 +2276,7 @@ async function selectChannel(channelId) {
   document.getElementById('ch-icon').innerHTML = icon;
   document.getElementById('ch-name').textContent = ch?.name || channelId;
   document.getElementById('ch-desc').textContent = ch?.description || '';
+  document.getElementById('members-btn').style.display = ch?.type === 'dm' ? 'none' : '';
 
   // Highlight active channel
   document.querySelectorAll('.channel-item').forEach(el => {
@@ -2182,12 +2293,36 @@ async function selectChannel(channelId) {
   // Re-render to show pin badges
   renderMessages(true);
 
+  // Mark channel as read on the server (persist read status)
+  markChannelRead(channelId);
+
   // Reset pinned panel
   pinnedPanelOpen = false;
   document.getElementById('pinned-panel').classList.remove('active');
 
   // Show compose area
   updateComposeUI();
+}
+
+// Mark a channel as read by acking the last message
+async function markChannelRead(channelId) {
+  try {
+    if (messages.length === 0) return;
+    const lastMsg = messages[messages.length - 1];
+    if (!lastMsg || !lastMsg.id) return;
+    await fetch('/api/inbox/ack', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + API_KEY,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        items: [{ channel: channelId, ack_id: lastMsg.id }]
+      })
+    });
+  } catch (e) {
+    // Silently fail - read status is not critical
+  }
 }
 
 async function loadMessages(channelId, before) {
@@ -2203,6 +2338,15 @@ async function loadMessages(channelId, before) {
     }
     hasMore = data.hasMore;
     renderMessages(!before); // scroll to bottom only on initial load
+    // Mark channel as read (update read_status for unread count)
+    if (!before && messages.length > 0) {
+      const lastMsgId = messages[messages.length - 1].id;
+      fetch('/api/inbox/ack', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + API_KEY, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items: [{ channel: channelId, ack_id: lastMsgId }] })
+      }).then(() => refreshChannels()).catch(() => {});
+    }
   } catch (e) {
     console.error('Failed to load messages:', e);
   }
@@ -2588,8 +2732,10 @@ async function refreshChannels() {
 
 // ── SSE ──────────────────────────────────────────────────
 function connectSSE() {
-  if (eventSource) {
-    eventSource.close();
+  // Abort previous fetch-based SSE connection if any
+  if (sseAbortController) {
+    sseAbortController.abort();
+    sseAbortController = null;
   }
 
   // Native EventSource doesn't support custom headers.
@@ -2597,7 +2743,10 @@ function connectSSE() {
   const dot = document.getElementById('sse-dot');
   const label = document.getElementById('sse-label');
 
+  sseAbortController = new AbortController();
+
   fetchSSE('/api/events', {
+    signal: sseAbortController.signal,
     onOpen() {
       dot.classList.add('connected');
       label.textContent = 'Connected';
@@ -2614,10 +2763,11 @@ function connectSSE() {
   });
 }
 
-async function fetchSSE(url, { onOpen, onMessage, onError }) {
+async function fetchSSE(url, { signal, onOpen, onMessage, onError }) {
   try {
     const response = await fetch(url, {
-      headers: { 'Authorization': 'Bearer ' + API_KEY }
+      headers: { 'Authorization': 'Bearer ' + API_KEY },
+      signal: signal
     });
 
     if (!response.ok) {
@@ -2648,9 +2798,11 @@ async function fetchSSE(url, { onOpen, onMessage, onError }) {
       }
     }
 
-    // Connection closed
+    // Connection closed normally
     onError();
   } catch (e) {
+    // Don't reconnect if intentionally aborted
+    if (e.name === 'AbortError') return;
     console.error('SSE error:', e);
     onError();
   }
@@ -2669,10 +2821,13 @@ function handleSSEEvent(data) {
             content: data.content,
             created_at: data.timestamp,
             reply_to: data.replyTo,
-            mentions: data.mentions
+            mentions: data.mentions,
+            metadata: data.metadata
           };
           messages.push(msg);
           renderMessages(true);
+          // Mark as read on server since user is viewing this channel
+          markChannelRead(data.channel);
         }
       }
       // Bump unread for other channels
@@ -2779,6 +2934,8 @@ function handleSSEEvent(data) {
       if (currentView === 'state' && data.project_id === currentProjectId) {
         loadStateFields(currentProjectId);
         loadApprovals();
+        var tsEl = document.getElementById('state-last-updated');
+        if (tsEl) tsEl.textContent = 'Updated ' + new Date().toLocaleTimeString();
       }
       break;
 
@@ -2999,7 +3156,8 @@ async function sendMessage() {
       content: content,
       created_at: result.timestamp,
       reply_to: replyToId,
-      mentions: mentions
+      mentions: mentions,
+      metadata: { source: 'dashboard', role: 'chairman' }
     };
     messages.push(msg);
     renderMessages(true);
@@ -3052,6 +3210,7 @@ function openDmWithAgent(name) {
     document.getElementById('ch-icon').innerHTML = '&#9993;';
     document.getElementById('ch-name').textContent = 'DM with ' + name;
     document.getElementById('ch-desc').textContent = '';
+    document.getElementById('members-btn').style.display = 'none';
     document.getElementById('messages-container').innerHTML = '<div class="empty-state"><div class="icon">&#9993;</div><div>Start a conversation with ' + escapeHtml(name) + '</div></div>';
     messages = [];
     // Try to load history for this DM
@@ -3068,6 +3227,7 @@ function switchToTasks() {
   document.getElementById('channel-header').style.display = 'none';
   document.getElementById('pin-bar').classList.remove('active');
   document.getElementById('pinned-panel').classList.remove('active');
+  closeMembersPanel();
   // Hide state view
   document.getElementById('state-container').classList.remove('active');
   closeFieldDetail();
@@ -3635,6 +3795,39 @@ function refreshState() {
   loadStateFields(currentProjectId);
   loadApprovals();
   loadAuditReports(currentProjectId);
+  // Update last-updated timestamp
+  const el = document.getElementById('state-last-updated');
+  if (el) el.textContent = 'Updated ' + new Date().toLocaleTimeString();
+}
+
+function toggleStateAutoRefresh() {
+  const btn = document.getElementById('state-auto-refresh-btn');
+  if (stateAutoRefreshTimer) {
+    clearInterval(stateAutoRefreshTimer);
+    stateAutoRefreshTimer = null;
+    btn.classList.remove('active');
+  } else {
+    stateAutoRefreshTimer = setInterval(function() {
+      if (currentView === 'state') refreshState();
+    }, 15000);
+    btn.classList.add('active');
+  }
+}
+
+function getValueStatusColor(value) {
+  if (!value) return '';
+  var v = String(value).toLowerCase().trim();
+  // Green statuses
+  if (['running', 'active', 'online', 'healthy', 'ok', 'success', 'completed', 'done', 'ready', 'true', 'yes', 'enabled', 'up'].indexOf(v) !== -1) return 'green';
+  // Red statuses
+  if (['error', 'failed', 'offline', 'down', 'critical', 'false', 'no', 'disabled', 'stopped', 'crashed'].indexOf(v) !== -1) return 'red';
+  // Orange statuses
+  if (['warning', 'pending', 'waiting', 'queued', 'paused', 'blocked', 'review'].indexOf(v) !== -1) return 'orange';
+  // Blue statuses
+  if (['in_progress', 'in-progress', 'building', 'deploying', 'processing', 'syncing', 'loading'].indexOf(v) !== -1) return 'blue';
+  // Yellow
+  if (['draft', 'wip', 'todo', 'planning', 'scheduled'].indexOf(v) !== -1) return 'yellow';
+  return '';
 }
 
 async function loadStateFields(projectId) {
@@ -3653,6 +3846,26 @@ async function loadStateFields(projectId) {
 function renderStateView() {
   const body = document.getElementById('state-body');
   let html = '';
+
+  // Summary stats bar
+  if (stateFields.length > 0) {
+    const owners = new Set(stateFields.map(function(f){ return f.owner; }).filter(Boolean));
+    const latestUpdate = stateFields.reduce(function(latest, f) {
+      return f.updated_at && (!latest || f.updated_at > latest) ? f.updated_at : latest;
+    }, null);
+    const approvalCount = stateFields.filter(function(f){ return f.approval_required; }).length;
+
+    html += '<div class="state-summary-bar">';
+    html += '<div class="state-summary-stat accent"><div class="stat-value">' + stateFields.length + '</div><div class="stat-label">Total Fields</div></div>';
+    html += '<div class="state-summary-stat green"><div class="stat-value">' + owners.size + '</div><div class="stat-label">Active Owners</div></div>';
+    if (approvalCount > 0) {
+      html += '<div class="state-summary-stat orange"><div class="stat-value">' + approvalCount + '</div><div class="stat-label">Need Approval</div></div>';
+    }
+    if (latestUpdate) {
+      html += '<div class="state-summary-stat"><div class="stat-value" style="font-size:14px">' + escapeHtml(formatDate(latestUpdate) + ' ' + formatTime(latestUpdate)) + '</div><div class="stat-label">Last Updated</div></div>';
+    }
+    html += '</div>';
+  }
 
   // Fields section
   html += '<div class="state-fields-section">';
@@ -3695,9 +3908,15 @@ function renderStateFields(fields) {
     const versionHtml = '<span class="state-field-version">v' + (field.version || 1) + '</span>';
     const timeHtml = field.updated_at ? '<span class="state-field-time">' + formatTime(field.updated_at) + '</span>' : '';
     const approvalHtml = field.approval_required ? '<span class="state-field-approval-badge">approval required</span>' : '';
+    const statusColor = getValueStatusColor(field.value);
+    const statusAttr = statusColor ? ' data-status-color="' + statusColor + '"' : '';
+    const statusPill = statusColor ? '<span class="state-value-status ' + statusColor + '">' + escapeHtml(String(field.value).trim()) + '</span>' : '';
 
-    html += '<div class="state-field-card" onclick="showFieldDetail(\'' + escapeHtml(currentProjectId) + '\', \'' + escapeHtml(field.field) + '\')">';
+    html += '<div class="state-field-card"' + statusAttr + ' onclick="showFieldDetail(\'' + escapeHtml(currentProjectId) + '\', \'' + escapeHtml(field.field) + '\')">';
     html += '<div class="state-field-name">' + escapeHtml(field.field) + ' ' + approvalHtml + '</div>';
+    if (statusPill) {
+      html += statusPill;
+    }
     html += '<div class="state-field-value">' + escapeHtml(valueTruncated) + '</div>';
     html += '<div class="state-field-meta">' + ownerHtml + versionHtml + timeHtml + '</div>';
     html += '</div>';
@@ -4082,6 +4301,80 @@ function closeFieldDetail() {
   document.getElementById('state-field-detail').classList.remove('active');
 }
 
+// ── Channel Members Panel ─────────────────────────────
+async function openMembersPanel() {
+  if (!currentChannel) return;
+  const panel = document.getElementById('channel-members-panel');
+  const titleEl = document.getElementById('channel-members-title');
+  const ch = channels.find(c => c.id === currentChannel);
+  titleEl.textContent = ch ? (ch.name || ch.id) + ' Members' : 'Members';
+  // Show add-member form only for Chairman or CEO
+  const addForm = document.getElementById('add-member-form');
+  addForm.style.display = (agentName === 'Chairman' || agentName === 'CEO') ? 'flex' : 'none';
+  try {
+    const data = await api('/api/channels/' + encodeURIComponent(currentChannel) + '/members');
+    const currentMembers = data.members || [];
+    renderMembers(currentMembers);
+    // Populate add-member dropdown with agents not already in channel
+    const select = document.getElementById('add-member-select');
+    const available = agents.filter(a => !currentMembers.includes(a.name)).sort((a, b) => a.name.localeCompare(b.name));
+    select.innerHTML = '<option value="" disabled selected>Select agent...</option>' + available.map(a => `<option value="${escapeHtml(a.name)}">${escapeHtml(a.name)}</option>`).join('');
+  } catch (e) {
+    document.getElementById('channel-members-list').innerHTML = '<div style="color:var(--text-dim);padding:12px;">Failed to load members</div>';
+  }
+  panel.classList.add('visible');
+}
+
+function closeMembersPanel() {
+  document.getElementById('channel-members-panel').classList.remove('visible');
+}
+
+function renderMembers(members) {
+  const list = document.getElementById('channel-members-list');
+  const canManage = agentName === 'Chairman' || agentName === 'CEO';
+  list.innerHTML = members.map(m => {
+    const removeBtn = canManage ? `<button class="remove-btn" onclick="removeMemberFromChannel('${m.replace(/'/g, "\\'")}')">&times;</button>` : '';
+    const agent = agents.find(a => a.name === m);
+    const statusDot = agent ? `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${agent.status === 'online' ? 'var(--green)' : 'var(--text-dim)'};"></span>` : '';
+    return `<div class="member-item">${statusDot}<span>${escapeHtml(m)}</span>${removeBtn}</div>`;
+  }).join('');
+}
+
+async function addMemberToChannel() {
+  const select = document.getElementById('add-member-select');
+  const name = select.value;
+  if (!name || !currentChannel) return;
+  try {
+    const res = await fetch('/api/channels/' + encodeURIComponent(currentChannel) + '/members', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent_name: name })
+    });
+    const data = await res.json();
+    if (!res.ok) { alert(data.error || 'Failed to add member'); return; }
+    select.value = '';
+    openMembersPanel();
+  } catch (e) {
+    alert('Failed to add member: ' + e.message);
+  }
+}
+
+async function removeMemberFromChannel(name) {
+  if (!currentChannel) return;
+  if (!confirm('Remove ' + name + ' from this channel?')) return;
+  try {
+    const res = await fetch('/api/channels/' + encodeURIComponent(currentChannel) + '/members/' + encodeURIComponent(name), {
+      method: 'DELETE',
+      headers: { 'Authorization': 'Bearer ' + API_KEY }
+    });
+    const data = await res.json();
+    if (!res.ok) { alert(data.error || 'Failed to remove member'); return; }
+    openMembersPanel();
+  } catch (e) {
+    alert('Failed to remove member: ' + e.message);
+  }
+}
+
 async function loadChangeLog(projectId, field) {
   try {
     const data = await api('/api/state/history?project_id=' + encodeURIComponent(projectId) + '&field=' + encodeURIComponent(field) + '&limit=20');
@@ -4101,6 +4394,19 @@ async function loadChangeLog(projectId, field) {
     <button class="close-btn" onclick="closeAgentOutput()">&times;</button>
   </div>
   <div id="agent-output-log"></div>
+</div>
+
+<!-- Channel Members Panel -->
+<div id="channel-members-panel">
+  <div id="channel-members-header">
+    <span id="channel-members-title">Members</span>
+    <button class="close-btn" onclick="closeMembersPanel()">&times;</button>
+  </div>
+  <div id="channel-members-list"></div>
+  <div id="add-member-form" style="display:none;">
+    <select id="add-member-select"><option value="" disabled selected>Select agent...</option></select>
+    <button id="add-member-btn" onclick="addMemberToChannel()">Add</button>
+  </div>
 </div>
 
 </body>

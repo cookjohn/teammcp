@@ -1,11 +1,12 @@
 import { URL } from 'node:url';
 import { readFile } from 'node:fs/promises';
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join, extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   registerAgent, getAllAgents, getAgentByName,
   saveMessage, getMessages, getMessage, editMessage, deleteMessage, searchMessages,
-  getChannel, createChannel, getChannelsForAgent, getChannelMembers, addChannelMember,
+  getChannel, createChannel, getChannelsForAgent, getChannelMembers, addChannelMember, removeChannelMember,
   getOrCreateDmChannel, updateReadStatus, setAgentStatus,
   createTask, getTask, getTasks, updateTask, deleteTask, getTaskHistory, updateMessageMetadata,
   getTaskWithChildren, getCheckInDueTasks, updateCheckIn,
@@ -23,7 +24,9 @@ import {
   routeTask, concludeDiscussion, getPublicAuditReports,
   getUnreadCount, getUnreadMessages, getUnreadMentions, getLastNMessages,
   getLastUnreadMessageId, getStateChangesSince,
-  createSchedule, getSchedules, deleteSchedule
+  createSchedule, getSchedules, deleteSchedule,
+  saveFile, getFile,
+  getReportsTo, setReportsTo, getSubordinates
 } from './db.mjs';
 import { requireAuth } from './auth.mjs';
 import {
@@ -86,7 +89,15 @@ function checkRate(agentName) {
 // ── Config ──────────────────────────────────────────────
 
 const REGISTER_SECRET = process.env.TEAMMCP_REGISTER_SECRET || '';
-const MAX_BODY_SIZE = 1 * 1024 * 1024; // 1MB
+
+// Ensure Chairman always receives push events (admin oversight from Dashboard)
+function ensureChairman(targets, excludeName) {
+  if (!targets.includes('Chairman') && excludeName !== 'Chairman') {
+    targets.push('Chairman');
+  }
+  return targets;
+}
+const MAX_BODY_SIZE = 8 * 1024 * 1024; // 8MB (supports base64-encoded files up to ~5MB)
 const MAX_CONTENT_LENGTH = 10000; // characters
 const MAX_HISTORY_LIMIT = 200;
 
@@ -317,7 +328,8 @@ export async function handleRequest(req, res) {
         mentions,
         id: msg.id,
         timestamp: msg.created_at,
-        replyTo: msg.reply_to || null
+        replyTo: msg.reply_to || null,
+        metadata: body.metadata || null
       };
 
       // Always update sender's own read_status (so they don't get their own messages on reconnect)
@@ -332,21 +344,20 @@ export async function handleRequest(req, res) {
         if (isOnline(other)) updateReadStatus(other, channelId, msg.id);
 
       } else if (channel.type === 'group') {
-        // Group: push to all online agents except sender
-        const allAgents = getAllAgents().map(a => a.name).filter(n => n !== req.agent.name);
-        pushToAgents(allAgents, event);
+        // Group: push to channel members except sender + always include Chairman (admin oversight)
+        const groupMembers = ensureChairman(getChannelMembers(channelId).filter(m => m !== req.agent.name), req.agent.name);
+        pushToAgents(groupMembers, event);
         // Update read_status for online recipients to prevent duplicates on reconnect
-        for (const a of allAgents) {
+        for (const a of groupMembers) {
           if (isOnline(a)) updateReadStatus(a, channelId, msg.id);
         }
 
       } else if (channel.type === 'topic') {
-        // Topic: push to all subscribers except sender
-        const members = getChannelMembers(channelId);
-        const targets = members.filter(m => m !== req.agent.name);
-        pushToAgents(targets, event);
+        // Topic: push to all subscribers except sender + always include Chairman (admin oversight)
+        const topicTargets = ensureChairman(getChannelMembers(channelId).filter(m => m !== req.agent.name), req.agent.name);
+        pushToAgents(topicTargets, event);
         // Update read_status for online recipients
-        for (const a of targets) {
+        for (const a of topicTargets) {
           if (isOnline(a)) updateReadStatus(a, channelId, msg.id);
         }
       }
@@ -403,10 +414,10 @@ export async function handleRequest(req, res) {
         const other = parts[1] === req.agent.name ? parts[2] : parts[1];
         pushToAgent(other, event);
       } else if (channel.type === 'group') {
-        const targets = getAllAgents().map(a => a.name).filter(n => n !== req.agent.name);
+        const targets = ensureChairman(getChannelMembers(msg.channel_id).filter(m => m !== req.agent.name), req.agent.name);
         pushToAgents(targets, event);
       } else if (channel.type === 'topic') {
-        const targets = getChannelMembers(msg.channel_id).filter(m => m !== req.agent.name);
+        const targets = ensureChairman(getChannelMembers(msg.channel_id).filter(m => m !== req.agent.name), req.agent.name);
         pushToAgents(targets, event);
       }
 
@@ -431,10 +442,10 @@ export async function handleRequest(req, res) {
         const other = parts[1] === req.agent.name ? parts[2] : parts[1];
         pushToAgent(other, event);
       } else if (channel.type === 'group') {
-        const targets = getAllAgents().map(a => a.name).filter(n => n !== req.agent.name);
+        const targets = ensureChairman(getChannelMembers(msg.channel_id).filter(m => m !== req.agent.name), req.agent.name);
         pushToAgents(targets, event);
       } else if (channel.type === 'topic') {
-        const targets = getChannelMembers(msg.channel_id).filter(m => m !== req.agent.name);
+        const targets = ensureChairman(getChannelMembers(msg.channel_id).filter(m => m !== req.agent.name), req.agent.name);
         pushToAgents(targets, event);
       }
 
@@ -704,8 +715,8 @@ export async function handleRequest(req, res) {
       if (reason === 'rate_limit' || reason.includes('rate') || reason.includes('limit')) {
         const content = `⚠️ Agent ${agentName} 触发 rate limit: ${message || reason}`;
         saveMessage('teammcp-dev', 'System', content, JSON.stringify([agentName]), null);
-        const allAgents = getAllAgents().map(a => a.name);
-        pushToAgents(allAgents, { type: 'message', channel: 'teammcp-dev', from: 'System', content, mentions: [agentName], id: `sys_error_${agentName}_${Date.now()}`, timestamp: new Date().toISOString() });
+        const errorTargets = ['Chairman', 'CEO'].filter(n => n !== agentName);
+        pushToAgents(errorTargets, { type: 'message', channel: 'teammcp-dev', from: 'System', content, mentions: [agentName], id: `sys_error_${agentName}_${Date.now()}`, timestamp: new Date().toISOString() });
       }
 
       return json(res, { ok: true });
@@ -749,6 +760,70 @@ export async function handleRequest(req, res) {
       }
     }
 
+    // ── POST /api/files — Upload file (base64 JSON body) ────
+    if (method === 'POST' && path === '/api/files') {
+      const body = await readBody(req);
+      if (!body.name || !body.content) return json(res, { error: 'name and content (base64) are required' }, 400);
+
+      const ext = body.name.split('.').pop()?.toLowerCase();
+      const ALLOWED_EXTENSIONS = ['txt','md','json','js','ts','py','log','yaml','yml','jpg','png','gif','csv','html','css'];
+      if (!ALLOWED_EXTENSIONS.includes(ext)) return json(res, { error: `File type .${ext} not allowed` }, 400);
+
+      const buffer = Buffer.from(body.content, 'base64');
+      if (buffer.length > 5 * 1024 * 1024) return json(res, { error: 'File too large (max 5MB)' }, 400);
+
+      const crypto = await import('node:crypto');
+      const sha256 = crypto.createHash('sha256').update(buffer).digest('hex');
+
+      const FILE_MIME_MAP = { txt:'text/plain', md:'text/markdown', json:'application/json', js:'application/javascript', ts:'application/typescript', py:'text/x-python', log:'text/plain', yaml:'text/yaml', yml:'text/yaml', jpg:'image/jpeg', png:'image/png', gif:'image/gif', csv:'text/csv', html:'text/html', css:'text/css' };
+      const mimeType = FILE_MIME_MAP[ext] || 'application/octet-stream';
+
+      const fileId = `file_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
+      const uploadsDir = join(__dirname, 'uploads');
+      if (!existsSync(uploadsDir)) mkdirSync(uploadsDir, { recursive: true });
+      writeFileSync(join(uploadsDir, fileId), buffer);
+
+      saveFile(fileId, body.name, mimeType, buffer.length, sha256, req.agent.name, body.channel || null);
+
+      return json(res, { file_id: fileId, file_name: body.name, file_size: buffer.length, mime_type: mimeType, sha256, created_at: new Date().toISOString() }, 201);
+    }
+
+    // ── GET /api/files/:id — Download file ────────────────
+    if (method === 'GET' && path.startsWith('/api/files/') && !path.includes('/meta') && path.split('/').length === 4) {
+      const fileId = path.split('/')[3];
+      const fileMeta = getFile(fileId);
+      if (!fileMeta) return json(res, { error: 'File not found' }, 404);
+
+      if (fileMeta.channel) {
+        const members = getChannelMembers(fileMeta.channel);
+        if (!members.includes(req.agent.name) && req.agent.name !== fileMeta.uploaded_by && req.agent.name !== 'Chairman') {
+          return json(res, { error: 'Access denied' }, 403);
+        }
+      } else if (req.agent.name !== fileMeta.uploaded_by && req.agent.name !== 'Chairman') {
+        return json(res, { error: 'Access denied' }, 403);
+      }
+
+      const filePath = join(__dirname, 'uploads', fileId);
+      if (!existsSync(filePath)) return json(res, { error: 'File data not found' }, 404);
+
+      const data = readFileSync(filePath);
+      res.writeHead(200, {
+        'Content-Type': fileMeta.mime_type,
+        'Content-Disposition': `attachment; filename="${fileMeta.original_name}"`,
+        'Content-Length': data.length
+      });
+      res.end(data);
+      return;
+    }
+
+    // ── GET /api/files/:id/meta — File metadata ──────────
+    if (method === 'GET' && path.match(/^\/api\/files\/[^/]+\/meta$/) && path.split('/').length === 5) {
+      const fileId = path.split('/')[3];
+      const fileMeta = getFile(fileId);
+      if (!fileMeta) return json(res, { error: 'File not found' }, 404);
+      return json(res, fileMeta);
+    }
+
     // ── GET /api/channels ─────────────────────────────
     if (method === 'GET' && path === '/api/channels') {
       const channels = getChannelsForAgent(req.agent.name);
@@ -762,8 +837,22 @@ export async function handleRequest(req, res) {
         name: a.name,
         role: a.role,
         status: isOnline(a.name) ? 'online' : a.status,
-        lastSeen: a.last_seen
+        lastSeen: a.last_seen,
+        reports_to: a.reports_to || null
       })));
+    }
+
+    // ── PATCH /api/agents/:name ───────────────────────
+    if (method === 'PATCH' && path.match(/^\/api\/agents\/[^/]+$/) && path.split('/').length === 4) {
+      const name = decodeURIComponent(path.split('/')[3]);
+      if (req.agent.name !== 'Chairman' && req.agent.name !== 'CEO' && req.agent.name !== 'HR') {
+        return json(res, { error: 'Only Chairman, CEO or HR can modify agents' }, 403);
+      }
+      const body = await readBody(req);
+      const target = getAgentByName(name);
+      if (!target) return json(res, { error: 'Agent not found' }, 404);
+      if (body.reports_to !== undefined) setReportsTo(name, body.reports_to);
+      return json(res, { ok: true, agent: name, reports_to: body.reports_to });
     }
 
     // ── POST /api/agents/:name/start ───────────────────
@@ -855,6 +944,38 @@ export async function handleRequest(req, res) {
       return json(res, ch, 201);
     }
 
+    // ── GET /api/channels/:id/members ─────────────────
+    if (method === 'GET' && path.match(/^\/api\/channels\/[^/]+\/members$/) && path.split('/').length === 5) {
+      const channelId = decodeURIComponent(path.split('/')[3]);
+      const members = getChannelMembers(channelId);
+      return json(res, { channel: channelId, members });
+    }
+
+    // ── POST /api/channels/:id/members (add member) ───
+    if (method === 'POST' && path.match(/^\/api\/channels\/[^/]+\/members$/) && path.split('/').length === 5) {
+      const channelId = decodeURIComponent(path.split('/')[3]);
+      if (req.agent.name !== 'Chairman' && req.agent.name !== 'CEO') {
+        return json(res, { error: 'Only Chairman or CEO can manage members' }, 403);
+      }
+      const body = await readBody(req);
+      if (!body.agent_name) return json(res, { error: 'agent_name is required' }, 400);
+      const agent = getAgentByName(body.agent_name);
+      if (!agent) return json(res, { error: `Agent "${body.agent_name}" not found` }, 404);
+      addChannelMember(channelId, body.agent_name);
+      return json(res, { ok: true, channel: channelId, added: body.agent_name });
+    }
+
+    // ── DELETE /api/channels/:id/members/:name (remove member) ───
+    if (method === 'DELETE' && path.match(/^\/api\/channels\/[^/]+\/members\/[^/]+$/) && path.split('/').length === 6) {
+      const channelId = decodeURIComponent(path.split('/')[3]);
+      const agentName = decodeURIComponent(path.split('/')[5]);
+      if (req.agent.name !== 'Chairman' && req.agent.name !== 'CEO') {
+        return json(res, { error: 'Only Chairman or CEO can manage members' }, 403);
+      }
+      removeChannelMember(channelId, agentName);
+      return json(res, { ok: true, channel: channelId, removed: agentName });
+    }
+
     // ── POST /api/tasks (create task) ─────────────────
     if (method === 'POST' && path === '/api/tasks') {
       const body = await readBody(req);
@@ -895,7 +1016,7 @@ export async function handleRequest(req, res) {
       if (!title) return json(res, { error: 'title is required (or provide source_msg)' }, 400);
 
       // Merge long-term task metadata
-      if (body.task_type || body.checkin_interval || body.progress !== undefined) {
+      if (body.task_type || body.checkin_interval || body.progress !== undefined || body.related_state) {
         let meta = {};
         try { meta = JSON.parse(body.metadata || '{}'); } catch {}
         if (body.task_type) meta.task_type = body.task_type;
@@ -908,7 +1029,10 @@ export async function handleRequest(req, res) {
           else if (body.checkin_interval === 'biweekly') next.setDate(next.getDate() + 14);
           meta.next_checkin = next.toISOString();
         }
-        body.metadata = JSON.stringify(meta);
+        if (body.related_state) meta.related_state = body.related_state;
+        if (body.related_state_project) meta.related_state_project = body.related_state_project;
+        if (body.target_value) meta.target_value = body.target_value;
+        body.metadata = meta;  // Pass as object, createTask handles JSON.stringify
       }
 
       const task = createTask({
@@ -928,8 +1052,9 @@ export async function handleRequest(req, res) {
 
       // Phase 3: SSE event + DM notification
       const taskEvent = { type: 'task_created', task: { id: task.id, title: task.title, status: task.status, priority: task.priority, creator: task.creator, assignee: task.assignee } };
-      const allAgents = getAllAgents().map(a => a.name).filter(n => n !== req.agent.name);
-      pushToAgents(allAgents, taskEvent);
+      const taskCreateTargets = new Set();
+      if (task.assignee && task.assignee !== req.agent.name) taskCreateTargets.add(task.assignee);
+      pushToAgents([...taskCreateTargets], taskEvent);
 
       // DM notify assignee
       if (task.assignee && task.assignee !== req.agent.name) {
@@ -1078,8 +1203,10 @@ export async function handleRequest(req, res) {
 
       // M1: SSE event with changes and actor
       const taskEvent = { type: 'task_updated', task_id: updated.id, title: updated.title, changes: changeLog, actor: agentName };
-      const allAgents = getAllAgents().map(a => a.name).filter(n => n !== agentName);
-      pushToAgents(allAgents, taskEvent);
+      const taskUpdateTargets = new Set();
+      if (updated.assignee && updated.assignee !== agentName) taskUpdateTargets.add(updated.assignee);
+      if (updated.creator && updated.creator !== agentName) taskUpdateTargets.add(updated.creator);
+      pushToAgents([...taskUpdateTargets], taskEvent);
 
       // Phase 3: DM notifications based on changes
       const notifyTargets = new Map(); // target → dmContent
@@ -1116,6 +1243,17 @@ export async function handleRequest(req, res) {
         updateReadStatus(agentName, dmCh.id, dmMsg.id);
       }
 
+      // Task-State light linking: auto-update linked state when task is done
+      if (updated.status === 'done' && oldStatus !== 'done') {
+        try {
+          const taskMeta = JSON.parse(updated.metadata || '{}');
+          if (taskMeta.related_state && taskMeta.target_value) {
+            const stateProjectId = taskMeta.related_state_project || 'default';
+            setState(stateProjectId, taskMeta.related_state, taskMeta.target_value, agentName, `Auto-updated by task ${updated.id} completion`, { isApproval: true });
+          }
+        } catch {}
+      }
+
       return json(res, { task: updated });
     }
 
@@ -1136,8 +1274,10 @@ export async function handleRequest(req, res) {
 
       // Phase 3: SSE event
       const taskEvent = { type: 'task_deleted', task: { id: task.id, title: task.title } };
-      const allAgents = getAllAgents().map(a => a.name).filter(n => n !== agentName);
-      pushToAgents(allAgents, taskEvent);
+      const taskDeleteTargets = new Set();
+      if (task.assignee && task.assignee !== agentName) taskDeleteTargets.add(task.assignee);
+      if (task.creator && task.creator !== agentName) taskDeleteTargets.add(task.creator);
+      pushToAgents([...taskDeleteTargets], taskEvent);
 
       return json(res, result);
     }
@@ -1489,10 +1629,10 @@ export async function handleRequest(req, res) {
         const other = parts[1] === req.agent.name ? parts[2] : parts[1];
         pushToAgent(other, event);
       } else if (channel.type === 'group') {
-        const targets = getAllAgents().map(a => a.name).filter(n => n !== req.agent.name);
+        const targets = ensureChairman(getChannelMembers(msg.channel_id).filter(m => m !== req.agent.name), req.agent.name);
         pushToAgents(targets, event);
       } else if (channel.type === 'topic') {
-        const targets = getChannelMembers(msg.channel_id).filter(m => m !== req.agent.name);
+        const targets = ensureChairman(getChannelMembers(msg.channel_id).filter(m => m !== req.agent.name), req.agent.name);
         pushToAgents(targets, event);
       }
 
@@ -1517,10 +1657,10 @@ export async function handleRequest(req, res) {
         const other = dparts[1] === req.agent.name ? dparts[2] : dparts[1];
         pushToAgent(other, event);
       } else if (channel.type === 'group') {
-        const targets = getAllAgents().map(a => a.name).filter(n => n !== req.agent.name);
+        const targets = ensureChairman(getChannelMembers(msg.channel_id).filter(m => m !== req.agent.name), req.agent.name);
         pushToAgents(targets, event);
       } else if (channel.type === 'topic') {
-        const targets = getChannelMembers(msg.channel_id).filter(m => m !== req.agent.name);
+        const targets = ensureChairman(getChannelMembers(msg.channel_id).filter(m => m !== req.agent.name), req.agent.name);
         pushToAgents(targets, event);
       }
 
@@ -1544,10 +1684,10 @@ export async function handleRequest(req, res) {
         const other = parts[1] === req.agent.name ? parts[2] : parts[1];
         pushToAgent(other, event);
       } else if (channel.type === 'group') {
-        const targets = getAllAgents().map(a => a.name).filter(n => n !== req.agent.name);
+        const targets = ensureChairman(getChannelMembers(msg.channel_id).filter(m => m !== req.agent.name), req.agent.name);
         pushToAgents(targets, event);
       } else if (channel.type === 'topic') {
-        const targets = getChannelMembers(msg.channel_id).filter(m => m !== req.agent.name);
+        const targets = ensureChairman(getChannelMembers(msg.channel_id).filter(m => m !== req.agent.name), req.agent.name);
         pushToAgents(targets, event);
       }
 
@@ -1572,10 +1712,10 @@ export async function handleRequest(req, res) {
         const other = parts[1] === req.agent.name ? parts[2] : parts[1];
         pushToAgent(other, event);
       } else if (channel.type === 'group') {
-        const targets = getAllAgents().map(a => a.name).filter(n => n !== req.agent.name);
+        const targets = ensureChairman(getChannelMembers(msg.channel_id).filter(m => m !== req.agent.name), req.agent.name);
         pushToAgents(targets, event);
       } else if (channel.type === 'topic') {
-        const targets = getChannelMembers(msg.channel_id).filter(m => m !== req.agent.name);
+        const targets = ensureChairman(getChannelMembers(msg.channel_id).filter(m => m !== req.agent.name), req.agent.name);
         pushToAgents(targets, event);
       }
 

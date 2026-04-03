@@ -1,4 +1,4 @@
-import { setAgentStatus, getUnreadMessages, getUnreadCount, getUnreadMentions, getLastNMessages, getStateChangesSince, getAgentByName, batchUpdateReadStatus, saveMessage } from './db.mjs';
+import { setAgentStatus, getUnreadMessages, getUnreadCount, getUnreadMentions, getLastNMessages, getStateChangesSince, getAgentByName, batchUpdateReadStatus, saveMessage, getReportsTo } from './db.mjs';
 import { isStopped } from './process-manager.mjs';
 
 // Map: agentName → Set<res>  (one agent may have multiple SSE connections)
@@ -286,23 +286,39 @@ export function pushToAgent(agentName, data) {
 /**
  * Push to multiple agents.
  */
+const PUSH_STAGGER_MS = 1500; // Stagger pushes to avoid API rate limit storms
+
 export function pushToAgents(agentNames, data) {
-  for (const name of agentNames) {
-    pushToAgent(name, data);
-  }
+  agentNames.forEach((name, i) => {
+    if (i === 0) {
+      pushToAgent(name, data); // First agent immediately
+    } else {
+      setTimeout(() => pushToAgent(name, data), i * PUSH_STAGGER_MS);
+    }
+  });
 }
 
 /**
- * Broadcast status change to all connected agents.
+ * Push status change to relevant agents only (per command chain).
+ * Only direct superior (from DB) + Chairman (Dashboard) are notified, not all agents.
  */
 export function broadcastStatus(agentName, status) {
   const data = { type: 'status', agent: agentName, status };
-  for (const [name, set] of connections) {
-    if (name === agentName) continue;
-    const payload = `data: ${JSON.stringify(data)}\n\n`;
+  const payload = `data: ${JSON.stringify(data)}\n\n`;
+
+  // Notify: direct superior (from DB) + always Chairman (Dashboard)
+  const targets = new Set();
+  const superior = getReportsTo(agentName);
+  if (superior) targets.add(superior);
+  targets.add('Chairman');
+
+  for (const target of targets) {
+    if (target === agentName) continue;
+    const set = connections.get(target);
+    if (!set) continue;
     for (const res of set) {
       try { res.write(payload); } catch {
-        removeConnection(name, res);
+        removeConnection(target, res);
       }
     }
   }

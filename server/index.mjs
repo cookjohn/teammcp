@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { handleRequest } from './router.mjs';
-import { closeAllConnections, pushToAgents } from './sse.mjs';
-import { closeDb, getOverdueTasks, markOverdueNotified, saveMessage, getAllAgents, getSchedulesDue, updateScheduleNextRun, getNextCronRun, getCheckInDueTasks, updateCheckIn } from './db.mjs';
+import { closeAllConnections, pushToAgents, getOnlineAgents } from './sse.mjs';
+import { closeDb, getOverdueTasks, markOverdueNotified, saveMessage, getAllAgents, getSchedulesDue, updateScheduleNextRun, getNextCronRun, getCheckInDueTasks, updateCheckIn, getChannelMembers, getChannel, getPendingTasksCount, setState } from './db.mjs';
 
 const PORT = process.env.TEAMMCP_PORT || 3100;
 
@@ -35,10 +35,12 @@ setInterval(() => {
       const mentions = mention ? JSON.stringify([mention]) : '[]';
       saveMessage(channel, 'System', content, mentions, null);
 
-      // SSE push to all agents
-      const allAgents = getAllAgents().map(a => a.name);
+      // SSE push to task assignee and creator only
+      const overdueTargets = new Set();
+      if (task.assignee) overdueTargets.add(task.assignee);
+      if (task.creator) overdueTargets.add(task.creator);
       const msgEvent = { type: 'message', channel, from: 'System', content, mentions: mention ? [mention] : [], id: `sys_overdue_${task.id}_${Date.now()}`, timestamp: new Date().toISOString() };
-      pushToAgents(allAgents, msgEvent);
+      pushToAgents([...overdueTargets], msgEvent);
 
       markOverdueNotified(task.id);
       console.log(`[overdue] Notified: ${task.title} (${task.id})`);
@@ -55,10 +57,23 @@ setInterval(() => {
       const content = `📋 定期 Check-in 提醒：**${task.title}**${progress}\n请汇报当前进展。\n负责人：${mention}\nTask ID: ${task.id}`;
       const mentions = mention ? JSON.stringify([mention]) : '[]';
       saveMessage(channel, 'System', content, mentions, null);
-      const allAgents = getAllAgents().map(a => a.name);
-      pushToAgents(allAgents, { type: 'message', channel, from: 'System', content, mentions: mention ? [mention] : [], id: `sys_checkin_${task.id}_${Date.now()}`, timestamp: new Date().toISOString() });
+      const checkinTargets = new Set();
+      if (task.assignee) checkinTargets.add(task.assignee);
+      if (task.creator) checkinTargets.add(task.creator);
+      pushToAgents([...checkinTargets], { type: 'message', channel, from: 'System', content, mentions: mention ? [mention] : [], id: `sys_checkin_${task.id}_${Date.now()}`, timestamp: new Date().toISOString() });
       updateCheckIn(task.id);
       console.log(`[checkin] Reminded: ${task.title} (${task.id})`);
+    }
+    // ── Auto-state inference: compute and update system state fields ──
+    try {
+      const onlineAgents = getOnlineAgents();
+      const onlineCount = onlineAgents.length;
+      const pendingCount = getPendingTasksCount();
+
+      setState('teammcp-dev', 'online_agents_count', String(onlineCount), 'System', 'Auto-computed', { isHumanOverride: true });
+      setState('teammcp-dev', 'pending_tasks_count', String(pendingCount), 'System', 'Auto-computed', { isHumanOverride: true });
+    } catch (e) {
+      // Silent fail for auto-state inference
     }
   } catch (e) {
     console.error('[overdue] Check failed:', e.message);
@@ -73,8 +88,9 @@ setInterval(() => {
       // Save the message to the channel
       saveMessage(sched.channel, sched.created_by, sched.content, '[]', null);
 
-      // SSE push to all agents
-      const allAgents = getAllAgents().map(a => a.name);
+      // SSE push to channel members
+      const schedChannel = getChannel(sched.channel);
+      const schedTargets = schedChannel ? getChannelMembers(sched.channel) : [];
       const msgEvent = {
         type: 'message',
         channel: sched.channel,
@@ -84,7 +100,7 @@ setInterval(() => {
         id: `sched_msg_${sched.id}_${Date.now()}`,
         timestamp: new Date().toISOString(),
       };
-      pushToAgents(allAgents, msgEvent);
+      pushToAgents(schedTargets, msgEvent);
 
       // Calculate next run and update
       const nextRun = getNextCronRun(sched.cron_expr, new Date());

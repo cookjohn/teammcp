@@ -76,6 +76,11 @@ try {
   db.exec(`ALTER TABLE state_kv ADD COLUMN approver TEXT DEFAULT NULL`);
 } catch { /* column already exists */ }
 
+// Add reports_to column to agents for data-driven command chain
+try {
+  db.exec('ALTER TABLE agents ADD COLUMN reports_to TEXT DEFAULT NULL');
+} catch { /* column already exists */ }
+
 // Add source column to change_log for audit categorization
 try {
   db.exec(`ALTER TABLE change_log ADD COLUMN source TEXT DEFAULT 'state'`);
@@ -216,7 +221,20 @@ export function setAgentStatus(name, status) {
 }
 
 export function getAllAgents() {
-  return db.prepare('SELECT name, role, status, last_seen FROM agents').all();
+  return db.prepare('SELECT name, role, status, last_seen, reports_to FROM agents').all();
+}
+
+export function getReportsTo(agentName) {
+  const row = db.prepare('SELECT reports_to FROM agents WHERE name = ?').get(agentName);
+  return row?.reports_to || null;
+}
+
+export function setReportsTo(agentName, superior) {
+  db.prepare('UPDATE agents SET reports_to = ? WHERE name = ?').run(superior, agentName);
+}
+
+export function getSubordinates(superiorName) {
+  return db.prepare('SELECT name, role, status FROM agents WHERE reports_to = ?').all(superiorName);
 }
 
 // ── Channels ────────────────────────────────────────────
@@ -278,6 +296,10 @@ export function addChannelMember(channelId, agentName) {
   db.prepare(
     'INSERT OR IGNORE INTO channel_members (channel_id, agent_name) VALUES (?, ?)'
   ).run(channelId, agentName);
+}
+
+export function removeChannelMember(channelId, agentName) {
+  db.prepare('DELETE FROM channel_members WHERE channel_id = ? AND agent_name = ?').run(channelId, agentName);
 }
 
 // ── Messages ────────────────────────────────────────────
@@ -655,6 +677,11 @@ export function getTask(id) {
   return db.prepare('SELECT * FROM tasks WHERE id = ? AND deleted = 0').get(id);
 }
 
+export function getPendingTasksCount() {
+  const row = db.prepare("SELECT COUNT(*) as cnt FROM tasks WHERE status != 'done' AND deleted = 0").get();
+  return row.cnt;
+}
+
 export function getTasks(filters = {}) {
   const conditions = ['deleted = 0'];
   const params = [];
@@ -1026,6 +1053,11 @@ export function setState(projectId, field, value, changedBy, reason, opts = {}) 
     }
     const isHuman = opts.isHumanOverride === true; // Only set by router for dashboard admin
     const existing = db.prepare('SELECT * FROM state_kv WHERE project_id = ? AND field = ?').get(projectId, field);
+
+    // Optimistic concurrency control (check before any write path)
+    if (opts.expected_version !== undefined && existing && opts.expected_version !== existing.version) {
+      return { error: 'version_conflict', expected: opts.expected_version, actual: existing.version };
+    }
 
     if (existing) {
       const isOwner = existing.owner === changedBy;
@@ -1869,6 +1901,37 @@ export function deleteSchedule(id, agentName) {
 
 export function updateScheduleNextRun(id, nextRun) {
   db.prepare('UPDATE scheduled_messages SET next_run = ? WHERE id = ?').run(nextRun, id);
+}
+
+// ── Files ─────────────────────────────────────────────────
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS files (
+  id TEXT PRIMARY KEY,
+  original_name TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  size INTEGER NOT NULL,
+  sha256 TEXT NOT NULL,
+  uploaded_by TEXT NOT NULL,
+  channel TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+`);
+
+export function saveFile(id, originalName, mimeType, size, sha256, uploadedBy, channel) {
+  db.prepare(`
+    INSERT INTO files (id, original_name, mime_type, size, sha256, uploaded_by, channel)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, originalName, mimeType, size, sha256, uploadedBy, channel);
+  return { id, original_name: originalName, mime_type: mimeType, size, sha256, uploaded_by: uploadedBy, channel };
+}
+
+export function getFile(id) {
+  return db.prepare('SELECT * FROM files WHERE id = ?').get(id);
+}
+
+export function getFileMeta(id) {
+  return db.prepare('SELECT * FROM files WHERE id = ?').get(id);
 }
 
 export function closeDb() {
