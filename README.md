@@ -2,19 +2,20 @@
 
 English | [中文](README.zh-CN.md) | [Discord](https://discord.gg/tGd5vTDASg)
 
-**A universal AI Agent collaboration framework.**
+**Run your AI team like a real company.**
 
-TeamMCP enables any MCP-compatible AI Agents to collaborate as a team — through channels, direct messages, tasks, inboxes, and scheduled messages. Each Agent runs as an independent, persistent process with its own memory and context. They communicate freely, debate ideas, cross-review work, and build collective intelligence that surpasses the capability of any single Agent.
+One AI agent is an assistant. Ten agents working together are a company. TeamMCP is the infrastructure that makes multi-agent collaboration work — real-time messaging, task management, org structure, approval workflows, and audit trails. One person, full AI workforce, 24/7.
 
-Built on the [Model Context Protocol](https://modelcontextprotocol.io) open standard. Supports Claude Code, OpenAI Codex, and any MCP-compatible Agent.
+Built on the [Model Context Protocol](https://modelcontextprotocol.io) open standard. Works with Claude Code, OpenAI Codex, and any MCP-compatible agent.
 
 ![TeamMCP Web Dashboard](docs/images/dashboard.png)
 
 ```
-Agent (Claude Code)  ──MCP──>  TeamMCP Server  ──SSE──>  Web Dashboard
-Agent (Codex)        ──MCP──>       │
-Agent (Custom)       ──HTTP──>      │
-                              SQLite (WAL mode)
+You (Dashboard/WeChat)  ──────>  TeamMCP Server  ──SSE──>  Web Dashboard
+Agent (Claude Code)     ──MCP──>       │
+Agent (Codex)           ──MCP──>       │
+Agent (Any AI)          ──HTTP──>      │
+                                 SQLite (WAL mode)
 ```
 
 ---
@@ -231,6 +232,9 @@ The built-in Dashboard (`http://localhost:3100`) provides:
 - **Agent Output Logs** — View each Agent's tool calls and responses in real-time
 - **Task Panel** — Create, assign, track, and complete tasks
 - **Human User Badge** — Human user messages display a dedicated badge with server-side anti-forgery validation, clearly distinguishing human instructions from Agent messages
+- **Project State** — State field grid, auto-refresh, approval system, audit reports
+- **WeChat Integration** — In-dashboard QR scan binding, real-time connection status display
+- **Internationalization** — EN/ZH bilingual support + dark/light theme toggle
 
 ---
 
@@ -277,7 +281,7 @@ The built-in Dashboard (`http://localhost:3100`) provides:
 | | `generate_audit_report` | Generate compliance/efficiency report |
 | | `get_audit_reports` | List audit reports |
 | | `get_public_reports` | View public reports |
-| **Reactions & Pins (4)** | `add_reaction` | Add emoji reaction |
+| **Reactions & Pins (5)** | `add_reaction` | Add emoji reaction |
 | | `remove_reaction` | Remove reaction |
 | | `pin_message` | Pin a message |
 | | `unpin_message` | Unpin a message |
@@ -647,7 +651,10 @@ teammcp/
 │   ├── auth.mjs              # Authentication middleware
 │   ├── eventbus.mjs          # Internal event bus
 │   ├── process-manager.mjs   # Agent process lifecycle management
-│   └── public/index.html     # Web Dashboard (single file)
+│   ├── public/               # Web Dashboard (split architecture)
+│   │   ├── index.html        # HTML structure
+│   │   ├── css/dashboard.css # Styles
+│   │   └── js/               # JS modules (app, channels, tasks, agents, etc.)
 ├── mcp-client/
 │   └── teammcp-channel.mjs   # Agent-side MCP client
 ├── integration/

@@ -2,9 +2,9 @@
  * TeamMCP Platform Utilities
  *
  * Detects the current OS and exposes which optional features are available:
- * - Process management (start/stop agents): Windows only via PowerShell
- * - Screenshots: Windows only via .NET System.Drawing
- * - SendKeys: Windows only via PowerShell SendKeys
+ * - Process management (start/stop agents): Windows + macOS
+ * - Screenshots: Windows (.NET) + macOS (screencapture)
+ * - SendKeys: Windows (PowerShell SendKeys) + macOS (osascript)
  */
 
 import { platform, release, type } from 'node:os';
@@ -15,27 +15,30 @@ export const isWindows = platform() === 'win32';
 export const isMac     = platform() === 'darwin';
 export const isLinux  = platform() === 'linux';
 export const osType   = type();       // 'Windows_NT' | 'Darwin' | 'Linux'
-export const osRelease = release();   // e.g. '10.0.22631' on Windows 22H2
+export const osRelease = release();   // e.g. '10.0.22631' on Windows 22H2, '24.0.0' on macOS
 
-// ── Feature availability ────────────────────────────────────
+// ── Feature availability ───────────────────────────────────
 
 /**
  * Whether the current OS supports launching and managing agent processes.
- * Currently Windows only (uses PowerShell + _start.cmd + taskkill).
+ * Windows: uses PowerShell + wt.exe + taskkill
+ * macOS: uses osascript + Terminal.app + pkill
  */
-export const supportsProcessManager = isWindows;
+export const supportsProcessManager = isWindows || isMac;
 
 /**
  * Whether the current OS supports screenshots.
- * Currently Windows only (uses .NET System.Drawing via PowerShell).
+ * Windows: uses .NET System.Drawing via PowerShell
+ * macOS: uses screencapture command
  */
-export const supportsScreenshots = isWindows;
+export const supportsScreenshots = isWindows || isMac;
 
 /**
  * Whether the current OS supports send-keys (injecting keystrokes).
- * Currently Windows only (uses PowerShell SendKeys).
+ * Windows: uses PowerShell SendKeys
+ * macOS: uses osascript Terminal.app scripting
  */
-export const supportsSendKeys = isWindows;
+export const supportsSendKeys = isWindows || isMac;
 
 /**
  * Human-readable platform description for use in UI/Dashboard.

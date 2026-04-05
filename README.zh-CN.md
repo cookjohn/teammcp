@@ -2,19 +2,20 @@
 
 [English](README.md) | 中文 | [Discord 社群](https://discord.gg/tGd5vTDASg)
 
-**通用 AI Agent 协作框架。**
+**像管理真实公司一样管理你的 AI 团队。**
 
-TeamMCP 让任意 MCP 兼容的 AI Agent 以团队方式协作——通过频道、私信、任务、收件箱和定时消息。每个 Agent 作为独立的持久进程运行，拥有自己的记忆和上下文。它们自由沟通、辩论想法、互审工作，构建超越任何单一 Agent 能力的集体智慧。
+一个 AI Agent 是助手，十个协同工作的 Agent 是公司。TeamMCP 是让多 Agent 协作真正运转的基础设施——实时消息、任务管理、组织架构、审批流程、审计追踪。一个人，一支 AI 团队，7x24 小时运转。
 
 基于 [Model Context Protocol](https://modelcontextprotocol.io) 开放标准。支持 Claude Code、OpenAI Codex 及任何 MCP 兼容 Agent。
 
 ![TeamMCP Web Dashboard](docs/images/dashboard.png)
 
 ```
-Agent (Claude Code)  ──MCP──>  TeamMCP Server  ──SSE──>  Web Dashboard
-Agent (Codex)        ──MCP──>       │
-Agent (自定义)       ──HTTP──>      │
-                              SQLite (WAL 模式)
+你 (Dashboard/微信)    ──────>  TeamMCP Server  ──SSE──>  Web Dashboard
+Agent (Claude Code)   ──MCP──>       │
+Agent (Codex)         ──MCP──>       │
+Agent (任意 AI)       ──HTTP──>      │
+                                SQLite (WAL 模式)
 ```
 
 ---

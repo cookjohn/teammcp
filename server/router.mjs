@@ -358,7 +358,8 @@ export async function handleRequest(req, res) {
       }
 
       // Auto-extract @mentions from text (supports names with dots like qwen3.6)
-      const textMentions = (body.content.match(/@([\w.][\w.]*)/g) || []).map(m => m.slice(1));
+      // Only include names that correspond to registered agents
+      const textMentions = (body.content.match(/@([\w.][\w.]*)/g) || []).map(m => m.slice(1)).filter(name => getAgentByName(name));
       if (textMentions.length > 0) {
         body.mentions = [...new Set([...(body.mentions || []), ...textMentions])];
       }
@@ -403,6 +404,22 @@ export async function handleRequest(req, res) {
         }
       }
 
+      // Inherit wechat source from replied message (for reply chain tracking)
+      if (body.replyTo) {
+        try {
+          const origMsg = getMessage(body.replyTo);
+          if (origMsg) {
+            const origMeta = typeof origMsg.metadata === 'string' ? JSON.parse(origMsg.metadata || '{}') : (origMsg.metadata || {});
+            if (origMeta.source === 'wechat' || origMeta.source === 'wechat_reply') {
+              if (!body.metadata) body.metadata = {};
+              body.metadata.source = body.metadata.source || 'wechat_reply';
+              body.metadata.context_token = body.metadata.context_token || origMeta.context_token;
+              body.metadata.from_user_id = body.metadata.from_user_id || origMeta.from_user_id;
+            }
+          }
+        } catch {}
+      }
+
       const mentions = body.mentions || [];
       const msg = saveMessage(channelId, req.agent.name, body.content, mentions, body.replyTo, body.metadata);
 
@@ -430,8 +447,9 @@ export async function handleRequest(req, res) {
         // Update read_status for online recipient (delivered = read in SSE model)
         if (isOnline(other)) updateReadStatus(other, channelId, msg.id);
 
-        // Forward DMs to Chairman → WeChat (if bridge connected)
-        if (other === 'Chairman' && req.agent.name !== 'Chairman') {
+        // Forward DMs to Chairman → WeChat (only for wechat-sourced reply chains)
+        const msgMeta = body.metadata || {};
+        if (other === 'Chairman' && req.agent.name !== 'Chairman' && (msgMeta.source === 'wechat_reply' || msgMeta.source === 'wechat')) {
           try {
             const { sendToWeChat, uploadAndSendFile, getStatus } = await import('./wechat-bridge.mjs');
             if (getStatus().connected) {
@@ -468,8 +486,9 @@ export async function handleRequest(req, res) {
         for (const a of groupMembers) {
           if (isOnline(a)) updateReadStatus(a, channelId, msg.id);
         }
-        // Forward @Chairman mentions → WeChat
-        if (body.mentions && body.mentions.includes('Chairman') && req.agent.name !== 'Chairman') {
+        // Forward @Chairman mentions → WeChat (only for wechat-sourced messages)
+        const groupMeta = body.metadata || {};
+        if (body.mentions && body.mentions.includes('Chairman') && req.agent.name !== 'Chairman' && (groupMeta.source === 'wechat_reply' || groupMeta.source === 'wechat')) {
           try {
             const { sendToWeChat, getStatus } = await import('./wechat-bridge.mjs');
             if (getStatus().connected) {
