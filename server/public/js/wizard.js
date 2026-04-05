@@ -94,6 +94,17 @@ async function wizardNext() {
       var data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Registration failed');
       wizardData.apiKey = data.apiKey || data.data?.apiKey || '';
+      wizardData.userName = name;
+      // Show API Key to user immediately
+      var resultDiv = document.getElementById('wiz-profile-result');
+      if (resultDiv && wizardData.apiKey) {
+        resultDiv.style.display = 'block';
+        resultDiv.innerHTML = '<div style="background:rgba(61,214,140,0.1); border:1px solid var(--green); border-radius:var(--radius-sm); padding:12px; margin-top:12px;">' +
+          '<div style="color:var(--green); font-weight:600; margin-bottom:4px;">' + i18n.t('wizard.registerSuccess') + '</div>' +
+          '<div style="font-size:12px; color:var(--text-dim); margin-bottom:8px;">' + i18n.t('wizard.saveApiKey') + '</div>' +
+          '<code style="user-select:all; background:var(--code-bg); padding:4px 8px; border-radius:3px; font-size:12px; word-break:break-all;">' + escapeHtml(wizardData.apiKey) + '</code>' +
+          '</div>';
+      }
     } catch (e) {
       if (errEl) errEl.textContent = i18n.t('wizard.registerFailed') + e.message;
       return;
@@ -115,7 +126,7 @@ async function wizardNext() {
         if (errEl) errEl.textContent = i18n.t('wizard.agentNameInvalid');
         return;
       }
-      var agentRegisterBody = { name: aName };
+      var agentRegisterBody = { name: aName, createDirectory: true };
       if (aRole) agentRegisterBody.role = aRole;
       if (wizardData.secret) agentRegisterBody.secret = wizardData.secret;
 
@@ -171,6 +182,8 @@ async function wizardNext() {
       agentName = await resolveAgentName();
       renderAgents();
       renderChannels();
+      applyI18n();
+      initWechatPanel();
       document.getElementById('auth-overlay').style.display = 'none';
       document.getElementById('app').classList.add('active');
     } catch (e) {
@@ -226,7 +239,8 @@ function renderWizardProfile(container) {
     '<div class="form-group">' +
       '<label>' + i18n.t('wizard.userRole') + '</label>' +
       '<input type="text" id="wiz-user-role" value="' + i18n.t('wizard.defaultUserRole') + '" placeholder="' + i18n.t('wizard.userRolePlaceholder').replace(/"/g, '&quot;') + '">' +
-    '</div>';
+    '</div>' +
+    '<div id="wiz-profile-result" style="display:none;"></div>';
 }
 
 function renderWizardConfigureAgent(container) {

@@ -1,11 +1,15 @@
 import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { publish } from './eventbus.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_PATH = path.join(__dirname, '..', 'data', 'teammcp.db');
+const TEAMMCP_HOME = process.env.TEAMMCP_HOME || path.join((await import('node:os')).homedir(), '.teammcp');
+const DATA_DIR = path.join(TEAMMCP_HOME, 'data');
+mkdirSync(DATA_DIR, { recursive: true });
+const DB_PATH = path.join(DATA_DIR, 'teammcp.db');
 
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');

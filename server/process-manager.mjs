@@ -280,7 +280,9 @@ export async function startAgent(name) {
         for (const entry of readdirSync(skillsSourceDir)) {
           const src = join(skillsSourceDir, entry);
           const dst = join(skillsTargetDir, entry);
-          if (statSync(src).isDirectory() && !existsSync(dst)) {
+          // Skip if skill exists in project-level OR agent-config-level skills
+          const configSkillDir = join(agentDir, '.claude-config', 'skills', entry);
+          if (statSync(src).isDirectory() && !existsSync(dst) && !existsSync(configSkillDir)) {
             cpSync(src, dst, { recursive: true });
           }
         }

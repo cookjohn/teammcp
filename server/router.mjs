@@ -39,6 +39,7 @@ import {
 } from './sse.mjs';
 import { startAgent, stopAgent, screenshotAgent, sendKeysToAgent, getAgentProcessStatus, checkProcessPermission } from './process-manager.mjs';
 import { publish } from './eventbus.mjs';
+import { AGENTS_DIR } from './lib/paths.mjs';
 
 const __dirname = join(fileURLToPath(import.meta.url), '..');
 const PUBLIC_DIR = join(__dirname, 'public');
@@ -227,6 +228,32 @@ export async function handleRequest(req, res) {
       }
 
       const agent = registerAgent(body.name, body.role);
+
+      // Optionally create agent directory structure (for wizard/Dashboard use)
+      if (body.createDirectory && (process.env.AGENTS_BASE_DIR || AGENTS_DIR)) {
+        try {
+          const agentsBase = process.env.AGENTS_BASE_DIR || AGENTS_DIR;
+          const agentDir = join(agentsBase, body.name);
+          if (!existsSync(agentDir)) mkdirSync(agentDir, { recursive: true });
+          // Create .claude-config
+          const configDir = join(agentDir, '.claude-config');
+          if (!existsSync(configDir)) mkdirSync(configDir, { recursive: true });
+          // Create .mcp.json
+          const mcpJsonPath = join(agentDir, '.mcp.json');
+          if (!existsSync(mcpJsonPath)) {
+            const packageRoot = join(fileURLToPath(import.meta.url), '..', '..');
+            const mcpClientPath = join(packageRoot, 'mcp-client', 'teammcp-channel.mjs').replace(/\\/g, '/');
+            const serverUrl = process.env.TEAMMCP_URL || `http://localhost:${process.env.TEAMMCP_PORT || 3100}`;
+            writeFileSync(mcpJsonPath, JSON.stringify({ mcpServers: { teammcp: { command: 'node', args: [mcpClientPath], env: { AGENT_NAME: body.name, TEAMMCP_KEY: agent.api_key, TEAMMCP_URL: serverUrl } } } }, null, 2), 'utf-8');
+          }
+          // Create CLAUDE.md
+          const claudeMdPath = join(agentDir, 'CLAUDE.md');
+          if (!existsSync(claudeMdPath)) {
+            writeFileSync(claudeMdPath, `你是 ${body.name}（${body.role || 'AI Assistant'}）。\n\n## 沟通方式\n\n- 通过 teammcp 的 send_message / send_dm 工具与团队沟通\n- 收到消息后根据你的角色定义来响应\n`, 'utf-8');
+          }
+        } catch (e) { console.error(`[register] Directory creation failed: ${e.message}`); }
+      }
+
       return json(res, { apiKey: agent.api_key, agent: { name: agent.name, role: agent.role } });
     }
 
@@ -328,6 +355,12 @@ export async function handleRequest(req, res) {
 
       if (!checkRate(req.agent.name)) {
         return json(res, { error: 'Rate limit exceeded (10 msg/s)' }, 429);
+      }
+
+      // Auto-extract @mentions from text (supports names with dots like qwen3.6)
+      const textMentions = (body.content.match(/@([\w.][\w.]*)/g) || []).map(m => m.slice(1));
+      if (textMentions.length > 0) {
+        body.mentions = [...new Set([...(body.mentions || []), ...textMentions])];
       }
 
       // Server-side validation: strip source=dashboard from non-CEO agents

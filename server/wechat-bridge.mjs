@@ -162,7 +162,10 @@ async function downloadWechatMedia(cdnUrl, aesKey, fileName) {
 export async function uploadAndSendFile(fileBuffer, fileName, toUserId, contextToken) {
   if (!session?.token) throw new Error('WeChat not connected');
   const targetUser = toUserId || lastFromUserId || '';
-  const ct = contextToken || contextTokens.get(targetUser) || contextTokens.get('_last') || '';
+  // Resolve context token (may be { token, ts } object or plain string)
+  const ctEntry = contextToken ? { token: contextToken, ts: Date.now() } : (contextTokens.get(targetUser) || contextTokens.get('_last'));
+  if (!ctEntry) throw new Error('No context_token available');
+  const ct = typeof ctEntry === 'string' ? ctEntry : ctEntry.token;
   if (!ct) throw new Error('No context_token available');
 
   // Determine media type from extension
@@ -187,13 +190,15 @@ export async function uploadAndSendFile(fileBuffer, fileName, toUserId, contextT
     rawsize: rawSize, rawfilemd5: rawFileMd5, filesize: encrypted.length,
     no_need_thumb: true, aeskey: aesKeyHex,
   }, session.token);
-  if (!uploadResp?.upload_param) throw new Error('getUploadUrl failed');
+  console.log('[wechat→] getUploadUrl resp:', JSON.stringify(uploadResp)?.slice(0, 100));
+  if (!uploadResp?.upload_param) throw new Error('getUploadUrl failed: ' + JSON.stringify(uploadResp));
 
   // POST to CDN
   const cdnBase = 'https://novac2c.cdn.weixin.qq.com/c2c';
   const cdnUrl = uploadResp.upload_full_url || `${cdnBase}/upload?encrypted_query_param=${encodeURIComponent(uploadResp.upload_param)}&filekey=${encodeURIComponent(filekey)}`;
   const cdnRes = await fetch(cdnUrl, { method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: encrypted });
   const downloadParam = cdnRes.headers.get('x-encrypted-param') || '';
+  console.log('[wechat→] CDN status:', cdnRes.status, 'downloadParam:', downloadParam?.slice(0, 40));
   if (cdnRes.status !== 200 || !downloadParam) throw new Error(`CDN upload failed: ${cdnRes.status}`);
 
   // Build item based on media type
@@ -204,17 +209,21 @@ export async function uploadAndSendFile(fileBuffer, fileName, toUserId, contextT
   } else if (mediaType === 2) {
     item = { type: 5, video_item: { media: cdnMedia, file_size: encrypted.length } };
   } else {
-    item = { type: 4, file_item: { media: cdnMedia, file_name: fileName, file_size: rawSize } };
+    item = { type: 4, file_item: { media: cdnMedia, file_name: fileName, len: String(rawSize) } };
   }
 
-  await apiPost(session.baseUrl, 'ilink/bot/sendmessage', {
+  const sendPayload = {
     msg: {
       from_user_id: '', to_user_id: targetUser,
       client_id: `teammcp-${crypto.randomUUID()}`,
       message_type: 2, message_state: 2, context_token: ct,
       item_list: [item],
     },
-  }, session.token);
+  };
+  console.log('[wechat→] sendmessage full:', JSON.stringify({ to: sendPayload.msg.to_user_id, ct: sendPayload.msg.context_token?.slice(0, 30), item_type: item.type, token: session.token?.slice(0, 20) }));
+  console.log('[wechat→] sendmessage item:', JSON.stringify(item));
+  const sendResp = await apiPost(session.baseUrl, 'ilink/bot/sendmessage', sendPayload, session.token);
+  console.log('[wechat→] sendmessage resp:', JSON.stringify(sendResp));
   console.log(`[wechat→] file sent: ${fileName} (type:${mediaType})`);
 }
 

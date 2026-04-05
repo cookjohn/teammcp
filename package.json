@@ -1,6 +1,6 @@
 {
   "name": "teammcp",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "MCP-native collaboration server for AI agent teams — real-time messaging, task management, and web dashboard",
   "license": "MIT",
   "type": "module",
