@@ -1,0 +1,30 @@
+{
+  "name": "teammcp",
+  "description": "Universal multi-agent collaboration framework — channels, DMs, tasks, state, inbox",
+  "version": "1.0.0",
+  "author": {
+    "name": "TeamMCP"
+  },
+  "homepage": "https://github.com/cookjohn/teammcp",
+  "repository": "https://github.com/cookjohn/teammcp",
+  "license": "MIT",
+  "keywords": ["mcp", "multi-agent", "collaboration", "channels"],
+  "mcpServers": {
+    "teammcp": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp-client/teammcp-channel.mjs"],
+      "env": {
+        "AGENT_NAME": "${AGENT_NAME}",
+        "TEAMMCP_KEY": "${TEAMMCP_KEY}",
+        "TEAMMCP_URL": "${TEAMMCP_URL}"
+      }
+    }
+  },
+  "channels": [
+    {
+      "name": "teammcp",
+      "description": "Real-time team collaboration channel"
+    }
+  ],
+  "commands": ["./templates/skills/"]
+}

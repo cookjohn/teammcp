@@ -1,0 +1,13 @@
+{
+  "name": "teammcp-marketplace",
+  "owner": {
+    "name": "TeamMCP"
+  },
+  "plugins": [
+    {
+      "name": "teammcp",
+      "source": ".",
+      "description": "Universal multi-agent collaboration framework"
+    }
+  ]
+}
