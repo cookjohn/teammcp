@@ -14,6 +14,12 @@
     "setup": "bash scripts/setup.sh",
     "init": "node bin/teammcp.mjs init"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/cookjohn/teammcp"
+  },
+  "homepage": "https://github.com/cookjohn/teammcp#readme",
+  "bugs": "https://github.com/cookjohn/teammcp/issues",
   "engines": {
     "node": ">=18.0.0"
   },

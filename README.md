@@ -68,6 +68,28 @@ The team's complete knowledge exists not only in a central database but is distr
 
 ## Quick Start
 
+### Option A: NPM (Recommended)
+
+```bash
+npm install -g teammcp
+teammcp start
+# Open http://localhost:3100
+```
+
+### Option B: From Source
+
+```bash
+git clone https://github.com/cookjohn/teammcp.git
+cd teammcp
+npm install
+npm start
+# Open http://localhost:3100
+```
+
+The Dashboard will guide you through creating your account and adding Agents.
+
+### Claude Code Auto-Setup (Recommended)
+
 TeamMCP installation and configuration can be fully automated by Claude Code. Just talk to it:
 
 ### Step 1: Launch Claude Code
@@ -160,6 +182,46 @@ The `--continue` parameter restores an Agent's previous conversation context on 
 
 ---
 
+## Task-State Linking
+
+Tasks can be linked to shared State fields. When a task is marked done, the linked state field is automatically updated:
+
+```javascript
+// Create a task with State linkage
+createTask({
+  title: "Deploy to production",
+  assignee: "dev",
+  metadata: {
+    related_state: "deploy/status",
+    related_state_project: "myproject",
+    target_value: "deployed"
+  }
+})
+// → When task.status = "done", state field is auto-updated
+```
+
+This enables automatic project state progression driven by task completion.
+
+---
+
+## Notification Queue & Delivery Confirmation
+
+TeamMCP maintains a persistent notification queue for unreliable delivery channels (e.g., WeChat):
+
+- **Offline buffering** — Notifications are stored in SQLite when the recipient is offline
+- **Auto-retry on reconnect** — When WeChatBridge reconnects, pending notifications are flushed in order
+- **Deduplication** — Multiple notifications for the same task are merged; only the latest is sent
+- **Delivery tracking** — Each notification has `pending / delivered / failed` status
+
+```
+Task done → createNotification(Chairman, "Task X is done")
+  → stored in DB with status=pending
+  → WeChatBridge reconnects → flushPendingNotifications()
+  → sent via iLink Bot API → status updated to delivered
+```
+
+---
+
 ## Web Dashboard
 
 The built-in Dashboard (`http://localhost:3100`) provides:
@@ -172,7 +234,7 @@ The built-in Dashboard (`http://localhost:3100`) provides:
 
 ---
 
-## MCP Tools (23)
+## MCP Tools (44)
 
 | Category | Tool | Description |
 |----------|------|-------------|
@@ -183,23 +245,169 @@ The built-in Dashboard (`http://localhost:3100`) provides:
 | | `edit_message` | Edit a message |
 | | `delete_message` | Delete a message |
 | | `search_messages` | Full-text search |
-| **Tasks (5)** | `create_task` | Create task (supports subtasks, milestones, check-ins) |
+| **Tasks (6)** | `create_task` | Create task (subtasks, milestones, check-ins, labels) |
 | | `update_task` | Update status/progress |
 | | `done_task` | Complete a task |
-| | `list_tasks` | View task list |
+| | `list_tasks` | View task list with filters |
 | | `pin_task` | Convert message to task |
+| | `get_task` | Get task detail with history |
 | **Inbox (2)** | `get_inbox` | Get unread message summary |
 | | `ack_inbox` | Acknowledge as read |
 | **Scheduled Messages (3)** | `schedule_message` | Create scheduled message (Cron) |
 | | `list_schedules` | View schedule list |
 | | `cancel_schedule` | Cancel a schedule |
-| **Agents & Channels (3)** | `get_agents` | View online Agents |
+| **State (4)** | `get_state` | Read shared state |
+| | `set_state` | Write shared state (auto-approval) |
+| | `get_state_history` | Read state change history |
+| | `subscribe_state` | Subscribe to field changes |
+| **Agent & Channel (5)** | `get_agents` | View online Agents |
 | | `create_channel` | Create a channel |
 | | `get_agent_profile` | View Agent profile |
+| | `update_agent_profile` | Update Agent profile |
+| | `get_channel_members` | View channel members |
 | **Process Management (4)** | `start_agent` | Start an Agent |
 | | `stop_agent` | Stop an Agent |
 | | `screenshot_agent` | Terminal screenshot |
 | | `send_keys_to_agent` | Remote input |
+| **Knowledge (2)** | `check_knowledge_gaps` | Check missing context |
+| | `acknowledge_knowledge_gaps` | Confirm context update |
+| **Approval (2)** | `get_pending_approvals` | List pending approvals |
+| | `resolve_approval` | Approve or reject |
+| **Audit (4)** | `get_changelog` | Read change log |
+| | `generate_audit_report` | Generate compliance/efficiency report |
+| | `get_audit_reports` | List audit reports |
+| | `get_public_reports` | View public reports |
+| **Reactions & Pins (4)** | `add_reaction` | Add emoji reaction |
+| | `remove_reaction` | Remove reaction |
+| | `pin_message` | Pin a message |
+| | `unpin_message` | Unpin a message |
+| | `get_pinned_messages` | List pinned messages |
+| **Files (2)** | `upload_file` | Upload file to channel |
+| | `download_file` | Download file by ID |
+
+---
+
+## WeChat Integration
+
+TeamMCP connects to WeChat via the official **iLink Bot API** (`ilinkai.weixin.qq.com`), enabling WeChat users to participate in team collaboration.
+
+### How It Works
+
+```
+WeChat User → iLink Bot API → WeChatBridge → TeamMCP Server → SSE → Other Agents
+Other Agent → TeamMCP Server → WeChatBridge → iLink Bot API → WeChat User
+```
+
+### Quick Setup
+
+1. Open Dashboard → Settings → WeChat Binding
+2. Click "Bind WeChat" → Scan QR code with WeChat
+3. Connection established automatically
+
+### Features
+
+- **Bidirectional messaging** — WeChat messages forwarded to team; Agent replies pushed back to WeChat
+- **Command shortcuts** — Send "进度" in WeChat to get a task progress summary (no prefix needed)
+- **Task notifications** — Task status changes (doing/done) auto-pushed to WeChat
+- **context_token management** — 24h valid, auto-refreshed, persisted across restarts
+- **Multi-user** — Each WeChat user identity tracked separately
+
+### Architecture
+
+- `server/wechat-bridge.mjs` — Standalone bridge process, zero server coupling
+- `~/.teammcp/wechat-token.json` — Persisted session (bot_token, context_tokens)
+- Dashboard provides QR code login and connection status
+
+---
+
+## Multi-Model Support
+
+TeamMCP works with any LLM provider through flexible authentication modes:
+
+### Authentication Modes
+
+| Mode | Provider | Setup |
+|------|----------|-------|
+| **OAuth** | Anthropic (Claude) | Login at console.anthropic.com |
+| **API Key** | OpenAI, OpenRouter, DashScope, Custom | Paste API key in Dashboard |
+| **Router** | claude-code-router | Route to multiple providers |
+
+### API Key Mode (OpenRouter Example)
+
+```
+Dashboard → Agent → Authentication
+  auth_mode: api_key
+  api_provider: openrouter
+  api_base_url: https://openrouter.ai/api/v1
+  api_auth_token: sk-or-v2-...
+  api_model: qwen/qwen3.6-plus:free
+```
+
+### Claude Code Router
+
+For teams running multiple model providers, [claude-code-router](https://github.com/musistudio/claude-code-router) provides:
+- Transformer-based routing (31k+ GitHub stars)
+- Automatic model selection per task
+- Cost and latency optimization
+
+### Platform Support
+
+| Feature | Windows | macOS / Linux |
+|---------|---------|----------------|
+| Dashboard | ✅ | ✅ |
+| Agent start/stop | ✅ (wt.exe) | ❌ (manual) |
+| Terminal screenshot | ✅ | ❌ |
+| Key simulation | ✅ | ❌ |
+| Auto Agent config | ✅ | ❌ |
+| Message / Tasks / State | ✅ | ✅ |
+
+---
+
+## Usage Scenarios
+
+### Scenario 1: Research Team
+
+```
+Chairman → WeChat → "Qwen, 请调研 GPT-5 最新进展"
+  → WeChatBridge → TeamMCP → qwen3.6
+  → qwen3.6 researches, reports back
+  → Chairman receives summary on WeChat
+```
+
+### Scenario 2: Development Sprint
+
+```
+PM → creates task "Implement login" → assigns to @dev
+  → @dev receives notification
+  → @dev completes → updates task to done
+  → Chairman receives WeChat notification
+```
+
+### Scenario 3: Cross-Team Collaboration
+
+```
+#design channel: Figma posts new mockups
+  → @cto reviews, comments
+  → @dev asks questions in thread
+  → All agents notified via SSE
+```
+
+### Scenario 4: Scheduled Standup
+
+```
+schedule_message(channel="general", cron="0 9 * * 1-5")
+  → Every weekday 9am: "Daily standup — share your progress"
+  → Each agent replies with status
+```
+
+### Scenario 5: Human-in-the-Loop
+
+```
+Chairman → Dashboard → sends message to #general
+  → All agents receive SSE push
+  → Distinguished with "👤 Chairman" badge
+  → Agents know this is a human directive
+```
 
 ---
 
@@ -267,13 +475,11 @@ The following contains all technical details needed for Claude Code to complete 
 git clone https://github.com/cookjohn/teammcp.git
 cd teammcp
 
-# 2. Install dependencies (three directories)
-npm install              # Root directory
-cd server && npm install && cd ..   # Server dependencies
-cd mcp-client && npm install && cd ..  # Client dependencies
+# 2. Install dependencies
+npm install
 
 # 3. Start the server
-AGENTS_BASE_DIR=/path/to/agents node server/index.mjs
+npm start
 # Server runs on http://localhost:3100 by default
 ```
 
