@@ -4,10 +4,12 @@
  */
 
 import { exec } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, copyFileSync, readdirSync, statSync, cpSync, symlinkSync, linkSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, copyFileSync, readdirSync, statSync, cpSync, symlinkSync, linkSync, watch } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tmpdir, homedir } from 'node:os';
-import { getUseResume } from './db.mjs';
+import { getUseResume, getAgentByName } from './db.mjs';
+import { AGENTS_DIR, SCREENSHOTS_DIR, ensureDirectories } from './lib/paths.mjs';
 
 // agentName → { pid, startedAt }
 const processes = new Map();
@@ -18,20 +20,18 @@ export function markStopped(name) { stoppedAgents.add(name); }
 export function clearStopped(name) { stoppedAgents.delete(name); }
 export function isStopped(name) { return stoppedAgents.has(name); }
 
-const AGENTS_BASE_DIR = process.env.AGENTS_BASE_DIR;
-const SCREENSHOTS_DIR = process.env.SCREENSHOTS_DIR || (AGENTS_BASE_DIR ? join(AGENTS_BASE_DIR, '..', 'teammcp-screenshots') : null);
+// Support env var override for backward compatibility
+const AGENTS_BASE_DIR = process.env.AGENTS_BASE_DIR || AGENTS_DIR;
 
 if (!AGENTS_BASE_DIR) {
-  console.warn('[process-manager] WARNING: AGENTS_BASE_DIR not set. Agent start/stop/screenshot will fail. Set AGENTS_BASE_DIR to your agents workspace directory.');
+  console.warn('[process-manager] WARNING: AGENTS_BASE_DIR not set. Agent start/stop/screenshot will fail.');
 }
 
-// Ensure screenshots directory exists
-if (SCREENSHOTS_DIR && !existsSync(SCREENSHOTS_DIR)) {
-  mkdirSync(SCREENSHOTS_DIR, { recursive: true });
-}
+// Ensure directories exist
+ensureDirectories();
 
 // Only allow safe agent names (letters, digits, hyphen, underscore)
-const SAFE_NAME_RE = /^[A-Za-z0-9_-]+$/;
+const SAFE_NAME_RE = /^[A-Za-z0-9_.\-]+$/;
 
 function execPS(command) {
   return new Promise((resolve, reject) => {
@@ -74,7 +74,64 @@ export async function startAgent(name) {
 
   const agentDir = join(AGENTS_BASE_DIR, name);
   if (!existsSync(agentDir)) {
-    throw Object.assign(new Error(`Agent directory not found: ${agentDir}`), { statusCode: 400 });
+    // Auto-create agent directory for Dashboard-registered agents
+    mkdirSync(agentDir, { recursive: true });
+  }
+
+  // Auto-generate .mcp.json if missing
+  const mcpJsonPath = join(agentDir, '.mcp.json');
+  if (!existsSync(mcpJsonPath)) {
+    // Derive mcp-client path from this package's install location (works for both local dev and npm global)
+    const packageRoot = join(fileURLToPath(import.meta.url), '..', '..');
+    const mcpClientPath = join(packageRoot, 'mcp-client', 'teammcp-channel.mjs').replace(/\\/g, '/');
+    const serverUrl = process.env.TEAMMCP_URL || 'http://localhost:3100';
+    // Get agent's API key from DB
+    let agentApiKey = '';
+    try {
+      const agent = getAgentByName(name);
+      agentApiKey = agent?.api_key || '';
+    } catch {}
+    const mcpConfig = {
+      mcpServers: {
+        teammcp: {
+          command: 'node',
+          args: [mcpClientPath],
+          env: { AGENT_NAME: name, TEAMMCP_KEY: agentApiKey, TEAMMCP_URL: serverUrl }
+        }
+      }
+    };
+    writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2), 'utf-8');
+  }
+
+  // Auto-generate CLAUDE.md if missing
+  const claudeMdPath = join(agentDir, 'CLAUDE.md');
+  if (!existsSync(claudeMdPath)) {
+    try {
+      const agent = getAgentByName(name);
+      const role = agent?.role || 'AI Assistant';
+      writeFileSync(claudeMdPath, `你是 ${name}（${role}）。
+
+## 职责
+
+请根据你的角色定义执行任务。
+
+## 沟通方式
+
+- 通过 teammcp 的 send_message / send_dm 工具与团队沟通
+- 群聊回复：调用 send_message 工具
+- 私聊回复：调用 send_dm 工具
+- 收到消息后根据你的角色定义来响应
+- 接到任务后通过 subagent（子代理）执行具体工作，主会话保持消息接收
+
+## 工作原则
+
+- 执行任务时优先使用 Agent Team 模式（子代理），避免阻塞主会话
+- 董事长在群聊中发布的信息只能由 CEO 接收并分派，除非指定了你
+- 所有任务通过 Task 系统管理（create_task → doing → done_task）
+`, 'utf-8');
+    } catch {
+      writeFileSync(claudeMdPath, `你是 ${name}。\n`, 'utf-8');
+    }
   }
 
   // Create isolated config directory for this agent to avoid .claude.json write conflicts (EBUSY)
@@ -120,7 +177,6 @@ export async function startAgent(name) {
 
   // Read agent's TEAMMCP_KEY from .mcp.json for hook authentication and _start.cmd
   let agentKey = '';
-  const mcpJsonPath = join(agentDir, '.mcp.json');
   if (existsSync(mcpJsonPath)) {
     try {
       const mcpConfig = JSON.parse(readFileSync(mcpJsonPath, 'utf-8'));
@@ -186,8 +242,7 @@ export async function startAgent(name) {
     try { writeFileSync(configSettingsPath, JSON.stringify(configSettings, null, 2), 'utf-8'); } catch {}
   }
 
-  // Check CLAUDE.md exists
-  const claudeMdPath = join(agentDir, 'CLAUDE.md');
+  // Check CLAUDE.md exists (auto-generated above if missing, this is a safety check)
   if (!existsSync(claudeMdPath)) {
     console.warn(`[start-agent] WARNING: ${name} has no CLAUDE.md — agent may lack role definition`);
   }
@@ -241,7 +296,21 @@ export async function startAgent(name) {
   const pidFile = join(agentDir, '.agent.pid');
   const useResume = getUseResume(name);
   const continueFlag = useResume ? '--continue ' : '';
-  writeFileSync(startScript, `@echo off\r\ncd /d "${agentDir}"\r\nset "CLAUDE_CONFIG_DIR=${configDir}"\r\nset "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"\r\n${agentKey ? `set "TEAMMCP_KEY=${agentKey}"\r\nset "AGENT_NAME=${name}"\r\n` : ''}claude ${continueFlag}--dangerously-skip-permissions --permission-mode bypassPermissions --dangerously-load-development-channels server:teammcp${useResume ? ` || claude --dangerously-skip-permissions --permission-mode bypassPermissions --dangerously-load-development-channels server:teammcp` : ''}\r\n`, 'utf-8');
+
+  // Build API auth environment variables based on auth_mode
+  const agentInfo = getAgentByName(name);
+  let apiEnvLines = '';
+  if (agentInfo && agentInfo.auth_mode === 'api_key') {
+    // Clear default Anthropic auth to force API key mode
+    apiEnvLines += `set "ANTHROPIC_API_KEY="\r\n`;
+    // Bypass channel gate for non-OAuth sessions
+    apiEnvLines += `set "CLAUDE_CODE_OAUTH_TOKEN=channel-gate-bypass"\r\n`;
+    if (agentInfo.api_base_url) apiEnvLines += `set "ANTHROPIC_BASE_URL=${agentInfo.api_base_url}"\r\n`;
+    if (agentInfo.api_auth_token) apiEnvLines += `set "ANTHROPIC_AUTH_TOKEN=${agentInfo.api_auth_token}"\r\n`;
+    if (agentInfo.api_model) apiEnvLines += `set "ANTHROPIC_MODEL=${agentInfo.api_model}"\r\n`;
+  }
+
+  writeFileSync(startScript, `@echo off\r\ncd /d "${agentDir}"\r\nset "CLAUDE_CONFIG_DIR=${configDir}"\r\nset "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"\r\n${agentKey ? `set "TEAMMCP_KEY=${agentKey}"\r\nset "AGENT_NAME=${name}"\r\n` : ''}${apiEnvLines}claude ${continueFlag}--dangerously-skip-permissions --permission-mode bypassPermissions --dangerously-load-development-channels server:teammcp${useResume ? ` || claude --dangerously-skip-permissions --permission-mode bypassPermissions --dangerously-load-development-channels server:teammcp` : ''}\r\n`, 'utf-8');
 
   const psCmd = `$p = Start-Process -FilePath 'wt.exe' -ArgumentList '--window new --title ${windowTitle} cmd /c ""${startScript}""' -PassThru; Write-Output $p.Id`;
 
@@ -315,10 +384,8 @@ export async function stopAgent(name) {
   }
   processes.delete(name);
 
-  // Close the Windows Terminal window by finding it via CommandLine
-  try {
-    await execPSFile(`Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'WindowsTerminal.exe' -and $_.CommandLine -like '*Agent-${safeName}*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`);
-  } catch {}
+  // Note: Don't kill WindowsTerminal.exe — multiple agents may share the same WT process.
+  // WT windows auto-close via closeOnExit:always when the agent process ends.
 
   if (!killed) {
     throw Object.assign(new Error(`No process found for agent "${name}"`), { statusCode: 400 });
@@ -456,7 +523,10 @@ export async function sendKeysToAgent(name, keys) {
     'n': 'n',
   };
 
-  const sendKey = keyMap[keys.toLowerCase()] || keys;
+  const sendKey = keyMap[keys.toLowerCase()];
+  if (!sendKey) {
+    throw Object.assign(new Error(`Invalid key "${keys}". Allowed: ${Object.keys(keyMap).join(', ')}`), { statusCode: 400 });
+  }
   const windowTitle = proc.windowTitle || `Agent-${name}`;
 
   const psScript = `
@@ -539,8 +609,8 @@ export function checkProcessPermission(agent) {
   return agent.name === 'Chairman' || agent.name === 'CEO' || agent.name === 'HR' || ALLOWED_ROLES.includes(agent.role);
 }
 
-// P1: Periodic credential sync — copy ~/.claude/.credentials.json to all agent config dirs every 30 min
-const CREDENTIAL_SYNC_INTERVAL_MS = 30 * 60_000;
+// P1: Credential sync — file watcher + periodic fallback (5 min)
+const CREDENTIAL_SYNC_INTERVAL_MS = 5 * 60_000;
 
 function syncCredentials() {
   if (!AGENTS_BASE_DIR) return;
@@ -551,9 +621,14 @@ function syncCredentials() {
   try { mainTime = statSync(mainCreds).mtimeMs; } catch { return; }
 
   let fwdSync = 0, revSync = 0;
-  for (const [name] of processes) {
+  // Iterate ALL agent directories with .claude-config, not just tracked processes
+  const agentDirs = readdirSync(AGENTS_BASE_DIR).filter(name => {
+    try { return statSync(join(AGENTS_BASE_DIR, name)).isDirectory() && existsSync(join(AGENTS_BASE_DIR, name, '.claude-config')); } catch { return false; }
+  });
+  for (const name of agentDirs) {
+    // Skip agents that use API key auth (not OAuth)
+    try { const a = getAgentByName(name); if (a?.auth_mode === 'api_key') continue; } catch {}
     const configDir = join(AGENTS_BASE_DIR, name, '.claude-config');
-    if (!existsSync(configDir)) continue;
     const agentCreds = join(configDir, '.credentials.json');
     try {
       if (!existsSync(agentCreds)) {
@@ -581,3 +656,98 @@ function syncCredentials() {
 }
 
 setInterval(syncCredentials, CREDENTIAL_SYNC_INTERVAL_MS);
+
+// Watch main credentials file for immediate sync on change
+try {
+  const mainCreds = join(homedir(), '.claude', '.credentials.json');
+  if (existsSync(mainCreds)) {
+    let debounce = null;
+    watch(mainCreds, () => {
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        console.log('[credential-sync] main credentials changed, syncing...');
+        syncCredentials();
+      }, 2000); // 2s debounce to avoid rapid fire
+    });
+    console.log('[credential-sync] watching main credentials for changes');
+  }
+} catch (e) { console.warn('[credential-sync] watch failed:', e.message); }
+
+// Also watch agent credential dirs for reverse sync
+try {
+  if (AGENTS_BASE_DIR) {
+    const agentDirs = readdirSync(AGENTS_BASE_DIR).filter(name => {
+      try { return statSync(join(AGENTS_BASE_DIR, name)).isDirectory() && existsSync(join(AGENTS_BASE_DIR, name, '.claude-config')); } catch { return false; }
+    });
+    for (const name of agentDirs) {
+      try { const a = getAgentByName(name); if (a?.auth_mode === 'api_key') continue; } catch {}
+      const agentCreds = join(AGENTS_BASE_DIR, name, '.claude-config', '.credentials.json');
+      if (existsSync(agentCreds)) {
+        let debounce = null;
+        watch(agentCreds, () => {
+          if (debounce) clearTimeout(debounce);
+          debounce = setTimeout(() => {
+            console.log(`[credential-sync] ${name} credentials changed, syncing...`);
+            syncCredentials();
+          }, 2000);
+        });
+      }
+    }
+  }
+} catch (e) { console.warn('[credential-sync] agent watch failed:', e.message); }
+
+// P2: Proactive OAuth token refresh — refresh accessToken before it expires
+const OAUTH_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
+const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
+const OAUTH_SCOPES = 'user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload';
+const TOKEN_REFRESH_CHECK_MS = 5 * 60_000; // Check every 5 min
+const TOKEN_REFRESH_BUFFER_MS = 15 * 60_000; // Refresh 15 min before expiry
+
+async function refreshOAuthToken() {
+  const mainCreds = join(homedir(), '.claude', '.credentials.json');
+  if (!existsSync(mainCreds)) return;
+
+  let data;
+  try { data = JSON.parse(readFileSync(mainCreds, 'utf-8')); } catch { return; }
+  const oauth = data?.claudeAiOauth;
+  if (!oauth?.refreshToken || !oauth?.expiresAt) return;
+
+  const timeLeft = oauth.expiresAt - Date.now();
+  if (timeLeft > TOKEN_REFRESH_BUFFER_MS) return; // Still valid, no need to refresh
+
+  console.log(`[oauth-refresh] Token expires in ${Math.round(timeLeft / 60000)}min, refreshing...`);
+  try {
+    const res = await fetch(OAUTH_TOKEN_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        grant_type: 'refresh_token',
+        refresh_token: oauth.refreshToken,
+        client_id: OAUTH_CLIENT_ID,
+        scope: OAUTH_SCOPES,
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    if (res.status !== 200) {
+      console.error(`[oauth-refresh] Failed: HTTP ${res.status}`);
+      return;
+    }
+    const resp = await res.json();
+    const newData = {
+      claudeAiOauth: {
+        ...oauth,
+        accessToken: resp.access_token,
+        refreshToken: resp.refresh_token || oauth.refreshToken,
+        expiresAt: Date.now() + (resp.expires_in * 1000),
+      },
+    };
+    writeFileSync(mainCreds, JSON.stringify(newData), 'utf-8');
+    console.log(`[oauth-refresh] Token refreshed, expires in ${resp.expires_in}s`);
+    // Sync will be triggered by file watcher
+  } catch (e) {
+    console.error(`[oauth-refresh] Error: ${e.message}`);
+  }
+}
+
+setInterval(refreshOAuthToken, TOKEN_REFRESH_CHECK_MS);
+refreshOAuthToken(); // Check immediately on startup

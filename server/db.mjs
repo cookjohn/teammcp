@@ -1965,6 +1965,38 @@ export function getFileMeta(id) {
   return db.prepare('SELECT * FROM files WHERE id = ?').get(id);
 }
 
+// ── Notifications ───────────────────────────────────────
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS notifications (
+  id TEXT PRIMARY KEY,
+  target TEXT NOT NULL,
+  channel TEXT DEFAULT 'wechat',
+  content TEXT NOT NULL,
+  task_id TEXT,
+  status TEXT DEFAULT 'pending',
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  delivered_at DATETIME
+);
+`);
+
+export function saveNotification(id, target, channel, content, taskId) {
+  db.prepare('INSERT INTO notifications (id, target, channel, content, task_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, target, channel, content, taskId || null, 'pending', new Date().toISOString());
+}
+
+export function getPendingNotifications(target, channel = 'wechat') {
+  return db.prepare("SELECT * FROM notifications WHERE target = ? AND channel = ? AND status = 'pending' ORDER BY created_at ASC").all(target, channel);
+}
+
+export function markNotificationDelivered(id) {
+  db.prepare("UPDATE notifications SET status = 'delivered', delivered_at = ? WHERE id = ?").run(new Date().toISOString(), id);
+}
+
+export function getRecentNotifications(target, channel = 'wechat', since) {
+  const sql = "SELECT * FROM notifications WHERE target = ? AND channel = ? AND created_at >= ? ORDER BY created_at DESC";
+  return db.prepare(sql).all(target, channel, since);
+}
+
 export function closeDb() {
   try { db.close(); } catch {}
 }

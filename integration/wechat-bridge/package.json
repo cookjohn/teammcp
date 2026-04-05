@@ -1,0 +1,15 @@
+{
+  "name": "wechat-bridge",
+  "version": "1.0.0",
+  "description": "通过 iLink API 将微信消息桥接到 TeamMCP 平台，实现微信用户与 AI Agent 团队的双向通信。",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "qrcode-terminal": "^0.12.0"
+  }
+}

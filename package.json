@@ -1,16 +1,39 @@
 {
   "name": "teammcp",
   "version": "1.0.0",
-  "description": "MCP-native collaboration server for AI agent teams — real-time messaging, task management, and web dashboard with just 1 npm dependency",
+  "description": "MCP-native collaboration server for AI agent teams — real-time messaging, task management, and web dashboard",
   "license": "MIT",
   "type": "module",
+  "bin": {
+    "teammcp": "./bin/teammcp.mjs"
+  },
+  "main": "./server/index.mjs",
   "scripts": {
     "start": "node server/index.mjs",
-    "setup": "bash scripts/setup.sh"
+    "postinstall": "node scripts/postinstall.mjs",
+    "setup": "bash scripts/setup.sh",
+    "init": "node bin/teammcp.mjs init"
   },
   "engines": {
     "node": ">=18.0.0"
   },
+  "files": [
+    "bin/",
+    "server/*.mjs",
+    "server/*.json",
+    "server/lib/",
+    "server/public/",
+    "mcp-client/*.mjs",
+    "mcp-client/package.json",
+    "mcp-client/README.md",
+    "scripts/",
+    "templates/",
+    ".env.example",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE",
+    "docs/"
+  ],
   "keywords": [
     "mcp",
     "multi-agent",
@@ -22,6 +45,9 @@
     "task-management"
   ],
   "dependencies": {
-    "better-sqlite3": "^12.8.0"
+    "@anthropic-ai/claude-agent-sdk": "^0.2.92",
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "better-sqlite3": "^12.8.0",
+    "qrcode": "^1.5.4"
   }
 }

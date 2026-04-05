@@ -253,9 +253,61 @@ export async function handleRequest(req, res) {
       });
     }
 
+    // ── GET /api/setup-status (no auth — first-time setup detection) ──
+    if (method === 'GET' && path === '/api/setup-status') {
+      const allAgents = getAllAgents();
+      return json(res, { agents_count: allAgents.length, needs_setup: allAgents.length === 0, server_version: '1.0.0' });
+    }
+
     // ── All other endpoints require auth ──────────────
-    if (path.startsWith('/api/') && path !== '/api/register' && path !== '/api/health') {
+    if (path.startsWith('/api/') && path !== '/api/register' && path !== '/api/health' && path !== '/api/setup-status') {
       if (!requireAuth(req, res)) return;
+    }
+
+    // ── GET /api/wechat/status ──
+    if (method === 'GET' && path === '/api/wechat/status') {
+      const { getStatus } = await import('./wechat-bridge.mjs');
+      return json(res, getStatus());
+    }
+
+    // ── POST /api/wechat/login (Chairman/CEO only) ──
+    if (method === 'POST' && path === '/api/wechat/login') {
+      if (req.agent.name !== 'Chairman' && req.agent.name !== 'CEO') {
+        return json(res, { error: 'Only Chairman or CEO can manage WeChat connection' }, 403);
+      }
+      const { startLogin } = await import('./wechat-bridge.mjs');
+      const result = await startLogin();
+      return json(res, result);
+    }
+
+    // ── POST /api/wechat/disconnect (Chairman/CEO only) ──
+    if (method === 'POST' && path === '/api/wechat/disconnect') {
+      if (req.agent.name !== 'Chairman' && req.agent.name !== 'CEO') {
+        return json(res, { error: 'Only Chairman or CEO can manage WeChat connection' }, 403);
+      }
+      const { stopPolling } = await import('./wechat-bridge.mjs');
+      stopPolling();
+      return json(res, { ok: true, status: 'disconnected' });
+    }
+
+    // ── POST /api/wechat/send-file (send local file to WeChat) ──
+    if (method === 'POST' && path === '/api/wechat/send-file') {
+      if (req.agent.name !== 'Chairman' && req.agent.name !== 'CEO') {
+        return json(res, { error: 'Only Chairman or CEO can send files to WeChat' }, 403);
+      }
+      try {
+        const body = await readBody(req);
+        const { uploadAndSendFile, getStatus } = await import('./wechat-bridge.mjs');
+        if (!getStatus().connected) return json(res, { error: 'WeChat not connected' }, 400);
+        const filePath = body.file_path;
+        if (!filePath || !existsSync(filePath)) return json(res, { error: 'File not found' }, 404);
+        const fileData = readFileSync(filePath);
+        const fileName = filePath.split(/[/\\]/).pop();
+        await uploadAndSendFile(fileData, fileName, '', '');
+        return json(res, { ok: true, fileName, size: fileData.length });
+      } catch (e) {
+        return json(res, { error: e.message }, 500);
+      }
     }
 
     // ── GET /api/me (returns current agent identity) ──
@@ -345,6 +397,36 @@ export async function handleRequest(req, res) {
         // Update read_status for online recipient (delivered = read in SSE model)
         if (isOnline(other)) updateReadStatus(other, channelId, msg.id);
 
+        // Forward DMs to Chairman → WeChat (if bridge connected)
+        if (other === 'Chairman' && req.agent.name !== 'Chairman') {
+          try {
+            const { sendToWeChat, uploadAndSendFile, getStatus } = await import('./wechat-bridge.mjs');
+            if (getStatus().connected) {
+              const prefix = `[TeamMCP DM] ${req.agent.name}`;
+              const text = `${prefix}:\n${body.content.replace(/\*\*/g, '').slice(0, 2000)}`;
+              sendToWeChat(text, '').catch(e => console.error('[wechat→] DM text failed:', e.message));
+              // Send file attachments if any
+              const meta = body.metadata || {};
+              if (meta.attachments && Array.isArray(meta.attachments)) {
+                for (const att of meta.attachments) {
+                  if (att.file_id) {
+                    try {
+                      const fileMeta = getFile(att.file_id);
+                      if (fileMeta) {
+                        const filePath = join(__dirname, 'uploads', att.file_id);
+                        if (existsSync(filePath)) {
+                          const fileData = readFileSync(filePath);
+                          uploadAndSendFile(fileData, fileMeta.original_name || 'file', '', '').catch(e => console.error('[wechat→] file send failed:', e.message));
+                        }
+                      }
+                    } catch (e) { console.error('[wechat→] attachment error:', e.message); }
+                  }
+                }
+              }
+            }
+          } catch (e) { console.error('[wechat] bridge import failed:', e.message); }
+        }
+
       } else if (channel.type === 'group') {
         // Group: push to channel members except sender + always include Chairman (admin oversight)
         const groupMembers = ensureChairman(getChannelMembers(channelId).filter(m => m !== req.agent.name), req.agent.name);
@@ -352,6 +434,17 @@ export async function handleRequest(req, res) {
         // Update read_status for online recipients to prevent duplicates on reconnect
         for (const a of groupMembers) {
           if (isOnline(a)) updateReadStatus(a, channelId, msg.id);
+        }
+        // Forward @Chairman mentions → WeChat
+        if (body.mentions && body.mentions.includes('Chairman') && req.agent.name !== 'Chairman') {
+          try {
+            const { sendToWeChat, getStatus } = await import('./wechat-bridge.mjs');
+            if (getStatus().connected) {
+              const prefix = `[${channelId}] ${req.agent.name}`;
+              const text = `${prefix}:\n${body.content.replace(/\*\*/g, '').slice(0, 2000)}`;
+              sendToWeChat(text, '').catch(e => console.error('[wechat→] mention text failed:', e.message));
+            }
+          } catch {}
         }
 
       } else if (channel.type === 'topic') {
@@ -1427,6 +1520,18 @@ export async function handleRequest(req, res) {
         decided_by: req.agent.name,
         subscribers: [], // Will be handled per-field by setState internally
       });
+
+      // Queue notification for Chairman (for WeChat delivery)
+      if (updated.status !== oldStatus && ['doing', 'done'].includes(updated.status)) {
+        const statusText = { doing: '⏳ 开始执行', done: '✅ 已完成' };
+        const notifContent = `📋 任务进度\n标题：${updated.title}\n状态：${statusText[updated.status]}`;
+        try {
+          const { saveNotification } = await import('./db.mjs');
+          saveNotification(`notif_${crypto.randomUUID().slice(0, 12)}`, 'Chairman', 'wechat', notifContent, updated.id);
+        } catch (e) {
+          console.error('[task notif] Failed to create notification:', e.message);
+        }
+      }
 
       return json(res, result);
     }

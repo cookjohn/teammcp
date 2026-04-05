@@ -311,6 +311,7 @@ const TOOLS = [
         related_state: { type: "string", description: "关联的状态字段名" },
         related_state_project: { type: "string", description: "状态字段所属项目ID" },
         target_value: { type: "string", description: "任务完成时自动设置的目标值" },
+        files: { type: "array", items: { type: "string" }, description: "关联的项目文件路径列表" },
       },
       required: ["title"],
     },
@@ -464,9 +465,9 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        id: { type: "string", description: "定时消息 ID" },
+        schedule_id: { type: "string", description: "定时消息 ID (sched_xxx)" },
       },
-      required: ["id"],
+      required: ["schedule_id"],
     },
   },
   // -- P0 Approval Flow tools ------------------------------------------------
@@ -841,6 +842,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (args.related_state) body.related_state = args.related_state;
         if (args.related_state_project) body.related_state_project = args.related_state_project;
         if (args.target_value) body.target_value = args.target_value;
+        if (args.files) body.files = args.files;
         const result = await apiRequest("POST", "/api/tasks", body);
         const task = result.task;
         return { content: [{ type: "text", text: `Task created: ${task.id} — ${task.title} [${task.status}]${task.assignee ? ` assigned to ${task.assignee}` : ''}` }] };
@@ -969,7 +971,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "cancel_schedule": {
-        const result = await apiRequest("DELETE", `/api/schedules/${args.id}`);
+        const result = await apiRequest("DELETE", `/api/schedules/${args.schedule_id}`);
         return { content: [{ type: "text", text: `Schedule ${result.id} deleted` }] };
       }
 

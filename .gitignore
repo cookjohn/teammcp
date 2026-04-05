@@ -35,3 +35,16 @@ test-notify.mjs
 
 # Logs
 *.log
+
+# WeChat token (contains bot credentials)
+wechat-token.json
+
+# NPM tarball
+*.tgz
+
+# Agent directories (local only)
+agents/
+
+# Test scripts
+scripts/test-sdk-agent.mjs
+*.weixin-token.json

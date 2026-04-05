@@ -115,6 +115,31 @@ setInterval(() => {
   }
 }, 60_000);
 
+// ── WeChat Bridge (optional) ─────────────────────
+try {
+  const { init: initWeChat, sendToWeChat } = await import('./wechat-bridge.mjs');
+  const { pushToAgent } = await import('./sse.mjs');
+
+  initWeChat((text, fromUser, contextToken) => {
+    // WeChat message received → save as Chairman message to #general
+    saveMessage('general', 'Chairman', text, '[]', null, { source: 'wechat', context_token: contextToken, from_user_id: fromUser });
+
+    // Push to CEO and Audit (Chairman's direct reports)
+    const event = { type: 'message', channel: 'general', from: 'Chairman', content: text, metadata: { source: 'wechat', context_token: contextToken }, id: `wechat_${Date.now()}`, timestamp: new Date().toISOString() };
+    pushToAgent('CEO', event);
+    pushToAgent('Audit', event);
+  });
+
+  // TODO: Handle TeamMCP → WeChat direction
+  // When a message is sent to Chairman as DM or @Chairman, forward via sendToWeChat()
+  // This requires hooking into the message send route or SSE event flow
+
+  console.log('[TeamMCP] WeChat bridge initialized');
+} catch (e) {
+  // WeChat bridge is optional, don't fail server startup
+  console.log('[TeamMCP] WeChat bridge not available:', e.message);
+}
+
 // ── Graceful shutdown ──────────────────────────────────
 function shutdown(signal) {
   console.log(`\n[TeamMCP] Received ${signal}, shutting down...`);
