@@ -4,11 +4,11 @@
  */
 
 import { exec, execSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, copyFileSync, readdirSync, statSync, cpSync, symlinkSync, linkSync, watch } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, copyFileSync, readdirSync, statSync, lstatSync, cpSync, symlinkSync, linkSync, watch, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir, homedir } from 'node:os';
-import { getUseResume, getAgentByName } from './db.mjs';
+import { getUseResume, getAgentByName, getAgentsNeedingRouter } from './db.mjs';
 import { AGENTS_DIR, SCREENSHOTS_DIR, ensureDirectories } from './lib/paths.mjs';
 
 // agentName → { pid, startedAt }
@@ -19,6 +19,12 @@ const stoppedAgents = new Set();
 export function markStopped(name) { stoppedAgents.add(name); }
 export function clearStopped(name) { stoppedAgents.delete(name); }
 export function isStopped(name) { return stoppedAgents.has(name); }
+
+// ── ccrouter process management ─────────────────────────
+const CCROUTER_PORT = 3456;
+const CCROUTER_CONFIG_DIR = join(homedir(), '.claude-code-router');
+const CCROUTER_CONFIG_PATH = join(CCROUTER_CONFIG_DIR, 'config.json');
+let ccrouterPid = null;
 
 // Support env var override for backward compatibility
 const AGENTS_BASE_DIR = process.env.AGENTS_BASE_DIR || AGENTS_DIR;
@@ -138,20 +144,25 @@ export async function startAgent(name) {
         if (entry === 'settings.local.json') continue; // let project-level .claude/settings.local.json take precedence
         const src = join(defaultClaudeDir, entry);
         const dst = join(configDir, entry);
+        const independentDirs = new Set(['sessions', 'plans', 'tasks', 'todos', 'shell-snapshots', 'teams', 'projects', 'file-history', 'skills']);
+        const sharedDirs = new Set(['plugins', 'cache', 'statsig', 'telemetry', 'debug', 'backups', 'ide', 'paste-cache']);
         try {
           if (entry === '.credentials.json') {
-            // Credentials: always copy (hardlinks break when OAuth token refreshes via file replacement)
-            copyFileSync(src, dst);
+            // Credentials: hardlink so all agents share the same token
+            try { if (existsSync(dst)) rmSync(dst, { recursive: true, force: true }); } catch {}
+            try { linkSync(src, dst); } catch { copyFileSync(src, dst); }
+          } else if (independentDirs.has(entry)) {
+            // Per-agent independent directories — create empty dir
+            if (!existsSync(dst)) mkdirSync(dst, { recursive: true });
+          } else if (['history.jsonl', 'settings.json'].includes(entry)) {
+            // Skip — let Claude Code auto-create these per-agent
           } else if (existsSync(dst)) {
-            continue; // don't overwrite existing per-agent state for other files
-          } else if (statSync(src).isDirectory()) {
-            // Directories use junctions (no admin needed on Windows)
-            symlinkSync(src, dst, 'junction');
+            continue; // don't overwrite existing per-agent state
           } else {
             // Other files use hardlinks (no admin needed, stays in sync with original)
             linkSync(src, dst);
           }
-        } catch {}
+        } catch (e) { console.error(`[start-agent] setup '${entry}' for ${name} failed: ${e.code} ${e.message}`); }
       }
     } catch {}
   }
@@ -390,13 +401,49 @@ export async function startAgent(name) {
     }
   }
 
+  // Restore shared dirs junctions AFTER plugin install (which recreates these dirs)
+  // Use cmd /c mklink /J instead of symlinkSync — avoids EPERM on Windows
+  const sharedDirs = new Set(['plugins', 'cache', 'statsig', 'telemetry', 'debug', 'backups', 'ide', 'paste-cache']);
+  const mainClaudeDir = join(homedir(), '.claude');
+  for (const entry of sharedDirs) {
+    const src = join(mainClaudeDir, entry);
+    const dst = join(configDir, entry);
+    if (existsSync(src) && statSync(src).isDirectory()) {
+      try {
+        if (existsSync(dst) && !lstatSync(dst).isSymbolicLink()) {
+          rmSync(dst, { recursive: true, force: true });
+        }
+        if (!existsSync(dst)) {
+          execSync(`cmd /c mklink /J "${dst}" "${src}"`, { stdio: 'ignore', timeout: 5000 });
+        }
+      } catch (e) { console.error(`[start-agent] restore junction '${entry}' for ${name} failed: ${e.message}`); }
+    }
+  }
+
   // Windows: use Windows Terminal with new window and title for tracking
   // Generate a startup script to avoid multi-layer argument escaping issues
   const windowTitle = `Agent-${name}`;
   const startScript = join(agentDir, '_start_fakechat.ps1');
   const pidFile = join(agentDir, '.agent.pid');
-  const useResume = getUseResume(name);
-  const continueFlag = useResume ? '--continue ' : '';
+  const useResume = false; // Channel mode: always fresh session
+  const continueFlag = '';
+
+  // If agent needs ccrouter, ensure it's running and override api_base_url
+  // Only providers that need request transformation (openrouter) require ccrouter.
+  // Direct providers (xiaomi, etc.) bypass ccrouter and connect directly.
+  const ROUTER_PROVIDERS = new Set(['openrouter', 'openai']);
+  let effectiveAgentInfo = agentInfo;
+  if (agentInfo && agentInfo.auth_mode === 'api_key' && agentInfo.api_provider) {
+    if (ROUTER_PROVIDERS.has(agentInfo.api_provider.toLowerCase())) {
+      const routerStarted = await ensureCCRouter();
+      if (routerStarted) {
+        effectiveAgentInfo = { ...agentInfo, api_base_url: `http://127.0.0.1:${CCROUTER_PORT}` };
+      } else {
+        console.warn(`[start-agent] ccrouter failed to start, using direct API for ${name}`);
+      }
+    }
+    // else: use provider's direct base_url (no ccrouter needed)
+  }
 
   // Build startup script with PowerShell $env: syntax (inherited by child processes)
   const ps1Lines = [
@@ -409,18 +456,15 @@ export async function startAgent(name) {
     ps1Lines.push(`$env:AGENT_NAME = "${name}"`);
   }
   ps1Lines.push(`$env:TEAMMCP_URL = "${serverUrl}"`);
-  if (agentInfo && agentInfo.auth_mode === 'api_key') {
+  if (effectiveAgentInfo && effectiveAgentInfo.auth_mode === 'api_key') {
     ps1Lines.push(`$env:ANTHROPIC_API_KEY = ""`);
     ps1Lines.push(`$env:CLAUDE_CODE_OAUTH_TOKEN = "channel-gate-bypass"`);
-    if (agentInfo.api_base_url) ps1Lines.push(`$env:ANTHROPIC_BASE_URL = "${agentInfo.api_base_url}"`);
-    if (agentInfo.api_auth_token) ps1Lines.push(`$env:ANTHROPIC_AUTH_TOKEN = "${agentInfo.api_auth_token}"`);
-    if (agentInfo.api_model) ps1Lines.push(`$env:ANTHROPIC_MODEL = "${agentInfo.api_model}"`);
+    if (effectiveAgentInfo.api_base_url) ps1Lines.push(`$env:ANTHROPIC_BASE_URL = "${effectiveAgentInfo.api_base_url}"`);
+    if (effectiveAgentInfo.api_auth_token) ps1Lines.push(`$env:ANTHROPIC_AUTH_TOKEN = "${effectiveAgentInfo.api_auth_token}"`);
+    if (effectiveAgentInfo.api_model) ps1Lines.push(`$env:ANTHROPIC_MODEL = "${effectiveAgentInfo.api_model}"`);
   }
   const channelFlag = '--channels plugin:fakechat@claude-plugins-official';
   ps1Lines.push(`claude ${continueFlag}--dangerously-skip-permissions --permission-mode bypassPermissions ${channelFlag}`);
-  if (useResume) {
-    ps1Lines.push(`if ($LASTEXITCODE -ne 0) { claude --dangerously-skip-permissions --permission-mode bypassPermissions ${channelFlag} }`);
-  }
   writeFileSync(startScript, ps1Lines.join('\r\n') + '\r\n', 'utf-8');
 
   const psCmd = `$p = Start-Process -FilePath 'wt.exe' -ArgumentList '--window new --title ${windowTitle} powershell -ExecutionPolicy Bypass -File ""${startScript}""' -PassThru; Write-Output $p.Id`;
@@ -434,7 +478,7 @@ export async function startAgent(name) {
   // Wait briefly then find the powershell.exe child running _start_fakechat.ps1 and save its PID
   await new Promise(r => setTimeout(r, 3000));
   try {
-    const findPid = await execPSFile(`Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${name}*_start_fakechat.ps1*' -and $_.Name -eq 'powershell.exe' } | Select-Object -First 1 -ExpandProperty ProcessId`);
+    const findPid = await execPSFile(`Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*\\${name}\\_start_fakechat.ps1*' -and $_.Name -eq 'powershell.exe' } | Select-Object -First 1 -ExpandProperty ProcessId`);
     const cmdPid = parseInt(findPid.trim(), 10);
     if (cmdPid && !isNaN(cmdPid)) {
       writeFileSync(pidFile, String(cmdPid), 'utf-8');
@@ -720,6 +764,144 @@ export function checkProcessPermission(agent) {
   return agent.name === 'Chairman' || agent.name === 'CEO' || agent.name === 'HR' || ALLOWED_ROLES.includes(agent.role);
 }
 
+// ── ccrouter lifecycle management ────────────────────────
+
+/**
+ * Check if ccrouter is needed: any API key agent with api_provider set
+ */
+function isCCRouterNeeded() {
+  try {
+    const agents = getAgentsNeedingRouter();
+    return agents.length > 0;
+  } catch { return false; }
+}
+
+/**
+ * Generate ccrouter config.json from DB agent configurations
+ */
+function generateCCRouterConfig() {
+  const agents = getAgentsNeedingRouter();
+
+  // Group agents by provider to deduplicate
+  const providerMap = new Map();
+  for (const agent of agents) {
+    const key = `${agent.api_provider}|${agent.api_base_url}`;
+    if (!providerMap.has(key)) {
+      providerMap.set(key, {
+        name: agent.api_provider,
+        api_base_url: agent.api_base_url,
+        api_key: agent.api_auth_token,
+        models: [],
+        transformer: { use: [agent.api_provider] }
+      });
+    }
+    const provider = providerMap.get(key);
+    if (agent.api_model && !provider.models.includes(agent.api_model)) {
+      provider.models.push(agent.api_model);
+    }
+  }
+
+  const providers = [...providerMap.values()];
+
+  // Build router defaults from first provider/model
+  const defaultProvider = providers[0];
+  const defaultModel = defaultProvider?.models[0] || '';
+  const routerDefault = defaultProvider ? `${defaultProvider.name},${defaultModel}` : '';
+
+  const config = {
+    HOST: '127.0.0.1',
+    PORT: CCROUTER_PORT,
+    LOG: true,
+    LOG_LEVEL: 'info',
+    API_TIMEOUT_MS: 600000,
+    NON_INTERACTIVE_MODE: true,
+    Providers: providers,
+    Router: {
+      default: routerDefault
+    }
+  };
+
+  if (!existsSync(CCROUTER_CONFIG_DIR)) {
+    mkdirSync(CCROUTER_CONFIG_DIR, { recursive: true });
+  }
+  writeFileSync(CCROUTER_CONFIG_PATH, JSON.stringify(config, null, 2), 'utf-8');
+  console.log(`[ccrouter] config generated: ${providers.length} providers, ${agents.length} agents`);
+  return config;
+}
+
+/**
+ * Start ccrouter if not already running
+ */
+async function ensureCCRouter() {
+  // Check if already running (by PID)
+  if (ccrouterPid) {
+    try {
+      const check = await execPS(`Get-Process -Id ${ccrouterPid} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id`);
+      if (check.trim()) return true; // still running
+    } catch {}
+    ccrouterPid = null;
+  }
+
+  // Check if port is already in use (ccrouter started externally)
+  try {
+    const portCheck = await execPS(`Get-NetTCPConnection -LocalPort ${CCROUTER_PORT} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess`);
+    if (portCheck.trim()) {
+      ccrouterPid = parseInt(portCheck.trim(), 10);
+      console.log(`[ccrouter] already running on port ${CCROUTER_PORT} (PID: ${ccrouterPid})`);
+      return true;
+    }
+  } catch {}
+
+  // Generate config from DB
+  generateCCRouterConfig();
+
+  // Start ccrouter
+  console.log(`[ccrouter] starting on port ${CCROUTER_PORT}...`);
+  try {
+    const child = exec('npx @musistudio/claude-code-router start', {
+      shell: 'cmd.exe',
+      detached: true,
+      stdio: 'ignore',
+      env: { ...process.env }
+    });
+    child.unref();
+
+    // Wait for port to become available
+    for (let i = 0; i < 15; i++) {
+      await new Promise(r => setTimeout(r, 2000));
+      try {
+        const check = await execPS(`Get-NetTCPConnection -LocalPort ${CCROUTER_PORT} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty OwningProcess`);
+        if (check.trim()) {
+          ccrouterPid = parseInt(check.trim(), 10);
+          console.log(`[ccrouter] started (PID: ${ccrouterPid})`);
+          return true;
+        }
+      } catch {}
+    }
+    console.error('[ccrouter] failed to start within 30s');
+    return false;
+  } catch (e) {
+    console.error(`[ccrouter] start failed: ${e.message}`);
+    return false;
+  }
+}
+
+/**
+ * Stop ccrouter process
+ */
+async function stopCCRouter() {
+  if (ccrouterPid) {
+    try {
+      exec(`taskkill /PID ${ccrouterPid} /T /F`, { shell: 'cmd.exe' });
+      console.log(`[ccrouter] stopped (PID: ${ccrouterPid})`);
+    } catch {}
+    ccrouterPid = null;
+  }
+}
+
+// Export for router.mjs if needed
+export { ensureCCRouter, stopCCRouter, generateCCRouterConfig };
+
 // P1: Credential sync — file watcher + periodic fallback (5 min)
 const CREDENTIAL_SYNC_INTERVAL_MS = 5 * 60_000;
 
@@ -743,6 +925,16 @@ function syncCredentials() {
       if (a?.auth_mode === 'api_key') {
         const agentCreds = join(AGENTS_BASE_DIR, name, '.claude-config', '.credentials.json');
         if (existsSync(agentCreds)) {
+          // If agent cred is a hardlink to main, break the link first — otherwise clearing it would clear main too
+          try {
+            const mainInode = statSync(mainCreds).ino;
+            if (statSync(agentCreds).ino === mainInode) {
+              unlinkSync(agentCreds);
+              writeFileSync(agentCreds, '{}', 'utf-8');
+              console.log(`[credential-sync] broke hardlink for api_key agent ${name}`);
+              continue;
+            }
+          } catch {}
           const content = readFileSync(agentCreds, 'utf-8');
           if (content !== '{}' && content.length > 10) {
             writeFileSync(agentCreds, '{}', 'utf-8');
@@ -753,6 +945,11 @@ function syncCredentials() {
     } catch {}
     const configDir = join(AGENTS_BASE_DIR, name, '.claude-config');
     const agentCreds = join(configDir, '.credentials.json');
+    // Skip if credentials is a hardlink (same inode as main) — no sync needed
+    try {
+      const mainInode = statSync(mainCreds).ino;
+      if (statSync(agentCreds).ino === mainInode) continue;
+    } catch {}
     try {
       if (!existsSync(agentCreds)) {
         // Agent has no credentials yet — forward sync
@@ -774,9 +971,14 @@ function syncCredentials() {
             fwdSync++;
           }
         } else if (mainTime > agentTime) {
-          // Main token is newer — forward sync to agent
-          copyFileSync(mainCreds, agentCreds);
-          fwdSync++;
+          // Main token is newer — forward sync to agent (with content validation)
+          const mainContent = readFileSync(mainCreds, 'utf-8');
+          if (mainContent.length > 50 && mainContent.includes('"accessToken"')) {
+            copyFileSync(mainCreds, agentCreds);
+            fwdSync++;
+          } else {
+            console.warn(`[credential-sync] skip forward sync for ${name}: main credentials invalid (${mainContent.length} bytes)`);
+          }
         }
       }
     } catch {}
