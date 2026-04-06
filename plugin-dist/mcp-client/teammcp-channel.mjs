@@ -17,6 +17,8 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { randomUUID } from "crypto";
+import { z } from "zod";
 
 // ---------------------------------------------------------------------------
 // Config from environment
@@ -116,7 +118,10 @@ const server = new Server(
   { name: "teammcp-channel", version: "1.0.0" },
   {
     capabilities: {
-      experimental: { "claude/channel": {} },
+      experimental: {
+        "claude/channel": {},
+        "claude/channel/permission": {},
+      },
       tools: {},
     },
     instructions: [
@@ -1374,7 +1379,14 @@ function handleSSEEvent(data) {
     // Format like the working team-sync-watcher: raw text content, meta for routing
     const msgText = `---\n**${from}** (${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })})\n\n${content}\n`;
 
-    sendNotification(msgText, source, channelId);
+    // Pass through metadata fields (thread_id, user, context_token, etc.)
+    const extraMeta = {};
+    if (event.metadata && typeof event.metadata === 'object') {
+      for (const [k, v] of Object.entries(event.metadata)) {
+        if (typeof v === 'string') extraMeta[k] = v;
+      }
+    }
+    sendNotification(msgText, source, channelId, extraMeta);
     // Send delivery ack
     if (event.id) {
       apiRequest("POST", `/api/messages/${event.id}/ack`).catch(() => {});
@@ -1386,6 +1398,8 @@ function handleSSEEvent(data) {
       const msgText = `${event.agent} is now ${event.status}`;
       sendNotification(msgText, "status", "");
     }
+  } else if (event.type === "approval_resolved") {
+    handleApprovalResolved(event);
   }
   // Ignore agent-output, agent-error, reactions, pins, etc.
 }
@@ -1395,7 +1409,159 @@ function escapeXml(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-async function sendNotification(text, source = "group", channelId = "") {
+// ---------------------------------------------------------------------------
+// Permission integration: CC permission_request → TeamMCP approval → CC permission
+// ---------------------------------------------------------------------------
+
+// requestId → { approvalId, toolName, description, inputPreview, createdAt }
+const pendingPermissions = new Map();
+// approvalId → { requestId }
+const pendingApprovals = new Map();
+
+const PERMISSION_REQUEST_METHOD = "notifications/claude/channel/permission_request";
+const PERMISSION_RESPONSE_METHOD = "notifications/claude/channel/permission";
+
+// Track next field index for rotating permission request fields
+// Each update to an approval_required field triggers a new approval
+let permissionFieldCounter = 0;
+
+async function handlePermissionRequest(params) {
+  const { request_id, tool_name, description, input_preview } = params;
+
+  if (!request_id || !tool_name) {
+    log(`Permission request missing required fields: ${JSON.stringify(params)}`);
+    return;
+  }
+
+  // Use rotating field names so each permission request creates/updates its own field
+  // Field with approval_required=true: first creation doesn't trigger approval,
+  // subsequent updates DO trigger approval
+  const fieldIndex = permissionFieldCounter++;
+  const fieldName = `perm_${fieldIndex}`;
+
+  pendingPermissions.set(request_id, {
+    fieldName,
+    toolName: tool_name,
+    description: description || '',
+    inputPreview: input_preview || '',
+    createdAt: Date.now(),
+  });
+
+  log(`Permission request: ${tool_name} (${request_id}) → field ${fieldName}`);
+
+  try {
+    const result = await apiRequest('POST', '/api/state', {
+      project_id: 'claude-code-permissions',
+      field: fieldName,
+      value: {
+        tool_name,
+        description: description || '',
+        input_preview: input_preview || '',
+        cc_request_id: request_id,
+      },
+      approval_required: true,
+    });
+
+    if (result.pending_approval) {
+      // Approval was triggered (update to existing approval_required field)
+      const approvalId = result.approval_id;
+      pendingPermissions.get(request_id).approvalId = approvalId;
+      pendingApprovals.set(approvalId, { requestId: request_id });
+      log(`Approval created for ${tool_name} (${request_id}) → ${approvalId}`);
+    } else if (result.created) {
+      // First creation — no approval triggered yet. This is the field setup.
+      // Send the actual approval by updating the field again.
+      log(`Field created for ${tool_name} (${request_id}), triggering approval via update...`);
+      const updateResult = await apiRequest('POST', '/api/state', {
+        project_id: 'claude-code-permissions',
+        field: fieldName,
+        value: {
+          tool_name,
+          description: description || '',
+          input_preview: input_preview || '',
+          cc_request_id: request_id,
+        },
+        approval_required: true,
+      });
+      if (updateResult.pending_approval) {
+        const approvalId = updateResult.approval_id;
+        pendingPermissions.get(request_id).approvalId = approvalId;
+        pendingApprovals.set(approvalId, { requestId: request_id });
+        log(`Approval created (update) for ${tool_name} (${request_id}) → ${approvalId}`);
+      } else {
+        log(`Unexpected: update did not trigger approval: ${JSON.stringify(updateResult)}`);
+        sendPermissionResponse(request_id, 'deny');
+        cleanupPermission(request_id);
+      }
+    } else {
+      log(`Unexpected setState result: ${JSON.stringify(result)}`);
+      sendPermissionResponse(request_id, 'deny');
+      cleanupPermission(request_id);
+    }
+  } catch (err) {
+    log(`Permission forward error: ${err.message}`);
+    sendPermissionResponse(request_id, 'deny');
+    cleanupPermission(request_id);
+  }
+}
+
+function handleApprovalResolved(event) {
+  const { approval_id, approved } = event;
+  if (!approval_id) return;
+
+  const mapping = pendingApprovals.get(approval_id);
+  if (!mapping) return; // Not our approval — ignore
+
+  const { requestId } = mapping;
+  const decision = approved ? 'allow' : 'deny';
+
+  log(`Permission resolved: ${approval_id} → ${requestId} → ${decision}`);
+  sendPermissionResponse(requestId, decision);
+  cleanupPermission(requestId);
+}
+
+async function sendPermissionResponse(requestId, behavior) {
+  try {
+    await server.notification({
+      method: PERMISSION_RESPONSE_METHOD,
+      params: {
+        request_id: requestId,
+        behavior,
+      },
+    });
+    log(`Permission response sent: ${requestId} → ${behavior}`);
+  } catch (err) {
+    log(`Permission response error: ${err.message}`);
+  }
+}
+
+function cleanupPermission(requestId) {
+  const mapping = pendingPermissions.get(requestId);
+  if (mapping) {
+    pendingApprovals.delete(mapping.approvalId);
+  }
+  pendingPermissions.delete(requestId);
+}
+
+// Timeout: deny pending permissions after 30 minutes
+const PERMISSION_TIMEOUT_MS = 30 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [requestId, info] of pendingPermissions) {
+    if (now - info.createdAt > PERMISSION_TIMEOUT_MS) {
+      log(`Permission timeout: ${requestId} (${info.toolName})`);
+      sendPermissionResponse(requestId, 'deny');
+      // Notify channel about the timeout
+      sendNotification(
+        `⚠️ 审批超时已自动拒绝：${info.toolName}\n${info.description || ''}`.trim(),
+        "system", ""
+      );
+      cleanupPermission(requestId);
+    }
+  }
+}, 60000);
+
+async function sendNotification(text, source = "group", channelId = "", extraMeta = {}) {
   try {
     await server.notification({
       method: "notifications/claude/channel",
@@ -1404,6 +1570,7 @@ async function sendNotification(text, source = "group", channelId = "") {
         meta: {
           source,
           channel: channelId,
+          ...extraMeta,
         },
       },
     });
@@ -1430,6 +1597,21 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   log("MCP server connected via stdio");
+
+  // Register handler for Claude Code permission requests
+  const PermissionRequestNotificationSchema = z.object({
+    method: z.literal(PERMISSION_REQUEST_METHOD),
+    params: z.object({
+      request_id: z.string(),
+      tool_name: z.string(),
+      description: z.string().optional(),
+      input_preview: z.string().optional(),
+    }),
+  });
+  server.setNotificationHandler(PermissionRequestNotificationSchema, (notification) => {
+    handlePermissionRequest(notification.params);
+  });
+  log("Permission request handler registered");
 
   // Start SSE connection for real-time messages
   connectSSE();

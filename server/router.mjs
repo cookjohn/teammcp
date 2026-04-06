@@ -28,7 +28,7 @@ import {
   saveFile, getFile,
   getReportsTo, setReportsTo, getSubordinates,
   ackMessage, getMessageAcks,
-  setUseResume, getUseResume
+  setUseResume, getUseResume, setAgentAuthConfig
 } from './db.mjs';
 import { requireAuth } from './auth.mjs';
 import {
@@ -484,10 +484,35 @@ export async function handleRequest(req, res) {
       } else if (channel.type === 'group') {
         // Group: push to channel members except sender + always include Chairman (admin oversight)
         const groupMembers = ensureChairman(getChannelMembers(channelId).filter(m => m !== req.agent.name), req.agent.name);
+        // Warn if mentioned agents are not in this channel
+        const notInChannel = (mentions || []).filter(m => m !== req.agent.name && !groupMembers.includes(m) && getAgentByName(m));
         pushToAgents(groupMembers, event);
         // Update read_status for online recipients to prevent duplicates on reconnect
         for (const a of groupMembers) {
           if (isOnline(a)) updateReadStatus(a, channelId, msg.id);
+        }
+        // Warn sender and offer to add mentioned agents not in channel
+        if (notInChannel.length > 0) {
+          if (body.auto_add_mentions) {
+            // Auto-add mentioned agents to channel and push message
+            for (const m of notInChannel) {
+              addChannelMember(channelId, m);
+              pushToAgent(m, event);
+              if (isOnline(m)) updateReadStatus(m, channelId, msg.id);
+            }
+            pushToAgent(req.agent.name, {
+              type: 'mention_added',
+              channel: channelId,
+              message: `已将 ${notInChannel.join(', ')} 加入频道并推送消息。`
+            });
+          } else {
+            pushToAgent(req.agent.name, {
+              type: 'mention_warning',
+              channel: channelId,
+              agents: notInChannel,
+              message: `提醒：${notInChannel.join(', ')} 不在此频道，未收到你的消息。如需添加到频道，请重新发送并加上 auto_add_mentions: true，或用 send_dm 私聊。`
+            });
+          }
         }
         // Forward @Chairman mentions → WeChat (only for wechat-sourced messages)
         const groupMeta = body.metadata || {};
@@ -629,9 +654,9 @@ export async function handleRequest(req, res) {
       broadcastStatus(agentName, 'online');
       publish('agent_online', { agent_id: agentName });
 
-      // Missed messages on reconnect disabled — agents start fresh
-      // const channels = getChannelsForAgent(agentName);
-      // sendMissedMessages(agentName, channels.map(c => c.id));
+      // Replay missed messages on reconnect (capped at 50 total pushes)
+      const channels = getChannelsForAgent(agentName);
+      sendMissedMessages(agentName, channels.map(c => c.id));
 
       return; // Keep connection open
     }
@@ -1066,6 +1091,16 @@ export async function handleRequest(req, res) {
       if (!target) return json(res, { error: 'Agent not found' }, 404);
       if (body.reports_to !== undefined) setReportsTo(name, body.reports_to);
       if (body.use_resume !== undefined) setUseResume(name, body.use_resume);
+      // Persist auth configuration
+      if (body.auth_mode !== undefined) {
+        setAgentAuthConfig(name, {
+          auth_mode: body.auth_mode,
+          api_provider: body.api_provider,
+          api_base_url: body.api_base_url,
+          api_auth_token: body.api_auth_token,
+          api_model: body.api_model,
+        });
+      }
       return json(res, { ok: true, agent: name, reports_to: body.reports_to, use_resume: body.use_resume });
     }
 

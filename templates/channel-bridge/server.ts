@@ -2,6 +2,7 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
 
 const BASE_URL = (process.env.TEAMMCP_URL || "http://localhost:3100").replace(/\/+$/, "");
 const API_KEY = process.env.TEAMMCP_KEY || "";
@@ -38,7 +39,7 @@ function err(text: string) { return { content: [{ type: "text" as const, text }]
 
 const server = new Server(
   { name: "fakechat", version: "0.1.0" },
-  { capabilities: { tools: {}, experimental: { "claude/channel": {} } }, instructions: `You are ${AGENT_NAME}. You receive messages via <channel> events.\nRespond according to your CLAUDE.md role definition.\nReply in group: send_message | Reply in DM: send_dm | Check online: get_agents | Check history: get_history` },
+  { capabilities: { tools: {}, experimental: { "claude/channel": {}, "claude/channel/permission": {} } }, instructions: `You are ${AGENT_NAME}. You receive messages via <channel> events.\nRespond according to your CLAUDE.md role definition.\nReply in group: send_message | Reply in DM: send_dm | Check online: get_agents | Check history: get_history` },
 );
 
 const TOOLS = [
@@ -157,6 +158,7 @@ async function fetchMyReportsTo() { try { const agents = await api("GET", "/api/
 function shouldInject(ev: any): boolean {
   if (ev.type === "message") { if ((ev.channel||"").startsWith("dm:")) return true; if (ev.mentions?.includes(AGENT_NAME)) return true; if (ev.from === "System") return true; if (ev.from === "Chairman" && myReportsTo === "Chairman") return true; return false; }
   if (ev.type === "approval_requested") return true;
+  if (ev.type === "approval_resolved") return true;
   return false;
 }
 
@@ -184,21 +186,153 @@ function handleSSE(data: string) {
   if (ev.type === "message" && shouldInject(ev)) {
     const ch = ev.channel || "unknown"; const isDm = ch.startsWith("dm:");
     const msg = `---\n**${ev.from||"?"}** (${new Date().toLocaleString("zh-CN",{timeZone:"Asia/Shanghai"})})\n\n${ev.content||""}\n`;
-    notify(msg, isDm ? "dm" : "group", ch);
+    const extraMeta: Record<string, string> = {};
+    if (ev.metadata && typeof ev.metadata === 'object') {
+      for (const [k, v] of Object.entries(ev.metadata)) {
+        if (typeof v === 'string') extraMeta[k] = v;
+      }
+    }
+    notify(msg, isDm ? "dm" : "group", ch, extraMeta);
     if (ev.id) api("POST", `/api/messages/${ev.id}/ack`).catch(() => {});
   } else if (ev.type === "status" && ev.status === "online") { notify(`${ev.agent} is now online`, "status", ""); }
+  else if (ev.type === "approval_resolved") { handleApprovalResolved(ev); }
 }
 
-async function notify(text: string, source = "group", channel = "") {
-  try { await server.notification({ method: "notifications/claude/channel", params: { content: text, meta: { source, channel } } }); log(`Notif OK (${source})`); }
+async function notify(text: string, source = "group", channel = "", extraMeta: Record<string, string> = {}) {
+  try { await server.notification({ method: "notifications/claude/channel", params: { content: text, meta: { source, channel, ...extraMeta } } }); log(`Notif OK (${source})`); }
   catch (e: any) { log(`Notif fail: ${e.message}`); }
 }
 
 function log(msg: string) { process.stderr.write(`[fakechat] ${msg}\n`); }
 
+// ---------------------------------------------------------------------------
+// Permission integration: CC permission_request → TeamMCP approval → CC permission
+// ---------------------------------------------------------------------------
+import { randomUUID } from "crypto";
+
+const pendingPermissions = new Map<string, { fieldName: string; approvalId?: string; toolName: string; description: string; inputPreview: string; createdAt: number }>();
+const pendingApprovals = new Map<string, { requestId: string }>();
+
+const PERMISSION_REQUEST_METHOD = "notifications/claude/channel/permission_request";
+const PERMISSION_RESPONSE_METHOD = "notifications/claude/channel/permission";
+
+// Track next field index for rotating permission request fields
+let permissionFieldCounter = 0;
+
+async function handlePermissionRequest(params: { request_id: string; tool_name: string; description?: string; input_preview?: string }) {
+  const { request_id, tool_name, description, input_preview } = params;
+  if (!request_id || !tool_name) { log(`Permission request missing required fields`); return; }
+
+  // Use rotating field names so each permission request creates/updates its own field
+  const fieldIndex = permissionFieldCounter++;
+  const fieldName = `perm_${fieldIndex}`;
+  pendingPermissions.set(request_id, { fieldName, toolName: tool_name, description: description || '', inputPreview: input_preview || '', createdAt: Date.now() });
+
+  log(`Permission request: ${tool_name} (${request_id}) → field ${fieldName}`);
+
+  try {
+    const result = await api("POST", "/api/state", {
+      project_id: 'claude-code-permissions',
+      field: fieldName,
+      value: { tool_name, description: description || '', input_preview: input_preview || '', cc_request_id: request_id },
+      approval_required: true,
+    });
+
+    if (result.pending_approval) {
+      const approvalId = result.approval_id;
+      pendingPermissions.get(request_id)!.approvalId = approvalId;
+      pendingApprovals.set(approvalId, { requestId: request_id });
+      log(`Approval created for ${tool_name} (${request_id}) → ${approvalId}`);
+    } else if (result.created) {
+      log(`Field created for ${tool_name} (${request_id}), triggering approval via update...`);
+      const updateResult = await api("POST", "/api/state", {
+        project_id: 'claude-code-permissions',
+        field: fieldName,
+        value: { tool_name, description: description || '', input_preview: input_preview || '', cc_request_id: request_id },
+        approval_required: true,
+      });
+      if (updateResult.pending_approval) {
+        const approvalId = updateResult.approval_id;
+        pendingPermissions.get(request_id)!.approvalId = approvalId;
+        pendingApprovals.set(approvalId, { requestId: request_id });
+        log(`Approval created (update) for ${tool_name} (${request_id}) → ${approvalId}`);
+      } else {
+        log(`Unexpected: update did not trigger approval: ${JSON.stringify(updateResult)}`);
+        sendPermissionResponse(request_id, 'deny');
+        cleanupPermission(request_id);
+      }
+    } else {
+      log(`Unexpected setState result: ${JSON.stringify(result)}`);
+      sendPermissionResponse(request_id, 'deny');
+      cleanupPermission(request_id);
+    }
+  } catch (err: any) {
+    log(`Permission forward error: ${err.message}`);
+    sendPermissionResponse(request_id, 'deny');
+    cleanupPermission(request_id);
+  }
+}
+
+function handleApprovalResolved(event: any) {
+  const { approval_id, approved } = event;
+  if (!approval_id) return;
+  const mapping = pendingApprovals.get(approval_id);
+  if (!mapping) return;
+  const decision = approved ? 'allow' : 'deny';
+  log(`Permission resolved: ${approval_id} → ${mapping.requestId} → ${decision}`);
+  sendPermissionResponse(mapping.requestId, decision);
+  cleanupPermission(mapping.requestId);
+}
+
+async function sendPermissionResponse(requestId: string, behavior: 'allow' | 'deny') {
+  try {
+    await server.notification({ method: PERMISSION_RESPONSE_METHOD, params: { request_id: requestId, behavior } });
+    log(`Permission response sent: ${requestId} → ${behavior}`);
+  } catch (err: any) {
+    log(`Permission response error: ${err.message}`);
+  }
+}
+
+function cleanupPermission(requestId: string) {
+  const mapping = pendingPermissions.get(requestId);
+  if (mapping) pendingApprovals.delete(mapping.approvalId);
+  pendingPermissions.delete(requestId);
+}
+
+// Timeout: deny pending permissions after 30 minutes
+const PERMISSION_TIMEOUT_MS = 30 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [requestId, info] of pendingPermissions) {
+    if (now - info.createdAt > PERMISSION_TIMEOUT_MS) {
+      log(`Permission timeout: ${requestId} (${info.toolName})`);
+      sendPermissionResponse(requestId, 'deny');
+      notify(`⚠️ 审批超时已自动拒绝：${info.toolName}\n${info.description || ''}`.trim(), "system", "");
+      cleanupPermission(requestId);
+    }
+  }
+}, 60000);
+
 async function main() {
   log(`Starting fakechat for "${AGENT_NAME}" -> ${BASE_URL}`);
   await server.connect(new StdioServerTransport());
-  log("MCP connected"); connectSSE();
+  log("MCP connected");
+
+  // Register handler for Claude Code permission requests
+  const PermissionRequestNotificationSchema = z.object({
+    method: z.literal(PERMISSION_REQUEST_METHOD),
+    params: z.object({
+      request_id: z.string(),
+      tool_name: z.string(),
+      description: z.string().optional(),
+      input_preview: z.string().optional(),
+    }),
+  });
+  server.setNotificationHandler(PermissionRequestNotificationSchema, (notification: any) => {
+    handlePermissionRequest(notification.params);
+  });
+  log("Permission request handler registered");
+
+  connectSSE();
 }
 main().catch((e) => { console.error("Fatal:", e); process.exit(1); });

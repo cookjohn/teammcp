@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { publish } from './eventbus.mjs';
 
@@ -97,6 +97,13 @@ try {
 try {
   db.exec(`ALTER TABLE audit_reports ADD COLUMN visibility TEXT DEFAULT 'all'`);
 } catch { /* column already exists */ }
+
+// Auth config columns for API key agents
+try { db.exec('ALTER TABLE agents ADD COLUMN auth_mode TEXT DEFAULT "oauth"'); } catch { /* column already exists */ }
+try { db.exec('ALTER TABLE agents ADD COLUMN api_provider TEXT'); } catch { /* column already exists */ }
+try { db.exec('ALTER TABLE agents ADD COLUMN api_base_url TEXT'); } catch { /* column already exists */ }
+try { db.exec('ALTER TABLE agents ADD COLUMN api_auth_token TEXT'); } catch { /* column already exists */ }
+try { db.exec('ALTER TABLE agents ADD COLUMN api_model TEXT'); } catch { /* column already exists */ }
 
 // ── FTS5 full-text search index ──────────────────────────
 
@@ -251,6 +258,25 @@ export function setReportsTo(agentName, superior) {
 
 export function getSubordinates(superiorName) {
   return db.prepare('SELECT name, role, status FROM agents WHERE reports_to = ?').all(superiorName);
+}
+
+export function setAgentAuthConfig(name, config) {
+  const { auth_mode, api_provider, api_base_url, api_auth_token, api_model } = config;
+  db.prepare(`
+    UPDATE agents SET
+      auth_mode = ?, api_provider = ?, api_base_url = ?,
+      api_auth_token = ?, api_model = ?
+    WHERE name = ?
+  `).run(auth_mode || 'oauth', api_provider || null, api_base_url || null,
+         api_auth_token || null, api_model || null, name);
+}
+
+export function getAgentsNeedingRouter() {
+  return db.prepare(`
+    SELECT name, api_provider, api_base_url, api_auth_token, api_model
+    FROM agents
+    WHERE auth_mode = 'api_key' AND api_provider IS NOT NULL
+  `).all();
 }
 
 // ── Channels ────────────────────────────────────────────
@@ -465,7 +491,7 @@ export function getUnreadMessages(agentName, channelId) {
       `SELECT * FROM messages
        WHERE channel_id = ? AND (deleted = 0 OR deleted IS NULL)
          AND created_at > (SELECT created_at FROM messages WHERE id = ?)
-       ORDER BY created_at ASC`
+       ORDER BY created_at ASC LIMIT 50`
     ).all(channelId, rs.last_read_msg);
   }
   // No read_status record: limit to last 50 messages to prevent message flood on first connect
@@ -510,7 +536,7 @@ export function getUnreadMentions(agentName, channelId) {
        WHERE m.channel_id = ? AND (m.deleted = 0 OR m.deleted IS NULL)
          AND m.created_at > (SELECT created_at FROM messages WHERE id = ?)
          AND EXISTS (SELECT 1 FROM json_each(m.mentions) WHERE json_each.value = ?)
-       ORDER BY m.created_at ASC`
+       ORDER BY m.created_at ASC LIMIT 20`
     ).all(channelId, rs.last_read_msg, agentName);
   }
   return db.prepare(
@@ -633,9 +659,20 @@ CREATE TABLE IF NOT EXISTS task_history (
 CREATE INDEX IF NOT EXISTS idx_task_history_task ON task_history(task_id);
 `);
 
+// ── Role Configuration (loaded from TEAMMCP_HOME/config.json) ──
+
+import { CONFIG_PATH } from './lib/paths.mjs';
+let _roleConfig = null;
+function getRoleConfig() {
+  if (!_roleConfig) {
+    try { _roleConfig = JSON.parse(readFileSync(CONFIG_PATH, 'utf-8')); } catch { _roleConfig = {}; }
+  }
+  return _roleConfig;
+}
+
 // ── Task Permission Constants ───────────────────────────
 
-export const MANAGERS = ['CEO', 'PM', 'Product', 'CTO'];
+export const MANAGERS = getRoleConfig().managers || ['CEO', 'PM', 'Product', 'CTO'];
 
 // ── Task CRUD ───────────────────────────────────────────
 
@@ -1055,9 +1092,9 @@ export function getState(projectId, field, limit = 100, offset = 0) {
 }
 
 // Roles allowed to create new state fields and assign arbitrary owners
-export const STATE_ADMINS = ['CEO', 'CTO', 'PM', 'human'];
+export const STATE_ADMINS = getRoleConfig().state_admins || ['CEO', 'CTO', 'PM', 'human'];
 
-export const AUDIT_ROLES = ['Audit'];
+export const AUDIT_ROLES = getRoleConfig().audit_roles || ['Audit'];
 
 // Knowledge check enforcement: max age before setState requires a check (1 hour)
 const KNOWLEDGE_CHECK_MAX_AGE_MS = 60 * 60 * 1000;

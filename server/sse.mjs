@@ -348,10 +348,13 @@ const SUMMARY_THRESHOLD = 20;
  * only after all pushes succeed, to prevent inconsistent state on crash.
  */
 export function sendMissedMessages(agentName, channelIds) {
+  const MAX_TOTAL_PUSHES = 50; // Total push limit across all channels
+  let totalPushes = 0;
   const manifests = [];
   const readUpdates = []; // Collect all read-status updates, apply in transaction after push
 
   for (const chId of channelIds) {
+    if (totalPushes >= MAX_TOTAL_PUSHES) break;
     const count = getUnreadCount(agentName, chId);
 
     if (count === 0) continue;
@@ -360,6 +363,7 @@ export function sendMissedMessages(agentName, channelIds) {
       // Normal replay for small number of unread messages
       const missed = getUnreadMessages(agentName, chId);
       for (const msg of missed) {
+        if (totalPushes >= MAX_TOTAL_PUSHES) break;
         const pushed = pushToAgent(agentName, {
           type: 'message',
           channel: msg.channel_id,
@@ -372,6 +376,7 @@ export function sendMissedMessages(agentName, channelIds) {
         });
         if (pushed) {
           readUpdates.push({ agentName, channelId: chId, msgId: msg.id });
+          totalPushes++;
         }
       }
     } else {
@@ -397,6 +402,7 @@ export function sendMissedMessages(agentName, channelIds) {
 
       // Push @mention messages individually as P0, only mark sent ones as read
       for (const msg of mentions) {
+        if (totalPushes >= MAX_TOTAL_PUSHES) break;
         const pushed = pushToAgent(agentName, {
           type: 'message',
           channel: msg.channel_id,
@@ -409,6 +415,7 @@ export function sendMissedMessages(agentName, channelIds) {
         });
         if (pushed) {
           readUpdates.push({ agentName, channelId: chId, msgId: msg.id });
+          totalPushes++;
         }
       }
     }
