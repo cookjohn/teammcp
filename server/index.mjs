@@ -2,6 +2,7 @@ import http from 'node:http';
 import { handleRequest } from './router.mjs';
 import { closeAllConnections, pushToAgents, getOnlineAgents } from './sse.mjs';
 import { closeDb, getOverdueTasks, markOverdueNotified, saveMessage, getAllAgents, getSchedulesDue, updateScheduleNextRun, getNextCronRun, getCheckInDueTasks, updateCheckIn, getDoingTasks, saveNotification, updateTaskMetadata, getChannelMembers, getChannel, getPendingTasksCount, setState } from './db.mjs';
+import { subscribe } from './eventbus.mjs';
 
 const PORT = process.env.TEAMMCP_PORT || 3100;
 
@@ -228,6 +229,24 @@ try {
   // WeChat bridge is optional, don't fail server startup
   console.log('[TeamMCP] WeChat bridge not available:', e.message);
 }
+
+// ── Approval notification → WeChat push ───────────────
+subscribe('approval_requested', (event) => {
+  try {
+    let toolName = '', description = '';
+    try {
+      const pv = JSON.parse(event.proposed_value || '{}');
+      toolName = pv.tool_name || '';
+      description = pv.description || '';
+    } catch {}
+    const content = `[审批请求] ${toolName || event.field}\n${description}\n请求人：${event.proposed_by || 'unknown'}\n审批人：${event.approver || 'CEO'}`;
+    const notifId = `notif_approval_${event.approval_id}_${Date.now()}`;
+    saveNotification(notifId, event.approver || 'CEO', 'wechat', content);
+    console.log(`[Approval] WeChat notification sent for ${event.approval_id}`);
+  } catch (e) {
+    console.error('[Approval] WeChat notification error:', e.message);
+  }
+});
 
 // ── Graceful shutdown ──────────────────────────────────
 function shutdown(signal) {

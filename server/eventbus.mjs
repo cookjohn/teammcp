@@ -56,11 +56,13 @@ subscribe('state_changed', (event) => {
 });
 
 // Built-in handler: forward approval_requested to the approver via SSE
+// Also forward to Chairman so WeChat bridge can push notification
 subscribe('approval_requested', (event) => {
   const { approver } = event;
-  if (approver) {
-    pushToAgent(approver, event);
-  }
+  const targets = new Set();
+  if (approver) targets.add(approver);
+  targets.add('Chairman'); // WeChat bridge needs this for WeChat push
+  pushToAgents([...targets], event);
 });
 
 // Built-in handler: forward approval_resolved to the proposer via SSE

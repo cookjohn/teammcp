@@ -147,6 +147,11 @@ async function init() {
   applyI18n();
   initWechatPanel();
 
+  // Request browser notification permission for approval alerts
+  if ('Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission();
+  }
+
   // Auto-select first channel
   if (channels.length > 0) {
     selectChannel(channels[0].id);
@@ -413,6 +418,30 @@ function handleSSEEvent(data) {
         loadApprovals();
         var tsEl = document.getElementById('state-last-updated');
         if (tsEl) tsEl.textContent = 'Updated ' + new Date().toLocaleTimeString();
+      }
+      break;
+
+    case 'approval_requested':
+      if (currentView === 'state') {
+        loadApprovals();
+      }
+      // Browser notification for approval requests
+      if (data.approver === agentName && 'Notification' in window && Notification.permission === 'granted') {
+        var toolName = '';
+        try {
+          var pv = JSON.parse(data.proposed_value || '{}');
+          toolName = pv.tool_name || '';
+        } catch {}
+        var title = 'Approval Request';
+        var body = (toolName ? toolName + ': ' : '') + (data.field || '') + ' by ' + (data.proposed_by || 'unknown');
+        new Notification(title, { body: body });
+      }
+      break;
+
+    case 'approval_resolved':
+      if (currentView === 'state') {
+        loadApprovals();
+        loadStateFields(currentProjectId);
       }
       break;
 

@@ -1,0 +1,5 @@
+{
+  "state_admins": ["CEO", "CTO", "PM", "human"],
+  "audit_roles": ["Audit"],
+  "managers": ["CEO", "PM", "Product", "CTO"]
+}
