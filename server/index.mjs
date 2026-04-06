@@ -206,11 +206,13 @@ setInterval(() => {
 }, 60_000);
 
 // ── WeChat Bridge (optional) ─────────────────────
+let sendToWeChat = null;
 try {
-  const { init: initWeChat, sendToWeChat } = await import('./wechat-bridge.mjs');
+  const wechatMod = await import('./wechat-bridge.mjs');
+  sendToWeChat = wechatMod.sendToWeChat;
   const { pushToAgent } = await import('./sse.mjs');
 
-  initWeChat((text, fromUser, contextToken) => {
+  wechatMod.init((text, fromUser, contextToken) => {
     // WeChat message received → save as Chairman message to #general
     saveMessage('general', 'Chairman', text, '[]', null, { source: 'wechat', context_token: contextToken, from_user_id: fromUser });
 
@@ -219,10 +221,6 @@ try {
     pushToAgent('CEO', event);
     pushToAgent('Audit', event);
   });
-
-  // TODO: Handle TeamMCP → WeChat direction
-  // When a message is sent to Chairman as DM or @Chairman, forward via sendToWeChat()
-  // This requires hooking into the message send route or SSE event flow
 
   console.log('[TeamMCP] WeChat bridge initialized');
 } catch (e) {
@@ -242,7 +240,16 @@ subscribe('approval_requested', (event) => {
     const content = `[审批请求] ${toolName || event.field}\n${description}\n请求人：${event.proposed_by || 'unknown'}\n审批人：${event.approver || 'CEO'}`;
     const notifId = `notif_approval_${event.approval_id}_${Date.now()}`;
     saveNotification(notifId, event.approver || 'CEO', 'wechat', content);
-    console.log(`[Approval] WeChat notification sent for ${event.approval_id}`);
+
+    // Push to WeChat immediately
+    if (sendToWeChat) {
+      sendToWeChat(content, '').catch(e => {
+        console.error('[Approval] WeChat push failed:', e.message);
+      });
+    } else {
+      console.warn('[Approval] WeChat not connected, notification saved to DB only');
+    }
+    console.log(`[Approval] Notification processed for ${event.approval_id}`);
   } catch (e) {
     console.error('[Approval] WeChat notification error:', e.message);
   }
