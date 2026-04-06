@@ -3,7 +3,7 @@
  * Windows-specific: uses PowerShell for process management, screenshots, and input simulation.
  */
 
-import { exec } from 'node:child_process';
+import { exec, execSync } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, copyFileSync, readdirSync, statSync, cpSync, symlinkSync, linkSync, watch } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -78,29 +78,18 @@ export async function startAgent(name) {
     mkdirSync(agentDir, { recursive: true });
   }
 
-  // Auto-generate .mcp.json if missing
+  // Auto-generate .mcp.json if missing (or clean teammcp entry if exists)
   const mcpJsonPath = join(agentDir, '.mcp.json');
   if (!existsSync(mcpJsonPath)) {
-    // Derive mcp-client path from this package's install location (works for both local dev and npm global)
-    const packageRoot = join(fileURLToPath(import.meta.url), '..', '..');
-    const mcpClientPath = join(packageRoot, 'mcp-client', 'teammcp-channel.mjs').replace(/\\/g, '/');
-    const serverUrl = process.env.TEAMMCP_URL || 'http://localhost:3100';
-    // Get agent's API key from DB
-    let agentApiKey = '';
+    writeFileSync(mcpJsonPath, JSON.stringify({ mcpServers: {} }, null, 2), 'utf-8');
+  } else {
     try {
-      const agent = getAgentByName(name);
-      agentApiKey = agent?.api_key || '';
-    } catch {}
-    const mcpConfig = {
-      mcpServers: {
-        teammcp: {
-          command: 'node',
-          args: [mcpClientPath],
-          env: { AGENT_NAME: name, TEAMMCP_KEY: agentApiKey, TEAMMCP_URL: serverUrl }
-        }
+      const mcpConfig = JSON.parse(readFileSync(mcpJsonPath, 'utf-8'));
+      if (mcpConfig?.mcpServers?.teammcp) {
+        delete mcpConfig.mcpServers.teammcp;
+        writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2), 'utf-8');
       }
-    };
-    writeFileSync(mcpJsonPath, JSON.stringify(mcpConfig, null, 2), 'utf-8');
+    } catch {}
   }
 
   // Auto-generate CLAUDE.md if missing
@@ -175,14 +164,27 @@ export async function startAgent(name) {
     try { copyFileSync(globalClaudeJson, agentClaudeJson); } catch {}
   }
 
-  // Read agent's TEAMMCP_KEY from .mcp.json for hook authentication and _start.cmd
-  let agentKey = '';
-  if (existsSync(mcpJsonPath)) {
+  // Supplement .claude.json with tengu_harbor feature flag and trust dialog acceptance
+  if (existsSync(agentClaudeJson)) {
     try {
-      const mcpConfig = JSON.parse(readFileSync(mcpJsonPath, 'utf-8'));
-      agentKey = mcpConfig?.mcpServers?.teammcp?.env?.TEAMMCP_KEY || '';
+      const cj = JSON.parse(readFileSync(agentClaudeJson, 'utf-8'));
+      if (!cj.cachedGrowthBookFeatures) cj.cachedGrowthBookFeatures = {};
+      cj.cachedGrowthBookFeatures.tengu_harbor = true;
+      if (!cj.projects) cj.projects = {};
+      const projKey = agentDir.replace(/\\/g, '/');
+      if (!cj.projects[projKey]) cj.projects[projKey] = {};
+      cj.projects[projKey].hasTrustDialogAccepted = true;
+      cj.hasCompletedOnboarding = true;
+      writeFileSync(agentClaudeJson, JSON.stringify(cj, null, 2), 'utf-8');
     } catch {}
   }
+
+  // Read agent's TEAMMCP_KEY from database for hook authentication and _start.cmd
+  let agentKey = '';
+  try {
+    const agent = getAgentByName(name);
+    agentKey = agent?.api_key || '';
+  } catch {}
 
   // Auto-configure HTTP hooks for agent-output reporting to Dashboard
   // Write actual token value into hooks config (avoids env var substitution issues)
@@ -242,6 +244,21 @@ export async function startAgent(name) {
     try { writeFileSync(configSettingsPath, JSON.stringify(configSettings, null, 2), 'utf-8'); } catch {}
   }
 
+  // Supplement settings.json with enabledPlugins and allowedChannelPlugins for fakechat
+  const configSettingsJsonPath = join(configDir, 'settings.json');
+  let cfgSettings = {};
+  if (existsSync(configSettingsJsonPath)) {
+    try { cfgSettings = JSON.parse(readFileSync(configSettingsJsonPath, 'utf-8')); } catch {}
+  }
+  cfgSettings.skipDangerousModePermissionPrompt = true;
+  if (!cfgSettings.enabledPlugins) cfgSettings.enabledPlugins = {};
+  cfgSettings.enabledPlugins['fakechat@claude-plugins-official'] = true;
+  if (!cfgSettings.allowedChannelPlugins) cfgSettings.allowedChannelPlugins = [];
+  if (!cfgSettings.allowedChannelPlugins.some(e => typeof e === 'object' && e.plugin === 'fakechat')) {
+    cfgSettings.allowedChannelPlugins.push({ marketplace: 'claude-plugins-official', plugin: 'fakechat' });
+  }
+  writeFileSync(configSettingsJsonPath, JSON.stringify(cfgSettings, null, 2), 'utf-8');
+
   // Check CLAUDE.md exists (auto-generated above if missing, this is a safety check)
   if (!existsSync(claudeMdPath)) {
     console.warn(`[start-agent] WARNING: ${name} has no CLAUDE.md — agent may lack role definition`);
@@ -291,30 +308,97 @@ export async function startAgent(name) {
     }
   }
 
+  // Get agent info from DB (used for credentials handling and auth config)
+  const agentInfo = getAgentByName(name);
+
+  // API key agents — clear OAuth credentials to avoid interference
+  if (agentInfo && agentInfo.auth_mode === 'api_key') {
+    const credFile = join(configDir, '.credentials.json');
+    try { unlinkSync(credFile); } catch {}
+    writeFileSync(credFile, '{}', 'utf-8');
+  }
+
+  // fakechat plugin installation check — auto-install if not present
+  const pluginsDir = join(configDir, 'plugins');
+  const installedPlugins = join(pluginsDir, 'installed_plugins.json');
+  let hasFakechat = false;
+  if (existsSync(installedPlugins)) {
+    try {
+      const d = JSON.parse(readFileSync(installedPlugins, 'utf-8'));
+      hasFakechat = !!d.plugins?.['fakechat@claude-plugins-official']?.length;
+    } catch {}
+  }
+  if (!hasFakechat) {
+    const globalInstalled = join(homedir(), '.claude', 'plugins', 'installed_plugins.json');
+    let globalHas = false;
+    if (existsSync(globalInstalled)) {
+      try {
+        const d = JSON.parse(readFileSync(globalInstalled, 'utf-8'));
+        globalHas = !!d.plugins?.['fakechat@claude-plugins-official']?.length;
+      } catch {}
+    }
+    if (!globalHas) {
+      execSync('claude plugin marketplace add anthropics/claude-plugins-official', {
+        env: { ...process.env, CLAUDE_CONFIG_DIR: configDir },
+        timeout: 60000
+      });
+      execSync('claude plugin install fakechat@claude-plugins-official', {
+        env: { ...process.env, CLAUDE_CONFIG_DIR: configDir },
+        timeout: 60000
+      });
+    }
+  }
+
+  // Bridge server.ts auto-replacement — replace fakechat bridge with TeamMCP bridge
+  const bridgeSource = join(fileURLToPath(import.meta.url), '..', '..', 'templates', 'channel-bridge', 'server.ts');
+  const fakechatPaths = [
+    join(configDir, 'plugins', 'marketplaces', 'claude-plugins-official', 'external_plugins', 'fakechat', 'server.ts'),
+    join(configDir, 'plugins', 'cache', 'claude-plugins-official', 'fakechat', '0.0.1', 'server.ts'),
+    join(homedir(), '.claude', 'plugins', 'marketplaces', 'claude-plugins-official', 'external_plugins', 'fakechat', 'server.ts'),
+    join(homedir(), '.claude', 'plugins', 'cache', 'claude-plugins-official', 'fakechat', '0.0.1', 'server.ts'),
+  ];
+  if (existsSync(bridgeSource)) {
+    for (const target of fakechatPaths) {
+      if (existsSync(target)) {
+        try { copyFileSync(bridgeSource, target); } catch {}
+      }
+    }
+  }
+
   // Windows: use Windows Terminal with new window and title for tracking
   // Generate a startup script to avoid multi-layer argument escaping issues
   const windowTitle = `Agent-${name}`;
-  const startScript = join(agentDir, '_start.cmd');
+  const startScript = join(agentDir, '_start_fakechat.ps1');
   const pidFile = join(agentDir, '.agent.pid');
   const useResume = getUseResume(name);
   const continueFlag = useResume ? '--continue ' : '';
 
-  // Build API auth environment variables based on auth_mode
-  const agentInfo = getAgentByName(name);
-  let apiEnvLines = '';
-  if (agentInfo && agentInfo.auth_mode === 'api_key') {
-    // Clear default Anthropic auth to force API key mode
-    apiEnvLines += `set "ANTHROPIC_API_KEY="\r\n`;
-    // Bypass channel gate for non-OAuth sessions
-    apiEnvLines += `set "CLAUDE_CODE_OAUTH_TOKEN=channel-gate-bypass"\r\n`;
-    if (agentInfo.api_base_url) apiEnvLines += `set "ANTHROPIC_BASE_URL=${agentInfo.api_base_url}"\r\n`;
-    if (agentInfo.api_auth_token) apiEnvLines += `set "ANTHROPIC_AUTH_TOKEN=${agentInfo.api_auth_token}"\r\n`;
-    if (agentInfo.api_model) apiEnvLines += `set "ANTHROPIC_MODEL=${agentInfo.api_model}"\r\n`;
+  // Build startup script with PowerShell $env: syntax (inherited by child processes)
+  const ps1Lines = [
+    `Set-Location "${agentDir}"`,
+    `$env:CLAUDE_CONFIG_DIR = "${configDir}"`,
+    `$env:CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1"`,
+  ];
+  if (agentKey) {
+    ps1Lines.push(`$env:TEAMMCP_KEY = "${agentKey}"`);
+    ps1Lines.push(`$env:AGENT_NAME = "${name}"`);
   }
+  ps1Lines.push(`$env:TEAMMCP_URL = "${serverUrl}"`);
+  if (agentInfo && agentInfo.auth_mode === 'api_key') {
+    ps1Lines.push(`$env:ANTHROPIC_API_KEY = ""`);
+    ps1Lines.push(`$env:CLAUDE_CODE_OAUTH_TOKEN = "channel-gate-bypass"`);
+    if (agentInfo.api_base_url) ps1Lines.push(`$env:ANTHROPIC_BASE_URL = "${agentInfo.api_base_url}"`);
+    if (agentInfo.api_auth_token) ps1Lines.push(`$env:ANTHROPIC_AUTH_TOKEN = "${agentInfo.api_auth_token}"`);
+    if (agentInfo.api_model) ps1Lines.push(`$env:ANTHROPIC_MODEL = "${agentInfo.api_model}"`);
+  }
+  const channelFlag = '--channels plugin:fakechat@claude-plugins-official';
+  ps1Lines.push(`claude ${continueFlag}--dangerously-skip-permissions --permission-mode bypassPermissions ${channelFlag}`);
+  if (useResume) {
+    ps1Lines.push(`if ($LASTEXITCODE -ne 0) { claude --dangerously-skip-permissions --permission-mode bypassPermissions ${channelFlag} }`);
+  }
+  writeFileSync(startScript, ps1Lines.join('\r\n') + '\r\n', 'utf-8');
 
-  writeFileSync(startScript, `@echo off\r\ncd /d "${agentDir}"\r\nset "CLAUDE_CONFIG_DIR=${configDir}"\r\nset "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1"\r\n${agentKey ? `set "TEAMMCP_KEY=${agentKey}"\r\nset "AGENT_NAME=${name}"\r\n` : ''}${apiEnvLines}claude ${continueFlag}--dangerously-skip-permissions --permission-mode bypassPermissions --dangerously-load-development-channels server:teammcp${useResume ? ` || claude --dangerously-skip-permissions --permission-mode bypassPermissions --dangerously-load-development-channels server:teammcp` : ''}\r\n`, 'utf-8');
-
-  const psCmd = `$p = Start-Process -FilePath 'wt.exe' -ArgumentList '--window new --title ${windowTitle} cmd /c ""${startScript}""' -PassThru; Write-Output $p.Id`;
+  const psCmd = `$p = Start-Process -FilePath 'wt.exe' -ArgumentList '--window new --title ${windowTitle} powershell -ExecutionPolicy Bypass -File ""${startScript}""' -PassThru; Write-Output $p.Id`;
 
   const stdout = await execPS(psCmd);
   const wtPid = parseInt(stdout, 10);
@@ -322,10 +406,10 @@ export async function startAgent(name) {
     throw Object.assign(new Error('Failed to get process PID'), { statusCode: 500 });
   }
 
-  // Wait briefly then find the cmd.exe child running _start.cmd and save its PID
+  // Wait briefly then find the powershell.exe child running _start_fakechat.ps1 and save its PID
   await new Promise(r => setTimeout(r, 3000));
   try {
-    const findPid = await execPSFile(`Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${name}\\_start.cmd*' -and $_.Name -eq 'cmd.exe' } | Select-Object -First 1 -ExpandProperty ProcessId`);
+    const findPid = await execPSFile(`Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*${name}*_start_fakechat.ps1*' -and $_.Name -eq 'powershell.exe' } | Select-Object -First 1 -ExpandProperty ProcessId`);
     const cmdPid = parseInt(findPid.trim(), 10);
     if (cmdPid && !isNaN(cmdPid)) {
       writeFileSync(pidFile, String(cmdPid), 'utf-8');
@@ -628,8 +712,20 @@ function syncCredentials() {
     try { return statSync(join(AGENTS_BASE_DIR, name)).isDirectory() && existsSync(join(AGENTS_BASE_DIR, name, '.claude-config')); } catch { return false; }
   });
   for (const name of agentDirs) {
-    // Skip agents that use API key auth (not OAuth)
-    try { const a = getAgentByName(name); if (a?.auth_mode === 'api_key') continue; } catch {}
+    // Skip agents that use API key auth (not OAuth) — and protect their empty credentials
+    try {
+      const a = getAgentByName(name);
+      if (a?.auth_mode === 'api_key') {
+        const agentCreds = join(AGENTS_BASE_DIR, name, '.claude-config', '.credentials.json');
+        if (existsSync(agentCreds)) {
+          const content = readFileSync(agentCreds, 'utf-8');
+          if (content !== '{}' && content.length > 10) {
+            writeFileSync(agentCreds, '{}', 'utf-8');
+          }
+        }
+        continue;
+      }
+    } catch {}
     const configDir = join(AGENTS_BASE_DIR, name, '.claude-config');
     const agentCreds = join(configDir, '.credentials.json');
     try {

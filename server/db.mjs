@@ -901,6 +901,13 @@ export function getTaskWithChildren(taskId) {
   return { ...task, children, children_count: children.length, children_done: childrenDone, auto_progress: autoProgress };
 }
 
+// Get doing tasks for timeout detection
+export function getDoingTasks() {
+  return db.prepare(
+    "SELECT * FROM tasks WHERE status = 'doing' AND deleted = 0"
+  ).all();
+}
+
 // Get tasks that need check-in reminders
 export function getCheckInDueTasks() {
   return db.prepare(
@@ -932,6 +939,11 @@ export function updateCheckIn(taskId) {
   else if (interval === 'biweekly') next.setDate(next.getDate() + 14);
   meta.next_checkin = next.toISOString();
 
+  db.prepare('UPDATE tasks SET metadata = ? WHERE id = ?').run(JSON.stringify(meta), taskId);
+}
+
+// Update task metadata (for escalation tracking)
+export function updateTaskMetadata(taskId, meta) {
   db.prepare('UPDATE tasks SET metadata = ? WHERE id = ?').run(JSON.stringify(meta), taskId);
 }
 

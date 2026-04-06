@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { handleRequest } from './router.mjs';
 import { closeAllConnections, pushToAgents, getOnlineAgents } from './sse.mjs';
-import { closeDb, getOverdueTasks, markOverdueNotified, saveMessage, getAllAgents, getSchedulesDue, updateScheduleNextRun, getNextCronRun, getCheckInDueTasks, updateCheckIn, getChannelMembers, getChannel, getPendingTasksCount, setState } from './db.mjs';
+import { closeDb, getOverdueTasks, markOverdueNotified, saveMessage, getAllAgents, getSchedulesDue, updateScheduleNextRun, getNextCronRun, getCheckInDueTasks, updateCheckIn, getDoingTasks, saveNotification, updateTaskMetadata, getChannelMembers, getChannel, getPendingTasksCount, setState } from './db.mjs';
 
 const PORT = process.env.TEAMMCP_PORT || 3100;
 
@@ -64,6 +64,95 @@ setInterval(() => {
       updateCheckIn(task.id);
       console.log(`[checkin] Reminded: ${task.title} (${task.id})`);
     }
+    // Check-in reminders (continued above)
+    // ... code above ...
+
+    // ── Doing task timeout detection (every 60 seconds) ──
+    // Timeout levels: 30min → level 1, 60min → level 2, 120min → level 3
+    const TIMEOUT_L1 = 30 * 60 * 1000;  // 30 minutes
+    const TIMEOUT_L2 = 60 * 60 * 1000;  // 60 minutes
+    const TIMEOUT_L3 = 120 * 60 * 1000; // 120 minutes
+    const COOLDOWN = 15 * 60 * 1000;    // 15 minute cooldown between escalations
+
+    const doingTasks = getDoingTasks();
+    const now = Date.now();
+
+    for (const task of doingTasks) {
+      const lastUpdate = new Date(task.updated_at).getTime();
+      const idleTime = now - lastUpdate;
+
+      // Parse metadata for escalation tracking
+      let meta = {};
+      try { meta = JSON.parse(task.metadata || '{}'); } catch {}
+      const lastEscalation = meta.last_escalation_time || 0;
+
+      // Level 3: 120+ minutes idle → critical alert to all
+      if (idleTime > TIMEOUT_L3) {
+        if (now - lastEscalation > COOLDOWN) {
+          const notifId = `notif_timeout3_${task.id}_${Date.now()}`;
+          const content = `[严重] 任务"${task.title}"已失控超2小时无响应！\n负责人：${task.assignee}\nTask ID: ${task.id}`;
+          saveNotification(notifId, 'Chairman', 'wechat', content, task.id);
+          saveMessage('teammcp-dev', 'System', content, '[]', null);
+          pushToAgents(['CEO', 'Audit', task.assignee].filter(Boolean), {
+            type: 'message',
+            channel: 'teammcp-dev',
+            from: 'System',
+            content,
+            mentions: [],
+            id: `sys_timeout3_${task.id}_${Date.now()}`,
+            timestamp: new Date().toISOString()
+          });
+          meta.last_escalation_time = now;
+          meta.escalation_level = 3;
+          updateTaskMetadata(task.id, meta);
+          console.log(`[timeout L3] Task ${task.id} escalated to critical`);
+        }
+      }
+      // Level 2: 60+ minutes idle → escalate to CEO
+      else if (idleTime > TIMEOUT_L2) {
+        if (now - lastEscalation > COOLDOWN) {
+          const notifId = `notif_timeout2_${task.id}_${Date.now()}`;
+          const content = `[升级] 任务"${task.title}"已超时1小时无响应\n负责人：${task.assignee}\n上次更新：${task.updated_at}`;
+          saveNotification(notifId, 'CEO', 'wechat', content, task.id);
+          saveNotification(notifId + '_assignee', task.assignee, 'wechat', `[催促] 任务"${task.title}"已超时1小时，请立即处理！`, task.id);
+          pushToAgents(['CEO', task.assignee].filter(Boolean), {
+            type: 'message',
+            channel: 'teammcp-dev',
+            from: 'System',
+            content,
+            mentions: task.assignee ? [task.assignee] : [],
+            id: `sys_timeout2_${task.id}_${Date.now()}`,
+            timestamp: new Date().toISOString()
+          });
+          meta.last_escalation_time = now;
+          meta.escalation_level = 2;
+          updateTaskMetadata(task.id, meta);
+          console.log(`[timeout L2] Task ${task.id} escalated to CEO`);
+        }
+      }
+      // Level 1: 30+ minutes idle → remind assignee
+      else if (idleTime > TIMEOUT_L1) {
+        if (now - lastEscalation > COOLDOWN) {
+          const notifId = `notif_timeout1_${task.id}_${Date.now()}`;
+          const content = `[催促] 任务"${task.title}"已30分钟无更新，请汇报进度\n负责人：${task.assignee}\nTask ID: ${task.id}`;
+          saveNotification(notifId, task.assignee, 'wechat', content, task.id);
+          pushToAgents([task.assignee].filter(Boolean), {
+            type: 'message',
+            channel: 'teammcp-dev',
+            from: 'System',
+            content,
+            mentions: task.assignee ? [task.assignee] : [],
+            id: `sys_timeout1_${task.id}_${Date.now()}`,
+            timestamp: new Date().toISOString()
+          });
+          meta.last_escalation_time = now;
+          meta.escalation_level = 1;
+          updateTaskMetadata(task.id, meta);
+          console.log(`[timeout L1] Task ${task.id} reminded assignee`);
+        }
+      }
+    }
+
     // ── Auto-state inference: compute and update system state fields ──
     try {
       const onlineAgents = getOnlineAgents();

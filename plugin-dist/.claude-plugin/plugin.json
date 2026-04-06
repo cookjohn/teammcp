@@ -1,0 +1,21 @@
+{
+  "name": "fakechat",
+  "description": "TeamMCP channel bridge",
+  "version": "1.0.0",
+  "mcpServers": {
+    "fakechat": {
+      "command": "node",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp-client/teammcp-channel.mjs"],
+      "env": {
+        "AGENT_NAME": "${AGENT_NAME:-Agent}",
+        "TEAMMCP_KEY": "${TEAMMCP_KEY:-}",
+        "TEAMMCP_URL": "${TEAMMCP_URL:-http://localhost:3100}"
+      }
+    }
+  },
+  "channels": [
+    {
+      "server": "fakechat"
+    }
+  ]
+}

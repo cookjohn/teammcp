@@ -1,0 +1,12 @@
+agents/
+data/
+*.db
+*.db-wal
+*.db-shm
+server/uploads/
+node_modules/
+.git/
+*.tgz
+wechat-token.json
+.env
+teammcp-screenshots/

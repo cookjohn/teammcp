@@ -5,9 +5,9 @@
   },
   "plugins": [
     {
-      "name": "teammcp",
-      "source": ".",
-      "description": "Universal multi-agent collaboration framework"
+      "name": "fakechat",
+      "source": "./plugin-dist",
+      "description": "TeamMCP channel bridge"
     }
   ]
 }

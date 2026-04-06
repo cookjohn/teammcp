@@ -14,16 +14,15 @@
       "command": "node",
       "args": ["${CLAUDE_PLUGIN_ROOT}/mcp-client/teammcp-channel.mjs"],
       "env": {
-        "AGENT_NAME": "${AGENT_NAME}",
-        "TEAMMCP_KEY": "${TEAMMCP_KEY}",
-        "TEAMMCP_URL": "${TEAMMCP_URL}"
+        "AGENT_NAME": "${AGENT_NAME:-Agent}",
+        "TEAMMCP_KEY": "${TEAMMCP_KEY:-}",
+        "TEAMMCP_URL": "${TEAMMCP_URL:-http://localhost:3100}"
       }
     }
   },
   "channels": [
     {
-      "name": "teammcp",
-      "description": "Real-time team collaboration channel"
+      "server": "teammcp"
     }
   ],
   "commands": ["./templates/skills/"]

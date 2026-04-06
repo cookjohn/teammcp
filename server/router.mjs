@@ -447,9 +447,11 @@ export async function handleRequest(req, res) {
         // Update read_status for online recipient (delivered = read in SSE model)
         if (isOnline(other)) updateReadStatus(other, channelId, msg.id);
 
-        // Forward DMs to Chairman → WeChat (only for wechat-sourced reply chains)
+        // Forward DMs to Chairman → WeChat (CEO always forwards, others only for wechat reply chains)
         const msgMeta = body.metadata || {};
-        if (other === 'Chairman' && req.agent.name !== 'Chairman' && (msgMeta.source === 'wechat_reply' || msgMeta.source === 'wechat')) {
+        const isCEO = req.agent.name === 'CEO';
+        const isWechatChain = msgMeta.source === 'wechat_reply' || msgMeta.source === 'wechat';
+        if (other === 'Chairman' && req.agent.name !== 'Chairman' && (isCEO || isWechatChain)) {
           try {
             const { sendToWeChat, uploadAndSendFile, getStatus } = await import('./wechat-bridge.mjs');
             if (getStatus().connected) {
