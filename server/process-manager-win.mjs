@@ -761,10 +761,18 @@ function syncCredentials() {
       } else {
         const agentTime = statSync(agentCreds).mtimeMs;
         if (agentTime > mainTime) {
-          // Agent token is newer — reverse sync to main
-          copyFileSync(agentCreds, mainCreds);
-          mainTime = agentTime; // Update for subsequent comparisons
-          revSync++;
+          // Agent token is newer — reverse sync to main (with content validation)
+          const agentContent = readFileSync(agentCreds, 'utf-8');
+          if (agentContent.length > 50 && agentContent.includes('"accessToken"')) {
+            copyFileSync(agentCreds, mainCreds);
+            mainTime = agentTime; // Update for subsequent comparisons
+            revSync++;
+          } else {
+            console.warn(`[credential-sync] skip reverse sync for ${name}: invalid credentials (${agentContent.length} bytes)`);
+            // Forward sync instead — fix the corrupted agent credentials
+            copyFileSync(mainCreds, agentCreds);
+            fwdSync++;
+          }
         } else if (mainTime > agentTime) {
           // Main token is newer — forward sync to agent
           copyFileSync(mainCreds, agentCreds);
