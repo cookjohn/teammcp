@@ -1,11 +1,15 @@
 #!/usr/bin/env node
 import { WeChatAPI, extractText } from './wechat-api.mjs';
+import { readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import qrcode from 'qrcode-terminal';
 
 // Config from environment
 const TEAMMCP_URL = process.env.TEAMMCP_URL || 'http://localhost:3100';
 const TEAMMCP_KEY = process.env.TEAMMCP_KEY;
 const WECHAT_TOKEN_PATH = process.env.WECHAT_TOKEN_PATH || '.weixin-token.json';
+const CONTEXT_TOKEN_PATH = process.env.CONTEXT_TOKEN_PATH || join(dirname(fileURLToPath(import.meta.url)), '.context-token.json');
 
 if (!TEAMMCP_KEY) {
   console.error('ERROR: TEAMMCP_KEY environment variable required (Chairman token)');
@@ -66,7 +70,34 @@ console.log(`[bridge] WeChat API: ${wechat.baseUrl}`);
 console.log(`[bridge] Token: ${wechat.token ? wechat.token.slice(0, 10) + '...' : 'NONE'}`);
 
 // Store context tokens: fromUserId → latest contextToken
+// Persisted to disk so tokens survive bridge restarts
 const contextTokens = new Map();
+
+function loadContextTokens() {
+  try {
+    if (existsSync(CONTEXT_TOKEN_PATH)) {
+      const data = JSON.parse(readFileSync(CONTEXT_TOKEN_PATH, 'utf-8'));
+      for (const [k, v] of Object.entries(data)) {
+        contextTokens.set(k, v);
+      }
+      console.log(`[bridge] Loaded ${contextTokens.size} context tokens from ${CONTEXT_TOKEN_PATH}`);
+    }
+  } catch (e) {
+    console.warn('[bridge] Failed to load context tokens:', e.message);
+  }
+}
+
+function saveContextTokens() {
+  try {
+    const obj = Object.fromEntries(contextTokens);
+    writeFileSync(CONTEXT_TOKEN_PATH, JSON.stringify(obj, null, 2));
+  } catch (e) {
+    console.warn('[bridge] Failed to save context tokens:', e.message);
+  }
+}
+
+// Load persisted tokens on startup
+loadContextTokens();
 
 // WeChat → TeamMCP: long-polling loop
 async function pollWeChat() {
@@ -86,6 +117,7 @@ async function pollWeChat() {
           if (fromUser && contextToken) {
             contextTokens.set(fromUser, contextToken);
             contextTokens.set('_last', contextToken);
+            saveContextTokens(); // Persist to disk
           }
 
           console.log(`[wechat→teammcp] ${fromUser}: ${text.slice(0, 50)}...`);
@@ -149,6 +181,26 @@ async function subscribeTeamMCP() {
           if (!line.startsWith('data: ')) continue;
           try {
             const event = JSON.parse(line.slice(6));
+
+            // ── Approval notifications → push to Chairman on WeChat ──
+            if (event.type === 'approval_requested') {
+              let toolName = '', description = '';
+              try {
+                const pv = JSON.parse(event.proposed_value || '{}');
+                toolName = pv.tool_name || '';
+                description = pv.description || '';
+              } catch {}
+              const content = `[审批请求] ${toolName || event.field || '未知操作'}\n${description}\n请求人：${event.proposed_by || 'unknown'}\n审批人：${event.approver || 'CEO'}`;
+              console.log(`[bridge] [Approval] Received: ${toolName || event.field} from ${event.proposed_by}`);
+              const contextToken = contextTokens.get('_last') || '';
+              if (contextToken) {
+                console.log(`[teammcp→wechat] [Approval] ${toolName || event.field}`);
+                await wechat.sendMessage('', content, contextToken);
+              } else {
+                console.warn('[bridge] No context_token for approval push');
+              }
+              continue;
+            }
 
             // Only forward: DMs to Chairman + @Chairman mentions
             if (event.type !== 'message') continue;
