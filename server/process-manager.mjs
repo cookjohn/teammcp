@@ -215,6 +215,23 @@ export async function startAgent(name) {
       }]
     }];
     settings.hooks.StopFailure = errorHook;
+
+    // SessionStart/SessionEnd hooks for precise session lifecycle tracking
+    const sessionStartHook = [{
+      hooks: [{
+        type: 'http',
+        url: `${serverUrl}/api/session-start?key=${agentKey}`
+      }]
+    }];
+    settings.hooks.SessionStart = sessionStartHook;
+
+    const sessionEndHook = [{
+      hooks: [{
+        type: 'http',
+        url: `${serverUrl}/api/session-end?key=${agentKey}`
+      }]
+    }];
+    settings.hooks.SessionEnd = sessionEndHook;
   }
   try { writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8'); } catch {}
 
@@ -241,6 +258,14 @@ export async function startAgent(name) {
       }]
     }];
     configSettings.hooks.StopFailure = errorHookConfig;
+
+    // SessionStart/SessionEnd hooks (config dir copy)
+    configSettings.hooks.SessionStart = [{
+      hooks: [{ type: 'http', url: `${serverUrl}/api/session-start?key=${agentKey}` }]
+    }];
+    configSettings.hooks.SessionEnd = [{
+      hooks: [{ type: 'http', url: `${serverUrl}/api/session-end?key=${agentKey}` }]
+    }];
     try { writeFileSync(configSettingsPath, JSON.stringify(configSettings, null, 2), 'utf-8'); } catch {}
   }
 

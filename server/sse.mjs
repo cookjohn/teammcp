@@ -54,6 +54,19 @@ export function getAgentErrorBuffer(agentName) {
   return agentErrorBuffers.get(agentName) || [];
 }
 
+export function pushSessionEvent(agentName, data) {
+  const payload = `data: ${JSON.stringify({
+    type: 'session-event',
+    agent: agentName,
+    ...data
+  })}\n\n`;
+  for (const [, set] of connections) {
+    for (const r of set) {
+      try { r.write(payload); } catch {}
+    }
+  }
+}
+
 // Crash detection: track pending restart timers to avoid duplicate restarts
 const crashTimers = new Map(); // agentName → timerId
 const CRASH_DETECT_DELAY_MS = 30_000; // 30 seconds before declaring crash

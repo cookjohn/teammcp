@@ -35,7 +35,8 @@ import {
   addConnection, pushToAgent, pushToAgents,
   broadcastStatus, sendMissedMessages, isOnline, getOnlineAgents,
   pushAgentOutput, getAgentOutputBuffer,
-  pushAgentError, getAgentErrorBuffer
+  pushAgentError, getAgentErrorBuffer,
+  pushSessionEvent
 } from './sse.mjs';
 import { startAgent, stopAgent, screenshotAgent, sendKeysToAgent, getAgentProcessStatus, checkProcessPermission } from './process-manager.mjs';
 import { publish } from './eventbus.mjs';
@@ -877,6 +878,57 @@ export async function handleRequest(req, res) {
         saveMessage('teammcp-dev', 'System', content, JSON.stringify([agentName]), null);
         const errorTargets = ['Chairman', 'CEO'].filter(n => n !== agentName);
         pushToAgents(errorTargets, { type: 'message', channel: 'teammcp-dev', from: 'System', content, mentions: [agentName], id: `sys_error_${agentName}_${Date.now()}`, timestamp: new Date().toISOString() });
+      }
+
+      return json(res, { ok: true });
+    }
+
+    // ── POST /api/session-start ──────────────────────
+    // Receives SessionStart hook from Claude Code — agent session began
+    if (method === 'POST' && path === '/api/session-start') {
+      const body = await readBody(req);
+      const agentName = req.agent.name;
+      const sessionId = body.session_id || null;
+      const model = body.model?.id || body.model || null;
+
+      setAgentStatus(agentName, 'online');
+      pushSessionEvent(agentName, {
+        event: 'session_start',
+        session_id: sessionId,
+        model,
+        timestamp: new Date().toISOString()
+      });
+
+      log(`[session] ${agentName} started (session: ${sessionId}, model: ${model})`);
+      return json(res, { ok: true });
+    }
+
+    // ── POST /api/session-end ────────────────────────
+    // Receives SessionEnd hook from Claude Code — agent session ended
+    if (method === 'POST' && path === '/api/session-end') {
+      const body = await readBody(req);
+      const agentName = req.agent.name;
+      const sessionId = body.session_id || null;
+      const reason = body.stop_reason || body.reason || 'normal';
+      const duration = body.duration_ms || null;
+      const tokensUsed = body.total_tokens_used || null;
+
+      // Don't immediately set offline — agent may be restarting (--continue fallback)
+      // Let crash detection handle the actual offline transition
+      pushSessionEvent(agentName, {
+        event: 'session_end',
+        session_id: sessionId,
+        reason,
+        duration_ms: duration,
+        tokens_used: tokensUsed,
+        timestamp: new Date().toISOString()
+      });
+
+      log(`[session] ${agentName} ended (reason: ${reason}, duration: ${duration}ms)`);
+
+      // If reason indicates non-recoverable exit, set offline immediately
+      if (reason === 'user_exit' || reason === 'error') {
+        setAgentStatus(agentName, 'offline');
       }
 
       return json(res, { ok: true });
