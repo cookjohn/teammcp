@@ -230,11 +230,18 @@ function switchToAgents() {
   document.getElementById('pinned-panel').classList.remove('active');
   document.getElementById('tasks-container').classList.remove('active');
   document.getElementById('state-container').classList.remove('active');
+  document.getElementById('credentials-container').classList.remove('active');
+  document.getElementById('monitor-container').classList.remove('active');
+  if (typeof stopMonitorRefresh === 'function') stopMonitorRefresh();
   closeAllOverlays();
   // Show agents view
   document.getElementById('agents-container').classList.add('active');
   // Update sidebar highlights
   document.querySelectorAll('.channel-item').forEach(el => el.classList.remove('active'));
+  document.getElementById('tasks-nav').classList.remove('active');
+  document.getElementById('state-nav').classList.remove('active');
+  document.getElementById('credentials-nav').classList.remove('active');
+  document.getElementById('monitor-nav').classList.remove('active');
   document.getElementById('agents-nav').classList.add('active');
   // Load agent management
   loadAgentManagement();

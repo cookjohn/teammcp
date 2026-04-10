@@ -1248,6 +1248,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
     }
   } catch (err) {
+    const toolName = name || 'unknown';
+    sendNotification(
+      `[系统] 工具调用失败: ${toolName} — ${err.message}`,
+      "system",
+      "",
+      { isToolError: true, tool: toolName }
+    );
     return { content: [{ type: "text", text: `Error: ${err.message}` }], isError: true };
   }
 });

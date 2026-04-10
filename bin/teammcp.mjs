@@ -61,6 +61,14 @@ async function cmdInit() {
 // ── Start server ────────────────────────────────────────────
 
 function cmdStart() {
+  if (!process.env.TEAMMCP_HOME) {
+    console.error('ERROR: TEAMMCP_HOME is required.\nSet it to the desired data directory (e.g. set TEAMMCP_HOME=%USERPROFILE%\\teammcp).');
+    process.exit(1);
+  }
+  if (!process.env.AGENTS_BASE_DIR) {
+    console.error('ERROR: AGENTS_BASE_DIR is required.\nSet it to the agents workspace directory (e.g. set AGENTS_BASE_DIR=%USERPROFILE%\\Desktop\\agents).');
+    process.exit(1);
+  }
   const serverPath = join(ROOT_DIR, 'server', 'index.mjs');
   const child = spawn(process.execPath, [serverPath], {
     stdio: 'inherit',
@@ -102,9 +110,9 @@ Commands:
   teammcp help     Show this help
 
 Environment variables:
-  TEAMMCP_HOME     TeamMCP data directory (default: ~/.teammcp/)
+  TEAMMCP_HOME     TeamMCP data directory (REQUIRED)
+  AGENTS_BASE_DIR  Agents workspace directory (REQUIRED)
   TEAMMCP_PORT     Server port (default: 3100)
-  AGENTS_BASE_DIR  Agents workspace directory
 `);
     break;
 }

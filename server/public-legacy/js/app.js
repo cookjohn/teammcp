@@ -11,7 +11,10 @@ let eventSource = null;
 let sseAbortController = null;
 let agentName = '';
 let currentView = 'messages'; // 'messages', 'tasks', 'state', or 'files'
-let fileEvents = [];
+let channelFiles = [];
+var currentFolderId = null;       // null = root
+var currentFolderPath = [];       // [{id, name}, ...] for breadcrumb
+var channelFolders = [];          // current folder's sub-folders
 let currentProjectId = 'agent-os-mvp';
 let stateFields = [];
 let stateApprovals = [];
@@ -447,20 +450,19 @@ function handleSSEEvent(data) {
 
     case 'file_changed':
       if (document.getElementById('channel-files-panel').classList.contains('active')) {
-        const evt = {
-          id: data.id,
-          file_path: data.file_path,
-          event_type: data.event_type,
-          agent_name: data.agent,
-          created_at: data.timestamp
-        };
-        fileEvents.unshift(evt);
-        renderChannelFiles();
+        loadChannelFiles();
+      }
+      break;
+
+    case 'folder_changed':
+      if (document.getElementById('channel-files-panel').classList.contains('active')) {
+        loadChannelFiles();
       }
       break;
 
     case 'agent-output':
       handleAgentOutput(data);
+      if (typeof handleMonitorSSE === 'function') handleMonitorSSE(data);
       break;
 
     case 'display_only':

@@ -54,6 +54,8 @@
     "@anthropic-ai/claude-agent-sdk": "^0.2.92",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "better-sqlite3": "^12.8.0",
-    "qrcode": "^1.5.4"
+    "node-pty": "^1.1.0",
+    "qrcode": "^1.5.4",
+    "ws": "^8.20.0"
   }
 }

@@ -4,12 +4,21 @@
  */
 
 import { exec, execSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, copyFileSync, readdirSync, statSync, lstatSync, cpSync, symlinkSync, linkSync, watch, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, copyFileSync, readdirSync, statSync, lstatSync, cpSync, symlinkSync, linkSync, watch, rmSync, renameSync } from 'node:fs';
+
+// Doc-A v1.6 §11 dedupe (§6 #13): Path A constants moved to path-a-constants.mjs.
+// Do NOT inline new Path A magic numbers here — extend path-a-constants.mjs instead.
+import {
+  PATH_A_SCOPES,
+  PATH_A_SUB_TYPE,
+  PATH_A_RATE_LIMIT_TIER,
+} from './path-a-constants.mjs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir, homedir } from 'node:os';
-import { getUseResume, getAgentByName, getAgentsNeedingRouter } from './db.mjs';
+import { getUseResume, getAgentByName, getAgentsNeedingRouter, setState as dbSetState, saveMessage } from './db.mjs';
 import { AGENTS_DIR, SCREENSHOTS_DIR, ensureDirectories } from './lib/paths.mjs';
+import { startAuthMonitor, stopAuthMonitor, clearAgent as clearAuthMonitorAgent } from './auth-monitor.mjs';
 
 // agentName → { pid, startedAt }
 const processes = new Map();
@@ -36,8 +45,47 @@ if (!AGENTS_BASE_DIR) {
 // Ensure directories exist
 ensureDirectories();
 
+// Doc-C Layer 3 v0: start passive auth monitor (CTO spec, A 实施 2026-04-09)
+// Injects db setState + saveMessage as deps. Fires-and-forgets: any failure inside
+// the monitor is logged but never affects process management.
+if (AGENTS_BASE_DIR) {
+  try {
+    startAuthMonitor(processes, AGENTS_BASE_DIR, {
+      setState: (key, value) => {
+        // key format: 'auth/<agent>/last_failure' → projectId='auth', field='<agent>/last_failure'
+        try {
+          const firstSlash = key.indexOf('/');
+          const projectId = firstSlash > 0 ? key.slice(0, firstSlash) : 'auth';
+          const field = firstSlash > 0 ? key.slice(firstSlash + 1) : key;
+          dbSetState(projectId, field, value, 'system:auth-monitor', 'Doc-C Layer 3 v0 passive auth-failure detection', { isHumanOverride: true });
+        } catch (e) { console.error('[auth-monitor] setState failed:', e.message); }
+      },
+      sendMessage: (channel, content) => {
+        try {
+          // Pre-fix #3: force real channel id 'general' (caller may pass '#general' placeholder)
+          // saveMessage(channelId, fromAgent, content, mentions, replyTo, metadata)
+          saveMessage('general', 'System', content, null, null, JSON.stringify({ source: 'auth-monitor' }));
+        } catch (e) { console.error('[auth-monitor] sendMessage failed:', e.message); }
+      },
+      logger: console,
+    });
+  } catch (e) {
+    console.error('[process-manager] startAuthMonitor failed:', e.message);
+  }
+}
+
 // Only allow safe agent names (letters, digits, hyphen, underscore)
-const SAFE_NAME_RE = /^[A-Za-z0-9_.\-]+$/;
+export const SAFE_NAME_RE = /^[A-Za-z0-9_.\-]+$/;
+
+// SecTest fix (PS injection defense-in-depth):
+// PowerShell single-quoted literals do NOT interpolate $vars / $(expr) / `escapes`,
+// so wrap untrusted strings in single quotes and escape internal single quotes by
+// doubling. Stops a hostile DB value (api_auth_token, agent name, etc.) from
+// breaking out of the string and executing arbitrary PowerShell.
+function psSingleQuote(value) {
+  const s = (value == null) ? '' : String(value);
+  return "'" + s.replace(/'/g, "''") + "'";
+}
 
 function execPS(command) {
   return new Promise((resolve, reject) => {
@@ -147,11 +195,7 @@ export async function startAgent(name) {
         const independentDirs = new Set(['sessions', 'plans', 'tasks', 'todos', 'shell-snapshots', 'teams', 'projects', 'file-history', 'skills']);
         const sharedDirs = new Set(['plugins', 'cache', 'statsig', 'telemetry', 'debug', 'backups', 'ide', 'paste-cache']);
         try {
-          if (entry === '.credentials.json') {
-            // Credentials: hardlink so all agents share the same token
-            try { if (existsSync(dst)) rmSync(dst, { recursive: true, force: true }); } catch {}
-            try { linkSync(src, dst); } catch { copyFileSync(src, dst); }
-          } else if (independentDirs.has(entry)) {
+          if (independentDirs.has(entry)) {
             // Per-agent independent directories — create empty dir
             if (!existsSync(dst)) mkdirSync(dst, { recursive: true });
           } else if (['history.jsonl', 'settings.json'].includes(entry)) {
@@ -181,6 +225,7 @@ export async function startAgent(name) {
       const cj = JSON.parse(readFileSync(agentClaudeJson, 'utf-8'));
       if (!cj.cachedGrowthBookFeatures) cj.cachedGrowthBookFeatures = {};
       cj.cachedGrowthBookFeatures.tengu_harbor = true;
+      cj.cachedGrowthBookFeatures.tengu_harbor_permissions = true;
       if (!cj.projects) cj.projects = {};
       const projKey = agentDir.replace(/\\/g, '/');
       if (!cj.projects[projKey]) cj.projects[projKey] = {};
@@ -344,15 +389,8 @@ export async function startAgent(name) {
     }
   }
 
-  // Get agent info from DB (used for credentials handling and auth config)
+  // Get agent info from DB (used for auth config)
   const agentInfo = getAgentByName(name);
-
-  // API key agents — clear OAuth credentials to avoid interference
-  if (agentInfo && agentInfo.auth_mode === 'api_key') {
-    const credFile = join(configDir, '.credentials.json');
-    try { unlinkSync(credFile); } catch {}
-    writeFileSync(credFile, '{}', 'utf-8');
-  }
 
   // fakechat plugin installation check — auto-install if not present
   const pluginsDir = join(configDir, 'plugins');
@@ -452,19 +490,100 @@ export async function startAgent(name) {
     `$env:CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1"`,
   ];
   if (agentKey) {
-    ps1Lines.push(`$env:TEAMMCP_KEY = "${agentKey}"`);
-    ps1Lines.push(`$env:AGENT_NAME = "${name}"`);
+    ps1Lines.push(`$env:TEAMMCP_KEY = ${psSingleQuote(agentKey)}`);
+    ps1Lines.push(`$env:AGENT_NAME = ${psSingleQuote(name)}`);
   }
-  ps1Lines.push(`$env:TEAMMCP_URL = "${serverUrl}"`);
+  ps1Lines.push(`$env:TEAMMCP_URL = ${psSingleQuote(serverUrl)}`);
   if (effectiveAgentInfo && effectiveAgentInfo.auth_mode === 'api_key') {
-    ps1Lines.push(`$env:ANTHROPIC_API_KEY = ""`);
-    ps1Lines.push(`$env:CLAUDE_CODE_OAUTH_TOKEN = "channel-gate-bypass"`);
-    if (effectiveAgentInfo.api_base_url) ps1Lines.push(`$env:ANTHROPIC_BASE_URL = "${effectiveAgentInfo.api_base_url}"`);
-    if (effectiveAgentInfo.api_auth_token) ps1Lines.push(`$env:ANTHROPIC_AUTH_TOKEN = "${effectiveAgentInfo.api_auth_token}"`);
-    if (effectiveAgentInfo.api_model) ps1Lines.push(`$env:ANTHROPIC_MODEL = "${effectiveAgentInfo.api_model}"`);
+    ps1Lines.push(`$env:ANTHROPIC_API_KEY = ''`);
+    ps1Lines.push(`$env:CLAUDE_CODE_OAUTH_TOKEN = 'channel-gate-bypass'`);
+    if (effectiveAgentInfo.api_base_url) ps1Lines.push(`$env:ANTHROPIC_BASE_URL = ${psSingleQuote(effectiveAgentInfo.api_base_url)}`);
+    if (effectiveAgentInfo.api_auth_token) ps1Lines.push(`$env:ANTHROPIC_AUTH_TOKEN = ${psSingleQuote(effectiveAgentInfo.api_auth_token)}`);
+    if (effectiveAgentInfo.api_model) ps1Lines.push(`$env:ANTHROPIC_MODEL = ${psSingleQuote(effectiveAgentInfo.api_model)}`);
   }
   const channelFlag = '--channels plugin:fakechat@claude-plugins-official';
-  ps1Lines.push(`claude ${continueFlag}--dangerously-skip-permissions --permission-mode bypassPermissions ${channelFlag}`);
+  // Doc-C Layer 3 v0.2: stdout NOT piped — TTY preserved, CC session jsonl used by watcher
+  // Permission mode: TestDev uses 'default' for channel permission testing; all others bypass
+  const permFlags = (name === 'TestDev') ? '--permission-mode default' : '--dangerously-skip-permissions --permission-mode bypassPermissions';
+  ps1Lines.push(`claude ${continueFlag}${permFlags} ${channelFlag}`);
+
+  // Path A: inject refreshToken-null credentials for path_a agents
+  {
+    const agentInfo = (typeof getAgentByName === 'function') ? getAgentByName(name) : null;
+    if (agentInfo?.auth_strategy === 'path_a' && agentInfo?.auth_mode !== 'api_key') {
+      const credPath = join(configDir, '.credentials.json');
+      // Doc-A v1.6 §11.10 (M1) — TOCTOU between lstatSync and writeFileSync.
+      // Acquire an exclusive lock file BEFORE the lstat→write window, hold it
+      // across stat + unlink + atomic-rename, release in finally. The lock is
+      // created with O_EXCL ('wx'), so two concurrent injectors can never both
+      // pass the symlink/hardlink guard.
+      const lockPath = credPath + '.lock';
+      let lockHeld = false;
+      try {
+        // Try to grab the lock. One short retry covers a stale lock from a
+        // crashed sibling; a second EEXIST throws loudly so we don't race.
+        for (let attempt = 0; attempt < 2; attempt++) {
+          try {
+            writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
+            lockHeld = true;
+            break;
+          } catch (e) {
+            if (e.code !== 'EEXIST') throw e;
+            if (attempt === 0) {
+              // Stale-lock recovery: if lock is older than 30s, blow it away.
+              try {
+                const lst = lstatSync(lockPath);
+                if (Date.now() - lst.mtimeMs > 30_000) unlinkSync(lockPath);
+              } catch {}
+              continue;
+            }
+            throw Object.assign(
+              new Error(`Path A inject: lock contention at ${lockPath}`),
+              { code: 'PATH_A_LOCK_BUSY' }
+            );
+          }
+        }
+
+        // §4.3 hardlink/symlink guard — now safe under the lock.
+        try {
+          const st = lstatSync(credPath);
+          if (st.nlink > 1 || st.isSymbolicLink()) unlinkSync(credPath);
+        } catch (e) { if (e.code !== 'ENOENT') throw e; }
+
+        // Lease a fresh token from in-process credential-manager
+        const { leaseTokenForAgent } = await import('./credential-lease.mjs');
+        const lease = await leaseTokenForAgent(name, 'start');
+
+        const doc = {
+          claudeAiOauth: {
+            accessToken: lease.accessToken,
+            refreshToken: null,
+            expiresAt: lease.expiresAt,
+            scopes: PATH_A_SCOPES,
+            subscriptionType: PATH_A_SUB_TYPE,
+            rateLimitTier: PATH_A_RATE_LIMIT_TIER,
+          },
+        };
+
+        // §4.4 atomic write — still under the lock, so the rename target
+        // cannot have been swapped to a symlink between guard and write.
+        const tmp = credPath + '.tmp.' + process.pid;
+        writeFileSync(tmp, JSON.stringify(doc, null, 2), 'utf-8');
+        renameSync(tmp, credPath);
+        console.log(`[start-agent] Path A injection ok for ${name}, leaseId=${lease.leaseId}`);
+      } catch (err) {
+        throw Object.assign(
+          new Error(`Path A: cannot start ${name}, lease failed: ${err.message}`),
+          { statusCode: 503, cause: err }
+        );
+      } finally {
+        if (lockHeld) {
+          try { unlinkSync(lockPath); } catch {}
+        }
+      }
+    }
+  }
+
   writeFileSync(startScript, ps1Lines.join('\r\n') + '\r\n', 'utf-8');
 
   const psCmd = `$p = Start-Process -FilePath 'wt.exe' -ArgumentList '--window new --title ${windowTitle} powershell -ExecutionPolicy Bypass -File ""${startScript}""' -PassThru; Write-Output $p.Id`;
@@ -538,12 +657,13 @@ export async function stopAgent(name) {
     killed = true;
   }
   processes.delete(name);
+  try { clearAuthMonitorAgent(name); } catch {}
 
   // Note: Don't kill WindowsTerminal.exe — multiple agents may share the same WT process.
   // WT windows auto-close via closeOnExit:always when the agent process ends.
 
   if (!killed) {
-    throw Object.assign(new Error(`No process found for agent "${name}"`), { statusCode: 400 });
+    console.warn(`[stopAgent] No running process found for "${name}", marking as stopped`);
   }
 
   markStopped(name); // Suppress crash detection for intentional stops
@@ -747,6 +867,7 @@ export function cleanupStaleProcEntry(name) {
   if (processes.has(name)) {
     processes.delete(name);
   }
+  try { clearAuthMonitorAgent(name); } catch {}
 }
 
 /**
@@ -902,185 +1023,6 @@ async function stopCCRouter() {
 // Export for router.mjs if needed
 export { ensureCCRouter, stopCCRouter, generateCCRouterConfig };
 
-// P1: Credential sync — file watcher + periodic fallback (5 min)
-const CREDENTIAL_SYNC_INTERVAL_MS = 5 * 60_000;
-
-function syncCredentials() {
-  if (!AGENTS_BASE_DIR) return;
-  const mainCreds = join(homedir(), '.claude', '.credentials.json');
-  if (!existsSync(mainCreds)) return;
-
-  let mainTime;
-  try { mainTime = statSync(mainCreds).mtimeMs; } catch { return; }
-
-  let fwdSync = 0, revSync = 0;
-  // Iterate ALL agent directories with .claude-config, not just tracked processes
-  const agentDirs = readdirSync(AGENTS_BASE_DIR).filter(name => {
-    try { return statSync(join(AGENTS_BASE_DIR, name)).isDirectory() && existsSync(join(AGENTS_BASE_DIR, name, '.claude-config')); } catch { return false; }
-  });
-  for (const name of agentDirs) {
-    // Skip agents that use API key auth (not OAuth) — and protect their empty credentials
-    try {
-      const a = getAgentByName(name);
-      if (a?.auth_mode === 'api_key') {
-        const agentCreds = join(AGENTS_BASE_DIR, name, '.claude-config', '.credentials.json');
-        if (existsSync(agentCreds)) {
-          // If agent cred is a hardlink to main, break the link first — otherwise clearing it would clear main too
-          try {
-            const mainInode = statSync(mainCreds).ino;
-            if (statSync(agentCreds).ino === mainInode) {
-              unlinkSync(agentCreds);
-              writeFileSync(agentCreds, '{}', 'utf-8');
-              console.log(`[credential-sync] broke hardlink for api_key agent ${name}`);
-              continue;
-            }
-          } catch {}
-          const content = readFileSync(agentCreds, 'utf-8');
-          if (content !== '{}' && content.length > 10) {
-            writeFileSync(agentCreds, '{}', 'utf-8');
-          }
-        }
-        continue;
-      }
-    } catch {}
-    const configDir = join(AGENTS_BASE_DIR, name, '.claude-config');
-    const agentCreds = join(configDir, '.credentials.json');
-    // Skip if credentials is a hardlink (same inode as main) — no sync needed
-    try {
-      const mainInode = statSync(mainCreds).ino;
-      if (statSync(agentCreds).ino === mainInode) continue;
-    } catch {}
-    try {
-      if (!existsSync(agentCreds)) {
-        // Agent has no credentials yet — forward sync
-        copyFileSync(mainCreds, agentCreds);
-        fwdSync++;
-      } else {
-        const agentTime = statSync(agentCreds).mtimeMs;
-        if (agentTime > mainTime) {
-          // Agent token is newer — reverse sync to main (with content validation)
-          const agentContent = readFileSync(agentCreds, 'utf-8');
-          if (agentContent.length > 50 && agentContent.includes('"accessToken"')) {
-            copyFileSync(agentCreds, mainCreds);
-            mainTime = agentTime; // Update for subsequent comparisons
-            revSync++;
-          } else {
-            console.warn(`[credential-sync] skip reverse sync for ${name}: invalid credentials (${agentContent.length} bytes)`);
-            // Forward sync instead — fix the corrupted agent credentials
-            copyFileSync(mainCreds, agentCreds);
-            fwdSync++;
-          }
-        } else if (mainTime > agentTime) {
-          // Main token is newer — forward sync to agent (with content validation)
-          const mainContent = readFileSync(mainCreds, 'utf-8');
-          if (mainContent.length > 50 && mainContent.includes('"accessToken"')) {
-            copyFileSync(mainCreds, agentCreds);
-            fwdSync++;
-          } else {
-            console.warn(`[credential-sync] skip forward sync for ${name}: main credentials invalid (${mainContent.length} bytes)`);
-          }
-        }
-      }
-    } catch {}
-  }
-  if (fwdSync > 0 || revSync > 0) {
-    console.log(`[credential-sync] fwd:${fwdSync} rev:${revSync}`);
-  }
-}
-
-setInterval(syncCredentials, CREDENTIAL_SYNC_INTERVAL_MS);
-
-// Watch main credentials file for immediate sync on change
-try {
-  const mainCreds = join(homedir(), '.claude', '.credentials.json');
-  if (existsSync(mainCreds)) {
-    let debounce = null;
-    watch(mainCreds, () => {
-      if (debounce) clearTimeout(debounce);
-      debounce = setTimeout(() => {
-        console.log('[credential-sync] main credentials changed, syncing...');
-        syncCredentials();
-      }, 2000); // 2s debounce to avoid rapid fire
-    });
-    console.log('[credential-sync] watching main credentials for changes');
-  }
-} catch (e) { console.warn('[credential-sync] watch failed:', e.message); }
-
-// Also watch agent credential dirs for reverse sync
-try {
-  if (AGENTS_BASE_DIR) {
-    const agentDirs = readdirSync(AGENTS_BASE_DIR).filter(name => {
-      try { return statSync(join(AGENTS_BASE_DIR, name)).isDirectory() && existsSync(join(AGENTS_BASE_DIR, name, '.claude-config')); } catch { return false; }
-    });
-    for (const name of agentDirs) {
-      try { const a = getAgentByName(name); if (a?.auth_mode === 'api_key') continue; } catch {}
-      const agentCreds = join(AGENTS_BASE_DIR, name, '.claude-config', '.credentials.json');
-      if (existsSync(agentCreds)) {
-        let debounce = null;
-        watch(agentCreds, () => {
-          if (debounce) clearTimeout(debounce);
-          debounce = setTimeout(() => {
-            console.log(`[credential-sync] ${name} credentials changed, syncing...`);
-            syncCredentials();
-          }, 2000);
-        });
-      }
-    }
-  }
-} catch (e) { console.warn('[credential-sync] agent watch failed:', e.message); }
-
-// P2: Proactive OAuth token refresh — refresh accessToken before it expires
-const OAUTH_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
-const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
-const OAUTH_SCOPES = 'user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload';
-const TOKEN_REFRESH_CHECK_MS = 5 * 60_000; // Check every 5 min
-const TOKEN_REFRESH_BUFFER_MS = 15 * 60_000; // Refresh 15 min before expiry
-
-async function refreshOAuthToken() {
-  const mainCreds = join(homedir(), '.claude', '.credentials.json');
-  if (!existsSync(mainCreds)) return;
-
-  let data;
-  try { data = JSON.parse(readFileSync(mainCreds, 'utf-8')); } catch { return; }
-  const oauth = data?.claudeAiOauth;
-  if (!oauth?.refreshToken || !oauth?.expiresAt) return;
-
-  const timeLeft = oauth.expiresAt - Date.now();
-  if (timeLeft > TOKEN_REFRESH_BUFFER_MS) return; // Still valid, no need to refresh
-
-  console.log(`[oauth-refresh] Token expires in ${Math.round(timeLeft / 60000)}min, refreshing...`);
-  try {
-    const res = await fetch(OAUTH_TOKEN_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        grant_type: 'refresh_token',
-        refresh_token: oauth.refreshToken,
-        client_id: OAUTH_CLIENT_ID,
-        scope: OAUTH_SCOPES,
-      }),
-      signal: AbortSignal.timeout(15000),
-    });
-    if (res.status !== 200) {
-      console.error(`[oauth-refresh] Failed: HTTP ${res.status}`);
-      return;
-    }
-    const resp = await res.json();
-    const newData = {
-      claudeAiOauth: {
-        ...oauth,
-        accessToken: resp.access_token,
-        refreshToken: resp.refresh_token || oauth.refreshToken,
-        expiresAt: Date.now() + (resp.expires_in * 1000),
-      },
-    };
-    writeFileSync(mainCreds, JSON.stringify(newData), 'utf-8');
-    console.log(`[oauth-refresh] Token refreshed, expires in ${resp.expires_in}s`);
-    // Sync will be triggered by file watcher
-  } catch (e) {
-    console.error(`[oauth-refresh] Error: ${e.message}`);
-  }
-}
-
-setInterval(refreshOAuthToken, TOKEN_REFRESH_CHECK_MS);
-refreshOAuthToken(); // Check immediately on startup
+// TODO: Credential management moved to credential-manager.mjs
+// Old syncCredentials + file watchers + refreshOAuthToken code removed.
+// New credential-manager.mjs will handle: login, refresh, distribute.

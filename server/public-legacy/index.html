@@ -1,0 +1,402 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="css/dashboard.css">
+</head>
+<body>
+
+<!-- Auth Overlay -->
+<div id="auth-overlay">
+  <div class="auth-card">
+    <h1>TeamMCP</h1>
+    <p>Enter your API key to access the dashboard</p>
+    <input type="password" id="api-key-input" placeholder="tmcp_..." autocomplete="off" spellcheck="false">
+    <button id="auth-btn" onclick="authenticate()">Connect</button>
+    <div class="auth-error" id="auth-error"></div>
+  </div>
+</div>
+
+<!-- App -->
+<div id="app">
+  <header id="header">
+    <h1>
+      <span class="logo">T</span>
+      TeamMCP Dashboard
+    </h1>
+    <div class="header-right">
+      <button class="header-toggle-btn" id="lang-toggle" onclick="toggleLang()" title="中文/EN">EN</button>
+      <button class="header-toggle-btn" id="theme-toggle" onclick="toggleTheme()" title="Light/Dark">🌙</button>
+      <div class="connection-status">
+        <span class="connection-dot" id="sse-dot"></span>
+        <span id="sse-label">Disconnected</span>
+      </div>
+      <span class="agent-badge" id="agent-badge"></span>
+    </div>
+  </header>
+
+  <div id="sidebar">
+    <!-- Channels -->
+    <div class="sidebar-section">
+      <div class="sidebar-section-title">Channels</div>
+      <ul class="channel-list" id="channel-list"></ul>
+    </div>
+    <!-- Tasks -->
+    <div class="sidebar-section">
+      <div class="sidebar-section-title">Tasks</div>
+      <ul class="channel-list">
+        <li class="channel-item" id="tasks-nav" onclick="switchToTasks()">
+          <span class="channel-icon">&#128203;</span>
+          <span class="channel-name">All Tasks</span>
+          <span class="unread-badge" id="tasks-count-badge" style="display:none"></span>
+        </li>
+      </ul>
+    </div>
+    <!-- State -->
+    <div class="sidebar-section">
+      <div class="sidebar-section-title">State</div>
+      <ul class="channel-list">
+        <li class="channel-item" id="state-nav" onclick="switchToState()">
+          <span class="channel-icon">&#128202;</span>
+          <span class="channel-name">Project State</span>
+        </li>
+        <li class="channel-item" id="credentials-nav" onclick="switchToCredentials()">
+          <span class="channel-icon">&#128272;</span>
+          <span class="channel-name">Credentials</span>
+        </li>
+        <li class="channel-item" id="monitor-nav" onclick="switchToMonitor()">
+          <span class="channel-icon">&#128200;</span>
+          <span class="channel-name">Runtime Monitor</span>
+        </li>
+      </ul>
+    </div>
+    <!-- Agents -->
+    <div class="sidebar-section" style="border-top: 1px solid var(--border); margin-top: 4px; padding-top: 12px;">
+      <div class="sidebar-section-title" id="agents-title">Agents</div>
+      <ul class="channel-list">
+        <li class="channel-item" id="agents-nav" onclick="switchToAgents()">
+          <span class="channel-icon">&#9881;</span>
+          <span class="channel-name">Agent Management</span>
+        </li>
+      </ul>
+      <div id="agent-list"></div>
+    </div>
+    <!-- WeChat Bridge -->
+    <div class="sidebar-section wechat-section">
+      <div class="sidebar-section-title">WeChat Bridge</div>
+      <div id="wechat-panel" class="wechat-panel"></div>
+    </div>
+  </div>
+
+  <div id="main">
+    <div id="channel-header">
+      <span class="ch-icon" id="ch-icon">#</span>
+      <div class="ch-info">
+        <h2 id="ch-name">Select a channel</h2>
+        <p id="ch-desc"></p>
+      </div>
+      <button id="files-btn" onclick="toggleChannelFiles()" style="margin-left:auto; background:none; border:1px solid var(--border); border-radius:4px; padding:4px 10px; color:var(--text-dim); cursor:pointer; font-size:13px; display:none;">&#128193; Files</button>
+      <button id="members-btn" onclick="openMembersPanel()" style="background:none; border:1px solid var(--border); border-radius:4px; padding:4px 10px; color:var(--text-dim); cursor:pointer; font-size:13px; display:none;">&#128101; Members</button>
+    </div>
+    <div class="pin-bar" id="pin-bar" onclick="togglePinnedPanel()">
+      <span class="pin-icon">&#128204;</span>
+      <span><span class="pin-count" id="pin-count">0</span> pinned messages</span>
+    </div>
+    <div class="pinned-panel" id="pinned-panel"></div>
+    <div class="channel-files-panel" id="channel-files-panel"></div>
+    <div id="messages-container">
+      <div class="empty-state">
+        <div class="icon">&#128172;</div>
+        <div>Select a channel to view messages</div>
+      </div>
+    </div>
+    <!-- Tasks View -->
+    <div id="tasks-container">
+      <div id="tasks-header">
+        <h2>&#128203; Tasks</h2>
+        <select class="task-filter" id="filter-status" onchange="applyTaskFilters()">
+          <option value="">All Status</option>
+          <option value="todo">Todo</option>
+          <option value="doing">Doing</option>
+          <option value="done">Done</option>
+        </select>
+        <select class="task-filter" id="filter-assignee" onchange="applyTaskFilters()">
+          <option value="">All Assignees</option>
+        </select>
+        <button id="new-task-btn" onclick="showCreateTaskForm()">+ New Task</button>
+      </div>
+      <div id="tasks-list">
+        <div class="tasks-empty">
+          <div class="icon">&#128203;</div>
+          <div>Loading tasks...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- State / Observability View -->
+    <div id="state-container">
+      <div id="state-header">
+        <h2>&#128202; Project State</h2>
+        <span class="state-last-updated" id="state-last-updated"></span>
+        <input type="text" class="state-project-input" id="state-project-input" placeholder="agent-os-mvp" value="agent-os-mvp" onkeydown="if(event.key==='Enter')refreshState()">
+        <button class="state-auto-refresh-btn" id="state-auto-refresh-btn" onclick="toggleStateAutoRefresh()" title="Auto-refresh every 15s">&#9202; Auto</button>
+        <button class="state-refresh-btn" onclick="refreshState()" title="Refresh">&#128260;</button>
+      </div>
+      <div id="state-body">
+        <div class="state-empty">
+          <div class="icon">&#128202;</div>
+          <div>Enter a project ID and click refresh to load state</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Credentials View -->
+    <div id="credentials-container">
+      <div id="credentials-header">
+        <h2>&#128272; Credentials</h2>
+        <div id="credentials-stats"></div>
+      </div>
+      <div id="credentials-body">
+        <div class="credentials-empty">
+          <div class="icon">&#128272;</div>
+          <div>Loading credentials...</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Runtime Monitor View -->
+    <div id="monitor-container">
+      <div id="monitor-header">
+        <h2>&#128200; Runtime Monitor</h2>
+        <select id="monitor-window-select" onchange="loadMonitorData()">
+          <option value="1h">1 Hour</option>
+          <option value="6h">6 Hours</option>
+          <option value="24h">24 Hours</option>
+        </select>
+      </div>
+      <div id="monitor-body">
+        <div class="monitor-empty">Loading monitor data...</div>
+      </div>
+    </div>
+
+    <!-- State Field Detail Panel -->
+    <div id="state-field-detail">
+      <div class="state-detail-header">
+        <h3>Field Detail</h3>
+        <button class="state-detail-close" onclick="closeFieldDetail()">&times;</button>
+      </div>
+      <div class="state-detail-body" id="state-detail-body"></div>
+    </div>
+
+    <!-- Agent Management View -->
+    <div id="agents-container">
+      <div id="agents-header">
+        <h2>&#9881; Agent Management</h2>
+        <div id="agents-stats"></div>
+        <button id="new-agent-btn" onclick="showCreateAgentForm()">+ New Agent</button>
+        <button class="agents-refresh-btn" onclick="loadAgentManagement()">&#128260;</button>
+      </div>
+      <div id="agents-body">
+        <div id="agents-overview"></div>
+        <div id="agents-org-tree"></div>
+        <div id="agents-grid"></div>
+      </div>
+    </div>
+
+    <!-- Agent Detail Panel -->
+    <div id="agent-detail">
+      <div class="detail-header">
+        <h3>Agent Detail</h3>
+        <button class="detail-close" onclick="closeAgentDetail()">&times;</button>
+      </div>
+      <div class="detail-body" id="agent-detail-body"></div>
+    </div>
+
+    <!-- Create Agent Overlay -->
+    <div id="create-agent-overlay">
+      <div class="create-agent-card">
+        <h3>Register New Agent</h3>
+        <div class="form-group">
+          <label>Agent Name *</label>
+          <input type="text" id="ca-name" placeholder="e.g. DevOps">
+        </div>
+        <div class="form-group">
+          <label>Role</label>
+          <input type="text" id="ca-role" placeholder="e.g. DevOps Engineer">
+        </div>
+        <div class="form-group">
+          <label>Reports To</label>
+          <select id="ca-reports-to">
+            <option value="">None (Root)</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Registration Secret</label>
+          <input type="password" id="ca-secret" placeholder="Leave empty if not required">
+        </div>
+        <div class="form-group" style="border-top:1px solid var(--border); padding-top:12px; margin-top:8px;">
+          <label style="font-weight:600;">Authentication Config</label>
+        </div>
+        <div class="form-group">
+          <label>Auth Mode</label>
+          <select id="ca-auth-mode" onchange="toggleAuthFields('ca')">
+            <option value="oauth">OAuth (Default)</option>
+            <option value="api_key">API Key</option>
+          </select>
+        </div>
+        <div id="ca-apikey-fields" style="display:none;">
+          <div class="form-group">
+            <label>API Provider</label>
+            <select id="ca-api-provider">
+              <option value="">Select...</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="openai">OpenAI</option>
+              <option value="openrouter">OpenRouter</option>
+              <option value="custom">Custom</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>API Base URL</label>
+            <input type="text" id="ca-api-base-url" placeholder="https://api.anthropic.com">
+          </div>
+          <div class="form-group">
+            <label>API Auth Token</label>
+            <input type="password" id="ca-api-token" placeholder="sk-...">
+          </div>
+          <div class="form-group">
+            <label>Model</label>
+            <input type="text" id="ca-api-model" placeholder="claude-sonnet-4-20250514">
+          </div>
+        </div>
+        <div class="form-buttons">
+          <button class="btn-cancel" onclick="hideCreateAgentForm()">Cancel</button>
+          <button class="btn-create" onclick="createAgent()">Register</button>
+        </div>
+        <div id="ca-result" style="display:none; margin-top:12px; padding:12px; border-radius:var(--radius-sm); font-size:13px;"></div>
+      </div>
+    </div>
+
+    <!-- Task Detail Panel -->
+    <div id="task-detail">
+      <div class="detail-header">
+        <h3>Task Detail</h3>
+        <button class="detail-close" onclick="closeTaskDetail()">&times;</button>
+      </div>
+      <div class="detail-body" id="detail-body"></div>
+    </div>
+
+    <div id="typing-indicator"></div>
+    <div id="compose">
+      <div id="reply-bar">
+        <span>Replying to <strong id="reply-target"></strong></span>
+        <span class="reply-text" id="reply-preview"></span>
+        <button id="reply-cancel" onclick="cancelReply()">&times;</button>
+      </div>
+      <div class="compose-wrapper">
+        <div id="mention-dropdown"></div>
+        <div class="compose-row">
+          <textarea id="compose-input" placeholder="Type a message... (@ to mention)" rows="1"
+            oninput="handleComposeInput(event)" onkeydown="handleComposeKeydown(event)"></textarea>
+          <button id="send-btn" onclick="sendMessage()" disabled>Send</button>
+        </div>
+      </div>
+      <div class="compose-hint">
+        <span id="compose-channel-hint"></span>
+        &nbsp;·&nbsp; Enter to send, Shift+Enter for new line
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Create Task Overlay -->
+<div id="create-task-overlay">
+  <div class="create-task-card">
+    <h3>Create New Task</h3>
+    <div class="form-group">
+      <label>Title *</label>
+      <input type="text" id="ct-title" placeholder="Task title..." autocomplete="off">
+    </div>
+    <div class="form-group">
+      <label>Priority</label>
+      <select id="ct-priority">
+        <option value="medium">Medium</option>
+        <option value="urgent">Urgent</option>
+        <option value="high">High</option>
+        <option value="low">Low</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Assignee</label>
+      <select id="ct-assignee">
+        <option value="">Unassigned</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Due Date</label>
+      <input type="date" id="ct-due-date">
+    </div>
+    <div class="form-buttons">
+      <button class="btn-cancel" onclick="hideCreateTaskForm()">Cancel</button>
+      <button class="btn-create" id="ct-submit" onclick="submitCreateTask()">Create Task</button>
+    </div>
+  </div>
+</div>
+
+<!-- Setup Wizard -->
+<div id="setup-wizard">
+  <div class="wizard-topbar">
+    <button id="wizard-lang-toggle" class="header-toggle-btn" onclick="toggleLang(); if(typeof renderWizardStep==='function') renderWizardStep();">EN</button>
+    <button id="wizard-theme-toggle" class="header-toggle-btn" onclick="toggleTheme();">🌙</button>
+  </div>
+  <div class="wizard-card">
+    <div class="wizard-steps">
+      <div class="wizard-step active" data-step="1"><div class="step-num">1</div><div class="wizard-step-label">Welcome</div></div>
+      <div class="wizard-step" data-step="2"><div class="step-num">2</div><div class="wizard-step-label">Configure</div></div>
+      <div class="wizard-step" data-step="3"><div class="step-num">3</div><div class="wizard-step-label">Profile</div></div>
+      <div class="wizard-step" data-step="4"><div class="step-num">4</div><div class="wizard-step-label">Agent</div></div>
+      <div class="wizard-step" data-step="5"><div class="step-num">5</div><div class="wizard-step-label">Done</div></div>
+      <div class="wizard-step" data-step="6"><div class="step-num">6</div><div class="wizard-step-label">Guide</div></div>
+    </div>
+    <div id="wizard-content"></div>
+    <div class="wizard-nav">
+      <button id="wizard-back" onclick="wizardBack()"></button>
+      <div style="display:flex; gap:8px; align-items:center;">
+        <button id="wizard-skip" onclick="wizardSkip()" style="display:none;"></button>
+        <button id="wizard-next" onclick="wizardNext()"></button>
+      </div>
+    </div>
+    <div id="wizard-error" class="wizard-error"></div>
+  </div>
+</div>
+
+<!-- Channel Members Panel -->
+<div id="channel-members-panel">
+  <div id="channel-members-header">
+    <span id="channel-members-title">Members</span>
+    <button class="close-btn" onclick="closeMembersPanel()">×</button>
+  </div>
+  <div class="members-search-bar">
+    <input type="text" class="members-search" placeholder="Search members..." oninput="filterMembers()">
+  </div>
+  <div id="members-subtitle" class="members-subtitle"></div>
+  <div id="channel-members-list"></div>
+  <div id="add-member-form" style="display:none;">
+    <select id="add-member-select"><option value="" disabled selected>Select agent...</option></select>
+    <button id="add-member-btn" onclick="addMemberToChannel()">Add</button>
+  </div>
+</div>
+
+<script src="js/i18n.js"></script>
+<script src="js/app.js"></script>
+<script src="js/channels.js"></script>
+<script src="js/tasks.js"></script>
+<script src="js/state.js"></script>
+<script src="js/agents.js"></script>
+<script src="js/credentials.js"></script>
+<script src="js/monitor.js"></script>
+<script src="js/members.js"></script>
+<script src="js/wechat.js"></script>
+<script src="js/wizard.js"></script>
+</body>
+</html>

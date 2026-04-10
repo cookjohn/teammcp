@@ -147,8 +147,16 @@ async function pollWeChat() {
       }
     } catch (e) {
       if (e.message === 'TOKEN_EXPIRED') {
-        console.error('[bridge] WeChat token expired. Run with --login to re-authenticate.');
-        process.exit(1);
+        console.error('[bridge] WeChat token expired. Attempting reload from disk...');
+        wechat.loadToken(); // Re-read token file (may have been updated externally)
+        if (wechat.token) {
+          console.log('[bridge] Token reloaded, retrying in 5s...');
+          await new Promise(r => setTimeout(r, 5000));
+          continue; // Don't exit — retry polling
+        }
+        console.error('[bridge] No valid token after reload. Will retry in 30s...');
+        await new Promise(r => setTimeout(r, 30000));
+        continue;
       }
       console.error('[bridge] Poll error:', e.message);
       await new Promise(r => setTimeout(r, 3000)); // Retry after 3s
@@ -229,7 +237,9 @@ async function subscribeTeamMCP() {
             } else {
               console.warn('[bridge] No context_token available, cannot send to WeChat');
             }
-          } catch {}
+          } catch (e) {
+            console.error('[bridge] SSE event error:', e.message);
+          }
         }
       }
     } catch (e) {
@@ -238,6 +248,21 @@ async function subscribeTeamMCP() {
     }
   }
 }
+
+// ── Global error handlers ──
+process.on('uncaughtException', (err) => {
+  console.error('[bridge] Uncaught exception:', err.message, err.stack);
+  // Don't exit — keep running
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[bridge] Unhandled rejection:', reason?.message || reason);
+  // Don't exit — keep running
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => { console.log('[bridge] SIGTERM received, shutting down'); process.exit(0); });
+process.on('SIGINT', () => { console.log('[bridge] SIGINT received, shutting down'); process.exit(0); });
 
 // Run both loops concurrently
 pollWeChat();

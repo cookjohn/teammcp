@@ -24,6 +24,9 @@ async function selectChannel(channelId) {
   if (loading) return;
   switchToMessages();
   currentChannel = channelId;
+  currentFolderId = null;
+  currentFolderPath = [];
+  channelFolders = [];
   const ch = channels.find(c => c.id === channelId);
 
   // Update header

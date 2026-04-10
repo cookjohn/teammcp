@@ -1,4 +1,5 @@
 import { URL } from 'node:url';
+import crypto from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join, extname } from 'node:path';
@@ -25,12 +26,17 @@ import {
   getUnreadCount, getUnreadMessages, getUnreadMentions, getLastNMessages,
   getLastUnreadMessageId, getStateChangesSince,
   createSchedule, getSchedules, deleteSchedule,
-  saveFile, getFile,
+  saveFile, getFile, getFilesByChannel, deleteFile, moveFile,
+  createFolder, getFolder, getFoldersByParent, renameFolder, getFolderDepth, deleteFolderCascade,
   getReportsTo, setReportsTo, getSubordinates,
   ackMessage, getMessageAcks,
-  setUseResume, getUseResume, setAgentAuthConfig
+  setUseResume, getUseResume, setAgentAuthConfig, setAgentAuthStrategy,
+  insertMetric, getMetrics, getMetricsSummary, cleanupOldMetrics
 } from './db.mjs';
 import { requireAuth } from './auth.mjs';
+// Doc-A v1.6 §11.11 (M6) — header/body redaction for any path that logs
+// request context. Audit log builders in credential-lease.mjs import these too.
+import { redactHeaders, redactBody } from './redact.mjs';
 import {
   addConnection, pushToAgent, pushToAgents,
   broadcastStatus, sendMissedMessages, isOnline, getOnlineAgents,
@@ -57,6 +63,17 @@ const MIME_TYPES = {
 };
 
 const startedAt = Date.now();
+
+// ── Dashboard Internal API Token ────────────────────────
+const DASHBOARD_SECRET = crypto.randomBytes(32).toString('hex');
+console.log('[dashboard] Secret generated (rotates on restart)');
+
+function requireDashboardToken(req, res) {
+  const token = req.headers['x-dashboard-token'];
+  if (!token) { json(res, { error: 'Dashboard token required' }, 401); return false; }
+  if (token !== DASHBOARD_SECRET) { json(res, { error: 'Invalid dashboard token' }, 403); return false; }
+  return true;
+}
 
 // ── Inbox helpers ────────────────────────────────────────
 
@@ -183,7 +200,7 @@ export async function handleRequest(req, res) {
 
   // CORS (for potential web dashboard)
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-dashboard-token');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
   if (method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
@@ -287,9 +304,102 @@ export async function handleRequest(req, res) {
       return json(res, { agents_count: allAgents.length, needs_setup: allAgents.length === 0, server_version: '1.0.0' });
     }
 
+    // ── Credential management API (no auth required for login, status is public) ──
+    if (method === 'GET' && path === '/api/auth/status') {
+      const { getCredentialStatus } = await import('./credential-manager.mjs');
+      return json(res, getCredentialStatus());
+    }
+
+    if (method === 'POST' && path === '/api/auth/login/start') {
+      const { createLoginSession } = await import('./credential-manager.mjs');
+      const result = createLoginSession();
+      return json(res, result);
+    }
+
+    if (method === 'POST' && path === '/api/auth/login/complete') {
+      const body = await readBody(req);
+      const { code, state } = JSON.parse(body);
+      if (!code || !state) return json(res, { error: 'Missing code or state' }, 400);
+      const { completeLogin } = await import('./credential-manager.mjs');
+      const result = await completeLogin(code, state);
+      return json(res, result);
+    }
+
     // ── All other endpoints require auth ──────────────
-    if (path.startsWith('/api/') && path !== '/api/register' && path !== '/api/health' && path !== '/api/setup-status') {
+    // Path A credential lease/busy/revoke endpoints use their own HMAC bearer auth
+    // (verifyHmacBearer in credential-lease.mjs), not the standard TeamMCP API key.
+    const isCredentialRoute = path.startsWith('/api/credentials/');
+    const isDashboardCredRoute = path.startsWith('/api/dashboard/credentials/');
+    if (path.startsWith('/api/') && path !== '/api/register' && path !== '/api/health' && path !== '/api/setup-status'
+      && path !== '/api/auth/status' && path !== '/api/auth/login/start' && path !== '/api/auth/login/complete'
+      && !isCredentialRoute && !isDashboardCredRoute) {
       if (!requireAuth(req, res)) return;
+    }
+
+    // ── POST /api/auth/refresh (auth-gated, manual trigger) ──
+    if (method === 'POST' && path === '/api/auth/refresh') {
+      const { refreshOAuthToken } = await import('./credential-manager.mjs');
+      await refreshOAuthToken();
+      const { getCredentialStatus } = await import('./credential-manager.mjs');
+      return json(res, getCredentialStatus());
+    }
+
+    // ── GET /api/dashboard/token (auth-gated via requireAuth above, Chairman/CEO only) ──
+    if (method === 'GET' && path === '/api/dashboard/token') {
+      const allowed = ['Chairman', 'CEO'];
+      if (!allowed.includes(req.agent.name)) {
+        return json(res, { error: 'Forbidden: Chairman or CEO only' }, 403);
+      }
+      return json(res, { token: DASHBOARD_SECRET });
+    }
+
+    // ── Dashboard credential management endpoints (dashboard token auth) ──
+    if (method === 'GET' && path === '/api/dashboard/credentials/overview') {
+      if (!requireDashboardToken(req, res)) return;
+      const agents = getAllAgents();
+      const { getCredentialStatus } = await import('./credential-manager.mjs');
+      const status = getCredentialStatus();
+      const overview = agents.map(a => ({
+        name: a.name, role: a.role, status: a.status,
+        auth_mode: a.auth_mode || 'oauth', auth_strategy: a.auth_strategy || 'legacy',
+      }));
+      return json(res, { agents: overview, tokenStatus: status });
+    }
+
+    if (method === 'GET' && path === '/api/dashboard/credentials/leases') {
+      if (!requireDashboardToken(req, res)) return;
+      const { default: db } = await import('./db.mjs');
+      const leases = db.prepare('SELECT * FROM credential_leases ORDER BY leased_at DESC').all();
+      return json(res, { leases });
+    }
+
+    if (method === 'GET' && path === '/api/dashboard/credentials/token-store') {
+      if (!requireDashboardToken(req, res)) return;
+      const { getCredentialStatus, loadCredentials } = await import('./credential-manager.mjs');
+      const status = getCredentialStatus();
+      const creds = loadCredentials();
+      // Return metadata only, never expose actual tokens
+      const tokenInfo = creds?.claudeAiOauth ? {
+        expiresAt: creds.claudeAiOauth.expiresAt || null,
+        rotationSeq: creds.rotation_seq || 0,
+        lastRefreshAt: creds.last_refresh_at || null,
+        lastRefreshBy: creds.last_refresh_by || null,
+      } : null;
+      return json(res, { status, tokenStore: tokenInfo });
+    }
+
+    if (method === 'PATCH' && path.match(/^\/api\/dashboard\/credentials\/agents\/[^/]+\/auth-strategy$/)) {
+      if (!requireDashboardToken(req, res)) return;
+      const agentName = path.split('/')[5];
+      const agent = getAgentByName(agentName);
+      if (!agent) return json(res, { error: 'Agent not found' }, 404);
+      const body = await readBody(req);
+      const { auth_strategy } = body;
+      if (!auth_strategy || !['legacy', 'path_a'].includes(auth_strategy)) {
+        return json(res, { error: 'Invalid auth_strategy. Must be "legacy" or "path_a"' }, 400);
+      }
+      setAgentAuthStrategy(agentName, auth_strategy);
+      return json(res, { ok: true, agent: agentName, auth_strategy });
     }
 
     // ── GET /api/wechat/status ──
@@ -514,9 +624,11 @@ export async function handleRequest(req, res) {
             });
           }
         }
-        // Forward @Chairman mentions → WeChat (only for wechat-sourced messages)
+        // Forward @Chairman mentions → WeChat (CEO always forwards, others only for wechat reply chains)
         const groupMeta = body.metadata || {};
-        if (body.mentions && body.mentions.includes('Chairman') && req.agent.name !== 'Chairman' && (groupMeta.source === 'wechat_reply' || groupMeta.source === 'wechat')) {
+        const isCEOGroup = req.agent.name === 'CEO';
+        const isWechatChainGroup = groupMeta.source === 'wechat_reply' || groupMeta.source === 'wechat';
+        if (body.mentions && body.mentions.includes('Chairman') && req.agent.name !== 'Chairman' && (isCEOGroup || isWechatChainGroup)) {
           try {
             const { sendToWeChat, getStatus } = await import('./wechat-bridge.mjs');
             if (getStatus().connected) {
@@ -853,7 +965,7 @@ export async function handleRequest(req, res) {
       const event = body.hook_event_name || body.event || 'unknown';
       const toolName = body.tool_name || null;
       const toolInput = body.tool_input || null;
-      const rawResult = body.tool_result || body.output || null;
+      const rawResult = body.tool_response || body.tool_result || body.output || null;
       const message = body.last_assistant_message || body.message || null;
 
       // Truncate tool_result to 500 chars (Audit requirement)
@@ -870,6 +982,12 @@ export async function handleRequest(req, res) {
           ? message.slice(0, 500) + '... [truncated]'
           : message,
         timestamp: new Date().toISOString()
+      });
+      insertMetric({
+        agent: agentName, event, session_id: body.session_id,
+        timestamp: new Date().toISOString(),
+        tool_name: toolName, tool_input: toolInput, tool_response: toolResult,
+        reason: body.stop_reason || null, error: body.error || null
       });
       return json(res, { ok: true });
     }
@@ -905,6 +1023,11 @@ export async function handleRequest(req, res) {
         pushToAgents(errorTargets, { type: 'message', channel: 'teammcp-dev', from: 'System', content, mentions: [agentName], id: `sys_error_${agentName}_${Date.now()}`, timestamp: new Date().toISOString() });
       }
 
+      insertMetric({
+        agent: agentName, event: body.hook_event_name || body.event || 'StopFailure',
+        session_id: body.session_id, timestamp: new Date().toISOString(),
+        reason, error: message
+      });
       return json(res, { ok: true });
     }
 
@@ -925,6 +1048,11 @@ export async function handleRequest(req, res) {
       });
 
       log(`[session] ${agentName} started (session: ${sessionId}, model: ${model})`);
+      insertMetric({
+        agent: agentName, event: 'SessionStart', session_id: sessionId,
+        timestamp: new Date().toISOString(),
+        model: typeof model === 'string' ? model : JSON.stringify(model)
+      });
       return json(res, { ok: true });
     }
 
@@ -950,6 +1078,11 @@ export async function handleRequest(req, res) {
       });
 
       log(`[session] ${agentName} ended (reason: ${reason}, duration: ${duration}ms)`);
+      insertMetric({
+        agent: agentName, event: 'SessionEnd', session_id: sessionId,
+        timestamp: new Date().toISOString(),
+        reason
+      });
 
       // If reason indicates non-recoverable exit, set offline immediately
       if (reason === 'user_exit' || reason === 'error') {
@@ -957,6 +1090,25 @@ export async function handleRequest(req, res) {
       }
 
       return json(res, { ok: true });
+    }
+
+    // ── GET /api/cc-metrics/summary ──────────────────
+    if (method === 'GET' && path === '/api/cc-metrics/summary') {
+      if (!requireAuth(req, res)) return;
+      const window = url.searchParams.get('window') || '1h';
+      const summary = getMetricsSummary(window);
+      return json(res, summary);
+    }
+
+    // ── GET /api/cc-metrics ──────────────────────────
+    if (method === 'GET' && path === '/api/cc-metrics') {
+      if (!requireAuth(req, res)) return;
+      const agent = url.searchParams.get('agent');
+      const event = url.searchParams.get('event');
+      const since = url.searchParams.get('since');
+      const limit = Math.min(parseInt(url.searchParams.get('limit') || '100', 10), 500);
+      const metrics = getMetrics({ agent, event, since, limit });
+      return json(res, { metrics });
     }
 
     // ── GET /api/agent-errors/:name ─────────────────
@@ -997,6 +1149,22 @@ export async function handleRequest(req, res) {
       }
     }
 
+    // ── GET /api/files — List files by channel ──────────
+    if (method === 'GET' && path === '/api/files') {
+      if (!requireAuth(req, res)) return;
+      const channel = url.searchParams.get('channel');
+      if (!channel) return json(res, { error: 'channel query param required' }, 400);
+      const limit = Math.min(parseInt(url.searchParams.get('limit') || '50', 10), 200);
+      const folderId = url.searchParams.get('folder_id') || '_all_';
+      const members = getChannelMembers(channel);
+      if (!members.includes(req.agent.name) && req.agent.name !== 'Chairman') {
+        return json(res, { error: 'Forbidden' }, 403);
+      }
+      const files = getFilesByChannel(channel, folderId, limit);
+      const folders = getFoldersByParent(channel, folderId === '_all_' ? null : (folderId === 'root' ? null : folderId));
+      return json(res, { files, folders });
+    }
+
     // ── POST /api/files — Upload file (base64 JSON body) ────
     if (method === 'POST' && path === '/api/files') {
       const body = await readBody(req);
@@ -1020,7 +1188,19 @@ export async function handleRequest(req, res) {
       if (!existsSync(uploadsDir)) mkdirSync(uploadsDir, { recursive: true });
       writeFileSync(join(uploadsDir, fileId), buffer);
 
-      saveFile(fileId, body.name, mimeType, buffer.length, sha256, req.agent.name, body.channel || null);
+      saveFile(fileId, body.name, mimeType, buffer.length, sha256, req.agent.name, body.channel || null, body.folder_id || null);
+
+      if (body.channel) {
+        const channelMembers = getChannelMembers(body.channel);
+        pushToAgents(channelMembers, {
+          type: 'file_changed',
+          id: fileId,
+          file_path: body.name,
+          event_type: 'upload',
+          agent: req.agent.name,
+          timestamp: new Date().toISOString()
+        });
+      }
 
       return json(res, { file_id: fileId, file_name: body.name, file_size: buffer.length, mime_type: mimeType, sha256, created_at: new Date().toISOString() }, 201);
     }
@@ -1061,6 +1241,124 @@ export async function handleRequest(req, res) {
       return json(res, fileMeta);
     }
 
+    // ── PUT /api/files/:id/move — Move file to folder ──
+    if (method === 'PUT' && path.match(/^\/api\/files\/[^/]+\/move$/) && path.split('/').length === 5) {
+      if (!requireAuth(req, res)) return;
+      const fileId = path.split('/')[3];
+      const fileMeta = getFile(fileId);
+      if (!fileMeta) return json(res, { error: 'File not found' }, 404);
+      if (fileMeta.uploaded_by !== req.agent.name && req.agent.name !== 'Chairman') {
+        return json(res, { error: 'Forbidden: only uploader or Chairman can move files' }, 403);
+      }
+      const body = await readBody(req);
+      const targetFolderId = body.folder_id || null;
+      if (targetFolderId) {
+        const folder = getFolder(targetFolderId);
+        if (!folder) return json(res, { error: 'Target folder not found' }, 404);
+        if (folder.channel !== fileMeta.channel) return json(res, { error: 'Cannot move file across channels' }, 400);
+      }
+      moveFile(fileId, targetFolderId);
+      return json(res, { ok: true });
+    }
+
+    // ── POST /api/folders — Create folder ──────────────
+    if (method === 'POST' && path === '/api/folders') {
+      if (!requireAuth(req, res)) return;
+      const body = await readBody(req);
+      if (!body.name || !body.channel) return json(res, { error: 'name and channel are required' }, 400);
+      if (!/^[a-zA-Z0-9_\-. \u4e00-\u9fff]{1,100}$/.test(body.name)) {
+        return json(res, { error: 'Invalid folder name. Allowed: letters, digits, spaces, hyphens, underscores, dots, Chinese chars (1-100)' }, 400);
+      }
+      const parentId = body.parent_id || null;
+      if (parentId) {
+        const parent = getFolder(parentId);
+        if (!parent) return json(res, { error: 'Parent folder not found' }, 404);
+        if (parent.channel !== body.channel) return json(res, { error: 'Parent folder must be in same channel' }, 400);
+        if (getFolderDepth(parentId) >= 4) {
+          return json(res, { error: 'Maximum folder depth (5) exceeded' }, 400);
+        }
+      }
+      const members = getChannelMembers(body.channel);
+      if (!members.includes(req.agent.name) && req.agent.name !== 'Chairman') {
+        return json(res, { error: 'Forbidden' }, 403);
+      }
+      const crypto = await import('node:crypto');
+      const folderId = `folder_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
+      const folder = createFolder(folderId, body.name, parentId, body.channel, req.agent.name);
+
+      pushToAgents(members, {
+        type: 'folder_changed',
+        action: 'create',
+        folder: folder,
+        timestamp: new Date().toISOString()
+      });
+
+      return json(res, folder, 201);
+    }
+
+    // ── GET /api/folders — List folders ────────────────
+    if (method === 'GET' && path === '/api/folders') {
+      if (!requireAuth(req, res)) return;
+      const channel = url.searchParams.get('channel');
+      if (!channel) return json(res, { error: 'channel query param required' }, 400);
+      const parentId = url.searchParams.get('parent_id');
+      const members = getChannelMembers(channel);
+      if (!members.includes(req.agent.name) && req.agent.name !== 'Chairman') {
+        return json(res, { error: 'Forbidden' }, 403);
+      }
+      const folders = getFoldersByParent(channel, parentId);
+      return json(res, { folders });
+    }
+
+    // ── PUT /api/folders/:id — Rename folder ───────────
+    if (method === 'PUT' && path.match(/^\/api\/folders\/[^/]+$/) && path.split('/').length === 4) {
+      if (!requireAuth(req, res)) return;
+      const folderId = path.split('/')[3];
+      const folder = getFolder(folderId);
+      if (!folder) return json(res, { error: 'Folder not found' }, 404);
+      if (folder.created_by !== req.agent.name && req.agent.name !== 'Chairman') {
+        return json(res, { error: 'Forbidden: only creator or Chairman can rename' }, 403);
+      }
+      const body = await readBody(req);
+      if (!body.name || !/^[a-zA-Z0-9_\-. \u4e00-\u9fff]{1,100}$/.test(body.name)) {
+        return json(res, { error: 'Invalid folder name' }, 400);
+      }
+      renameFolder(folderId, body.name);
+
+      const members = getChannelMembers(folder.channel);
+      pushToAgents(members, {
+        type: 'folder_changed',
+        action: 'rename',
+        folder_id: folderId,
+        name: body.name,
+        timestamp: new Date().toISOString()
+      });
+
+      return json(res, { ok: true });
+    }
+
+    // ── DELETE /api/folders/:id — Delete folder cascade ─
+    if (method === 'DELETE' && path.match(/^\/api\/folders\/[^/]+$/) && path.split('/').length === 4) {
+      if (!requireAuth(req, res)) return;
+      const folderId = path.split('/')[3];
+      const folder = getFolder(folderId);
+      if (!folder) return json(res, { error: 'Folder not found' }, 404);
+      if (folder.created_by !== req.agent.name && req.agent.name !== 'Chairman') {
+        return json(res, { error: 'Forbidden: only creator or Chairman can delete' }, 403);
+      }
+      const result = deleteFolderCascade(folderId);
+
+      const members = getChannelMembers(folder.channel);
+      pushToAgents(members, {
+        type: 'folder_changed',
+        action: 'delete',
+        folder_id: folderId,
+        timestamp: new Date().toISOString()
+      });
+
+      return json(res, { ok: true, deleted_folders: result.deleted_folders });
+    }
+
     // ── GET /api/channels ─────────────────────────────
     if (method === 'GET' && path === '/api/channels') {
       const channels = getChannelsForAgent(req.agent.name);
@@ -1076,7 +1374,8 @@ export async function handleRequest(req, res) {
         status: isOnline(a.name) ? 'online' : a.status,
         lastSeen: a.last_seen,
         reports_to: a.reports_to || null,
-        use_resume: a.use_resume !== 0
+        use_resume: a.use_resume !== 0,
+        auth_mode: a.auth_mode || 'oauth'
       })));
     }
 
@@ -1102,6 +1401,39 @@ export async function handleRequest(req, res) {
         });
       }
       return json(res, { ok: true, agent: name, reports_to: body.reports_to, use_resume: body.use_resume });
+    }
+
+    // ── GET /api/credentials/lease/:agent_name ────────────
+    if (method === 'GET' && path.match(/^\/api\/credentials\/lease\/[^/]+$/)) {
+      const name = path.split('/')[4];
+      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(name)) return json(res, { error: 'forbidden' }, 403);
+      const { handleLeaseHttpRequest } = await import('./credential-lease.mjs');
+      return handleLeaseHttpRequest(req, res, name, json);
+    }
+
+    // ── Doc-A v1.6 §11.7: POST /api/credentials/lease/:agent_name/revoke ──
+    if (method === 'POST' && path.match(/^\/api\/credentials\/lease\/[^/]+\/revoke$/)) {
+      const name = path.split('/')[4];
+      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(name)) return json(res, { error: 'forbidden' }, 403);
+      const raw = await readBody(req);
+      let parsed = {}; try { parsed = raw ? JSON.parse(raw) : {}; } catch {}
+      const { handleLeaseRevokeHttp } = await import('./credential-lease.mjs');
+      return handleLeaseRevokeHttp(req, res, name, parsed, json);
+    }
+
+    // ── Doc-A v1.6 §11.4: HR busyAgents loopback (acquire/heartbeat/release) ──
+    if (method === 'POST' && path.match(/^\/api\/credentials\/busy\/[^/]+\/(acquire|heartbeat|release)$/)) {
+      const parts = path.split('/');
+      const name = parts[4];
+      const op = parts[5];
+      if (!/^[a-zA-Z0-9_-]{1,64}$/.test(name)) return json(res, { error: 'forbidden' }, 403);
+      const raw = await readBody(req);
+      let parsed = {}; try { parsed = raw ? JSON.parse(raw) : {}; } catch {}
+      const cl = await import('./credential-lease.mjs');
+      const fn = op === 'acquire' ? cl.handleBusyAcquireHttp
+               : op === 'heartbeat' ? cl.handleBusyHeartbeatHttp
+               : cl.handleBusyReleaseHttp;
+      return fn(req, res, name, parsed, json);
     }
 
     // ── POST /api/agents/:name/start ───────────────────
@@ -1720,6 +2052,8 @@ export async function handleRequest(req, res) {
           subscribers: body.subscribers,
           expected_version: body.expected_version,
           isHumanOverride: false, // Only true for dashboard admin access
+          // Channel permission approvals: allow non-admin agents to create permission fields
+          allowFieldCreation: body.project_id === 'claude-code-permissions' && body.approval_required,
         }
       );
 
@@ -2006,7 +2340,11 @@ export async function handleRequest(req, res) {
     if (err instanceof SyntaxError) {
       return json(res, { error: 'Invalid JSON in request body' }, 400);
     }
-    console.error('[router error]', err);
+    // §11.11 M6: never spill raw req.headers into logs.
+    console.error('[router error]', err && err.message, {
+      method: req.method, url: req.url,
+      headers: redactHeaders(req.headers),
+    });
     json(res, { error: 'Internal server error' }, 500);
   }
 }

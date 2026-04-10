@@ -50,8 +50,28 @@ function execAsync(command, options = {}) {
  * Returns { pid } on success.
  */
 export async function startAgent(name) {
+  if (agentInfo?.auth_strategy === 'path_a') {
+    const err = new Error('Path A is Windows-only; set auth_strategy != path_a for mac agents');
+    err.code = 'PATH_A_MAC_UNSUPPORTED';
+    throw err;
+  }
   if (!AGENTS_BASE_DIR) {
     throw Object.assign(new Error('AGENTS_BASE_DIR environment variable not set'), { statusCode: 500 });
+  }
+  // Doc-A v1.6 §11 dedupe (§7): Path A is Windows-only (DPAPI + SAFE_NAME_RE +
+  // hardlink/symlink guard). Refuse to start a path_a agent on macOS instead
+  // of silently falling through to the API-key path.
+  try {
+    const _ai = getAgentByName(name);
+    if (_ai?.auth_strategy === 'path_a' && _ai?.auth_mode !== 'api_key') {
+      throw Object.assign(
+        new Error('PATH_A_MAC_UNSUPPORTED'),
+        { code: 'PATH_A_MAC_UNSUPPORTED', statusCode: 501 }
+      );
+    }
+  } catch (e) {
+    if (e.code === 'PATH_A_MAC_UNSUPPORTED') throw e;
+    // ignore lookup errors — fall through to existing flow
   }
   if (!SAFE_NAME_RE.test(name)) {
     throw Object.assign(new Error('Invalid agent name'), { statusCode: 400 });
@@ -137,9 +157,7 @@ export async function startAgent(name) {
         const src = join(defaultClaudeDir, entry);
         const dst = join(configDir, entry);
         try {
-          if (entry === '.credentials.json') {
-            copyFileSync(src, dst);
-          } else if (existsSync(dst)) {
+          if (existsSync(dst)) {
             continue;
           } else if (statSync(src).isDirectory()) {
             symlinkSync(src, dst);
@@ -376,7 +394,7 @@ export async function stopAgent(name) {
   processes.delete(name);
 
   if (!killed) {
-    throw Object.assign(new Error(`No process found for agent "${name}"`), { statusCode: 400 });
+    console.warn(`[stopAgent] No running process found for "${name}", marking as stopped`);
   }
 
   markStopped(name);
@@ -531,5 +549,4 @@ export function checkProcessPermission(agent) {
   return agent.name === 'Chairman' || agent.name === 'CEO' || agent.name === 'HR' || ALLOWED_ROLES.includes(agent.role);
 }
 
-// Credential sync is not implemented for macOS in this module
-// It is handled by the main process-manager.mjs on Windows
+// TODO: Credential management moved to credential-manager.mjs

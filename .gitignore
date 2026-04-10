@@ -48,3 +48,13 @@ agents/
 # Test scripts
 scripts/test-sdk-agent.mjs
 *.weixin-token.json
+
+# OAuth credentials (real tokens)
+oauth-credentials.json
+
+# Server backups (local only)
+server-backup-*/
+
+# Local test scripts
+test-permission*.mjs
+test-wechat-approval.mjs

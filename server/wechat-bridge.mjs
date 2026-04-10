@@ -96,15 +96,27 @@ export async function extractText(msg) {
     }
     if (item.type === 4) {
       const fileName = item.file_item?.file_name ?? '';
-      if (item.file_item?.cdn_url && item.file_item?.aes_key) {
-        const media = await downloadWechatMedia(item.file_item.cdn_url, item.file_item.aes_key, fileName);
+      const fi = item.file_item || {};
+      console.log('[wechat-bridge] file_item raw:', JSON.stringify(fi));
+      const cdnUrl = fi.media?.full_url || fi.cdn_url || '';
+      const aesKeyHex = fi.aeskey || '';
+      const aesKeyB64 = fi.media?.aes_key || fi.aes_key || '';
+      const aesKey = aesKeyHex ? { hex: aesKeyHex } : (aesKeyB64 ? { b64: aesKeyB64 } : null);
+      if (cdnUrl && aesKey) {
+        const media = await downloadWechatMedia(cdnUrl, aesKey, fileName);
         if (media) return `[文件 ${fileName} file_id:${media.fileId}]`;
       }
       return `[文件] ${fileName}`;
     }
     if (item.type === 5) {
-      if (item.video_item?.cdn_url && item.video_item?.aes_key) {
-        const media = await downloadWechatMedia(item.video_item.cdn_url, item.video_item.aes_key, 'video.mp4');
+      const vi = item.video_item || {};
+      console.log('[wechat-bridge] video_item raw:', JSON.stringify(vi));
+      const cdnUrl = vi.media?.full_url || vi.cdn_url || '';
+      const aesKeyHex = vi.aeskey || '';
+      const aesKeyB64 = vi.media?.aes_key || vi.aes_key || '';
+      const aesKey = aesKeyHex ? { hex: aesKeyHex } : (aesKeyB64 ? { b64: aesKeyB64 } : null);
+      if (cdnUrl && aesKey) {
+        const media = await downloadWechatMedia(cdnUrl, aesKey, 'video.mp4');
         if (media) return `[视频 file_id:${media.fileId}]`;
       }
       return '[视频]';
@@ -121,7 +133,20 @@ async function downloadWechatMedia(cdnUrl, aesKey, fileName) {
     const encrypted = Buffer.from(await res.arrayBuffer());
 
     // Decrypt with AES-128-ECB (aesKey can be { hex: '...' } or { b64: '...' })
-    const key = aesKey.hex ? Buffer.from(aesKey.hex, 'hex') : Buffer.from(aesKey.b64 || aesKey, 'base64');
+    // Some keys are base64-encoded hex strings (b64 → hex string → binary)
+    let key;
+    if (aesKey.hex) {
+      key = Buffer.from(aesKey.hex, 'hex');
+    } else {
+      const raw = Buffer.from(aesKey.b64 || aesKey, 'base64');
+      // Check if decoded result is a hex string (all chars 0-9a-f and length is even)
+      const rawStr = raw.toString('utf8');
+      if (raw.length > 16 && /^[0-9a-f]+$/i.test(rawStr) && rawStr.length % 2 === 0) {
+        key = Buffer.from(rawStr, 'hex'); // hex string → binary
+      } else {
+        key = raw;
+      }
+    }
     const decipher = crypto.createDecipheriv('aes-128-ecb', key, null);
     decipher.setAutoPadding(true);
     const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
@@ -331,7 +356,10 @@ async function pollLoop() {
       for (const msg of resp.msgs ?? []) {
         if (msg.message_type !== 1) continue; // Only user messages
         const text = await extractText(msg);
-        if (!text) continue;
+        if (!text) {
+          console.log(`[wechat] Skipped message: no extractable text. Items: ${JSON.stringify((msg.item_list || []).map(i => ({ type: i.type })))}`);
+          continue;
+        }
         const fromUser = msg.from_user_id || '';
         const contextToken = msg.context_token || '';
         if (fromUser && contextToken) {
@@ -378,6 +406,83 @@ async function pollLoop() {
             continue; // Don't forward to TeamMCP
           } catch (e) {
             console.error('[wechat] keyword query failed:', e.message);
+          }
+        }
+
+        // ── Approval reply parsing ──
+        // Keywords: 批准/同意/yes/approve → allow; 拒绝/no/reject/deny → deny
+        {
+          const trimmed = text.trim();
+          const approveWords = ['批准', '同意', 'yes', 'approve'];
+          const denyWords = ['拒绝', 'no', 'reject', 'deny'];
+          let approved = null;
+          let shortCode = null;
+
+          // Match patterns: "批准 a3f7", "Y a3f7", "拒绝 a3f7 原因", "批准" (no code)
+          for (const w of approveWords) {
+            const re = new RegExp(`^${w}\\s+([a-f0-9]{4})`, 'i');
+            const m = trimmed.match(re);
+            if (m) { approved = true; shortCode = m[1].toLowerCase(); break; }
+            if (trimmed.toLowerCase() === w.toLowerCase()) { approved = true; break; }
+          }
+          if (approved === null) {
+            for (const w of denyWords) {
+              const re = new RegExp(`^${w}\\s+([a-f0-9]{4})`, 'i');
+              const m = trimmed.match(re);
+              if (m) { approved = false; shortCode = m[1].toLowerCase(); break; }
+              if (trimmed.toLowerCase() === w.toLowerCase()) { approved = false; break; }
+            }
+          }
+
+          if (approved !== null) {
+            try {
+              const { getPendingApprovals, resolveApproval } = await import('./db.mjs');
+              const pending = getPendingApprovals('CEO'); // TODO: support per-approver
+              let targetApproval = null;
+
+              if (shortCode) {
+                // Explicit short code — find matching approval
+                targetApproval = pending.find(a => a.approval_id.endsWith(shortCode));
+              } else if (pending.length === 1) {
+                // No code but only one pending — auto-match
+                targetApproval = pending[0];
+              } else if (pending.length === 0) {
+                await sendToWeChat('当前没有待审批的请求。', fromUser, contextToken);
+                continue;
+              } else {
+                // Multiple pending, no code — list them
+                let listMsg = `当前有 ${pending.length} 条待审批，请带短码回复：\n`;
+                for (const a of pending) {
+                  const sc = a.approval_id.slice(-4);
+                  const pv = (() => { try { return JSON.parse(a.proposed_value || '{}'); } catch { return {}; } })();
+                  listMsg += `• #${sc} ${pv.tool_name || a.field}\n`;
+                }
+                await sendToWeChat(listMsg.trim(), fromUser, contextToken);
+                continue;
+              }
+
+              if (!targetApproval) {
+                await sendToWeChat(`未找到短码 #${shortCode} 对应的待审批请求。`, fromUser, contextToken);
+                continue;
+              }
+
+              // Extract reject comment if any
+              const comment = approved ? '' : (trimmed.replace(/^\S+\s+[a-f0-9]{4}\s*/i, '') || '');
+
+              const result = resolveApproval(targetApproval.approval_id, approved, 'Chairman', comment);
+              if (result) {
+                const statusText = approved ? '已批准' : '已拒绝';
+                const pv = (() => { try { return JSON.parse(targetApproval.proposed_value || '{}'); } catch { return {}; } })();
+                const toolName = pv.tool_name || targetApproval.field;
+                await sendToWeChat(`${statusText}: ${toolName}`, fromUser, contextToken);
+                console.log(`[wechat] Approval ${statusText}: ${targetApproval.approval_id}`);
+              } else {
+                await sendToWeChat('审批处理失败，可能已被处理。', fromUser, contextToken);
+              }
+              continue; // Don't forward to TeamMCP
+            } catch (e) {
+              console.error('[wechat] approval reply error:', e.message);
+            }
           }
         }
 

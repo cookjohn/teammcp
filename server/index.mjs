@@ -3,8 +3,13 @@ import { handleRequest } from './router.mjs';
 import { closeAllConnections, pushToAgents, getOnlineAgents } from './sse.mjs';
 import { closeDb, getOverdueTasks, markOverdueNotified, saveMessage, getAllAgents, getSchedulesDue, updateScheduleNextRun, getNextCronRun, getCheckInDueTasks, updateCheckIn, getDoingTasks, saveNotification, updateTaskMetadata, getChannelMembers, getChannel, getPendingTasksCount, setState } from './db.mjs';
 import { subscribe } from './eventbus.mjs';
+import { init as initCredentialManager, shutdown as shutdownCredentialManager } from './credential-manager.mjs';
+import { getAgentByName } from './db.mjs';
+import { normalizeAddr } from './auth-token-utils.mjs';
+import { spawnPty, attachWsServer } from './pty-manager.mjs';
 
 const PORT = process.env.TEAMMCP_PORT || 3100;
+const BIND_HOST = process.env.TEAMMCP_BIND_HOST || '127.0.0.1';
 
 const server = http.createServer((req, res) => {
   const start = Date.now();
@@ -21,8 +26,37 @@ const server = http.createServer((req, res) => {
 // SSE long-lived connections: only disable request timeout
 server.requestTimeout = 0;
 
-server.listen(PORT, () => {
+server.listen(PORT, BIND_HOST, () => {
+  // §11.1 v1.5 loopback bind assertion (v1.6 normalizeAddr) — fatal if non-loopback.
+  const addr = server.address();
+  const normalized = normalizeAddr(addr?.address);
+  if (!addr || (normalized !== '127.0.0.1' && normalized !== '::1')) {
+    throw new Error(
+      `FATAL: TeamMCP server must bind loopback-only; got ${addr?.address}. ` +
+      `Set TEAMMCP_BIND_HOST=127.0.0.1 and restart.`
+    );
+  }
+  console.log(`[TeamMCP] bind assertion ok: loopback ${normalized}:${addr.port}`);
   console.log(`[TeamMCP] Server running on http://localhost:${PORT}`);
+  // Initialize credential manager after server is listening
+  initCredentialManager({
+    setState,
+    isApiKeyAgent: (name) => {
+      try { return getAgentByName(name)?.auth_mode === 'api_key'; } catch { return false; }
+    },
+  });
+
+  // ── PTY Terminal (PoC) ────────────────────────────────────
+  attachWsServer(server);
+  try {
+    const agentsDir = process.env.TEAMMCP_AGENTS_DIR || 'C:/Users/ssdlh/Desktop/agents';
+    spawnPty('TestDev', 'powershell.exe', ['-NoLogo'], {
+      cwd: `${agentsDir}/TestDev`,
+      env: { ...process.env, CLAUDE_CONFIG_DIR: `${agentsDir}/TestDev/.claude` }
+    });
+  } catch (e) {
+    console.error('[pty] Failed to spawn TestDev:', e.message);
+  }
 });
 
 // ── Task overdue reminder (every 60 seconds) ─────────────
@@ -231,13 +265,15 @@ try {
 // ── Approval notification → WeChat push ───────────────
 subscribe('approval_requested', (event) => {
   try {
-    let toolName = '', description = '';
+    let toolName = '', description = '', inputPreview = '';
     try {
       const pv = JSON.parse(event.proposed_value || '{}');
       toolName = pv.tool_name || '';
       description = pv.description || '';
+      inputPreview = pv.input_preview || '';
     } catch {}
-    const content = `[审批请求] ${toolName || event.field}\n${description}\n请求人：${event.proposed_by || 'unknown'}\n审批人：${event.approver || 'CEO'}`;
+    const shortCode = (event.approval_id || '').slice(-4);
+    const content = `[审批请求 #${shortCode}] ${toolName || event.field}\n${description}${inputPreview ? '\n操作内容：' + inputPreview : ''}\n请求人：${event.proposed_by || 'unknown'}\n回复：批准 ${shortCode} / 拒绝 ${shortCode}`;
     const notifId = `notif_approval_${event.approval_id}_${Date.now()}`;
     saveNotification(notifId, event.approver || 'CEO', 'wechat', content);
 

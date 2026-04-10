@@ -8,11 +8,18 @@ function switchToState() {
   document.getElementById('pinned-panel').classList.remove('active');
   document.getElementById('tasks-container').classList.remove('active');
   document.getElementById('agents-container').classList.remove('active');
+  document.getElementById('credentials-container').classList.remove('active');
+  document.getElementById('monitor-container').classList.remove('active');
+  if (typeof stopMonitorRefresh === 'function') stopMonitorRefresh();
   closeAllOverlays();
   // Show state view
   document.getElementById('state-container').classList.add('active');
   // Update sidebar highlights
   document.querySelectorAll('.channel-item').forEach(el => el.classList.remove('active'));
+  document.getElementById('tasks-nav').classList.remove('active');
+  document.getElementById('agents-nav').classList.remove('active');
+  document.getElementById('credentials-nav').classList.remove('active');
+  document.getElementById('monitor-nav').classList.remove('active');
   document.getElementById('state-nav').classList.add('active');
   // Load state
   const input = document.getElementById('state-project-input');
@@ -56,48 +63,193 @@ function toggleChannelFiles() {
     panel.classList.remove('active');
   } else {
     panel.classList.add('active');
-    loadFileEvents();
+    loadChannelFiles();
   }
 }
 
-async function loadFileEvents(channel) {
+function formatFileSize(bytes) {
+  if (bytes == null || isNaN(bytes)) return '—';
+  bytes = Number(bytes);
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+}
+
+function getFileIcon(mimeType) {
+  if (!mimeType) return '&#128196;';
+  if (mimeType.startsWith('image/')) return '&#128247;';
+  if (mimeType.startsWith('video/')) return '&#127909;';
+  if (mimeType.startsWith('audio/')) return '&#127925;';
+  if (mimeType.includes('pdf')) return '&#128213;';
+  if (mimeType.includes('zip') || mimeType.includes('tar') || mimeType.includes('compressed')) return '&#128230;';
+  if (mimeType.includes('json') || mimeType.includes('javascript') || mimeType.includes('xml')) return '&#128187;';
+  return '&#128196;';
+}
+
+async function loadChannelFiles() {
+  var panel = document.getElementById('channel-files-panel');
+  if (!panel || !currentChannel) return;
+  panel.innerHTML = '<div class="files-loading"><div class="files-spinner"></div> Loading...</div>';
   try {
-    const data = await api('/api/file-events?limit=50');
-    fileEvents = data.events || [];
+    var folderUrl = '/api/folders?channel=' + encodeURIComponent(currentChannel) + '&parent_id=' + (currentFolderId || '');
+    var fileUrl = '/api/files?limit=50&channel=' + encodeURIComponent(currentChannel) + '&folder_id=' + (currentFolderId || 'root');
+    var results = await Promise.all([
+      api(folderUrl).catch(function() { return []; }),
+      api(fileUrl)
+    ]);
+    channelFolders = Array.isArray(results[0]) ? results[0] : (results[0].folders || []);
+    channelFiles = Array.isArray(results[1]) ? results[1] : (results[1].files || []);
     renderChannelFiles();
   } catch (e) {
-    console.error('Failed to load file events:', e);
-    const panel = document.getElementById('channel-files-panel');
-    if (panel) panel.innerHTML = '<div class="files-empty">Failed to load file events</div>';
+    console.error('Failed to load channel files:', e);
+    panel.innerHTML = '<div class="files-empty"><div class="icon">&#9888;</div><div>Failed to load files</div></div>';
+  }
+}
+
+function openFolder(folderId, folderName) {
+  currentFolderPath.push({ id: folderId, name: folderName });
+  currentFolderId = folderId;
+  loadChannelFiles();
+}
+
+function navigateToFolder(index) {
+  if (index === -1) {
+    currentFolderId = null;
+    currentFolderPath = [];
+  } else {
+    currentFolderPath = currentFolderPath.slice(0, index + 1);
+    currentFolderId = currentFolderPath[index].id;
+  }
+  loadChannelFiles();
+}
+
+async function createFolder() {
+  var name = prompt('New folder name:');
+  if (!name) return;
+  name = name.trim();
+  if (name.length === 0 || name.length > 100) {
+    alert('Folder name must be 1-100 characters.');
+    return;
+  }
+  if (!/^[a-zA-Z0-9 _\-\.\u4e00-\u9fff]+$/.test(name)) {
+    alert('Folder name contains invalid characters.');
+    return;
+  }
+  try {
+    await fetch('/api/folders', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, parent_id: currentFolderId, channel: currentChannel })
+    });
+    loadChannelFiles();
+  } catch (e) {
+    alert('Failed to create folder: ' + e.message);
+  }
+}
+
+async function renameFolder(folderId) {
+  var name = prompt('New folder name:');
+  if (!name) return;
+  name = name.trim();
+  if (name.length === 0 || name.length > 100) {
+    alert('Folder name must be 1-100 characters.');
+    return;
+  }
+  try {
+    await fetch('/api/folders/' + encodeURIComponent(folderId), {
+      method: 'PUT',
+      headers: { 'Authorization': 'Bearer ' + API_KEY, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name })
+    });
+    loadChannelFiles();
+  } catch (e) {
+    alert('Failed to rename folder: ' + e.message);
+  }
+}
+
+async function deleteFolder(folderId, folderName) {
+  if (!confirm('Delete folder "' + folderName + '"? Files inside will be moved to root.')) return;
+  try {
+    await fetch('/api/folders/' + encodeURIComponent(folderId), {
+      method: 'DELETE',
+      headers: { 'Authorization': 'Bearer ' + API_KEY }
+    });
+    loadChannelFiles();
+  } catch (e) {
+    alert('Failed to delete folder: ' + e.message);
   }
 }
 
 function renderChannelFiles() {
-  const panel = document.getElementById('channel-files-panel');
+  var panel = document.getElementById('channel-files-panel');
   if (!panel) return;
-  if (!fileEvents || fileEvents.length === 0) {
-    panel.innerHTML = '<div class="files-empty">No file activity yet</div>';
-    return;
-  }
-  let html = '';
-  for (const evt of fileEvents) {
-    const typeClass = (evt.event_type || '').toLowerCase();
-    const typeLabel = escapeHtml((evt.event_type || 'unknown').toUpperCase());
-    const time = evt.created_at ? formatTime(evt.created_at) : '';
-    const date = evt.created_at ? new Date(evt.created_at).toLocaleDateString() : '';
-    html += '<div class="file-event-card">';
-    html += '<span class="file-event-type ' + escapeHtml(typeClass) + '">' + typeLabel + '</span>';
-    html += '<div class="file-event-info">';
-    html += '<div class="file-event-path">' + escapeHtml(evt.file_path || '') + '</div>';
-    html += '<div class="file-event-meta">';
-    if (evt.agent_name) {
-      html += '<span class="file-event-agent">' + escapeHtml(evt.agent_name) + '</span>';
+
+  var html = '';
+
+  // Breadcrumb navigation
+  html += '<div class="files-breadcrumb">';
+  if (currentFolderPath.length === 0) {
+    html += '<span class="files-breadcrumb-current">root</span>';
+  } else {
+    html += '<span class="files-breadcrumb-item" onclick="navigateToFolder(-1)">root</span>';
+    for (var bi = 0; bi < currentFolderPath.length; bi++) {
+      html += '<span class="files-breadcrumb-separator">/</span>';
+      if (bi === currentFolderPath.length - 1) {
+        html += '<span class="files-breadcrumb-current">' + escapeHtml(currentFolderPath[bi].name) + '</span>';
+      } else {
+        html += '<span class="files-breadcrumb-item" onclick="navigateToFolder(' + bi + ')">' + escapeHtml(currentFolderPath[bi].name) + '</span>';
+      }
     }
-    html += '<span>' + escapeHtml(date + ' ' + time) + '</span>';
-    html += '</div>';
-    html += '</div>';
-    html += '</div>';
   }
+  html += '<button class="files-new-folder-btn" onclick="createFolder()">+ New Folder</button>';
+  html += '</div>';
+
+  // Folder list
+  if (channelFolders && channelFolders.length > 0) {
+    for (var fi = 0; fi < channelFolders.length; fi++) {
+      var folder = channelFolders[fi];
+      var fName = escapeHtml(folder.name || 'Unnamed');
+      var fId = escapeHtml(folder.id);
+      html += '<div class="folder-item" onclick="openFolder(\'' + fId + '\', \'' + fName.replace(/'/g, "\\'") + '\')">';
+      html += '<span class="folder-icon">&#128193;</span>';
+      html += '<span class="folder-name">' + fName + '</span>';
+      html += '<span class="folder-actions">';
+      html += '<button class="folder-action-btn" onclick="event.stopPropagation(); renameFolder(\'' + fId + '\')" title="Rename">&#9998;</button>';
+      html += '<button class="folder-action-btn delete" onclick="event.stopPropagation(); deleteFolder(\'' + fId + '\', \'' + fName.replace(/'/g, "\\'") + '\')" title="Delete">&#128465;</button>';
+      html += '</span>';
+      html += '</div>';
+    }
+  }
+
+  // File list
+  if (channelFiles && channelFiles.length > 0) {
+    for (var i = 0; i < channelFiles.length; i++) {
+      var file = channelFiles[i];
+      var icon = getFileIcon(file.mime_type);
+      var name = escapeHtml(file.original_name || 'Unnamed file');
+      var size = formatFileSize(file.size);
+      var uploader = file.uploaded_by ? escapeHtml(file.uploaded_by) : '';
+      var time = file.created_at ? formatTime(file.created_at) : '';
+      var date = file.created_at ? formatDate(file.created_at) : '';
+      var downloadUrl = '/api/files/' + encodeURIComponent(file.id);
+      html += '<div class="file-item">';
+      html += '<span class="file-icon">' + icon + '</span>';
+      html += '<div class="file-info">';
+      html += '<a class="file-name" href="' + escapeHtml(downloadUrl) + '" download title="' + name + '">' + name + '</a>';
+      html += '<div class="file-meta">';
+      html += '<span class="file-size">' + escapeHtml(size) + '</span>';
+      if (uploader) html += '<span class="file-uploader">' + uploader + '</span>';
+      html += '<span class="file-time">' + escapeHtml(date + ' ' + time) + '</span>';
+      html += '</div></div></div>';
+    }
+  }
+
+  // Empty state
+  if ((!channelFolders || channelFolders.length === 0) && (!channelFiles || channelFiles.length === 0)) {
+    html += '<div class="files-empty"><div class="icon">&#128193;</div><div>No files or folders yet</div></div>';
+  }
+
   panel.innerHTML = html;
 }
 

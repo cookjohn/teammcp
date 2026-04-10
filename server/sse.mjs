@@ -1,5 +1,11 @@
 import { setAgentStatus, getUnreadMessages, getUnreadCount, getUnreadMentions, getLastNMessages, getStateChangesSince, getAgentByName, batchUpdateReadStatus, saveMessage, getReportsTo } from './db.mjs';
-import { isStopped } from './process-manager.mjs';
+// Lazy import to break ESM circular deadlock:
+// sse → process-manager (dispatcher, top-level await) → impl-win → db → eventbus → sse
+let _isStopped = null;
+async function getIsStopped(name) {
+  if (!_isStopped) _isStopped = (await import('./process-manager.mjs')).isStopped;
+  return _isStopped(name);
+}
 
 // Map: agentName → Set<res>  (one agent may have multiple SSE connections)
 const connections = new Map();
@@ -115,7 +121,7 @@ function scheduleCrashDetection(agentName) {
     if (isOnline(agentName)) return;
 
     // Skip crash alert for agents that were intentionally stopped
-    if (isStopped(agentName)) {
+    if (await getIsStopped(agentName)) {
       log(`${agentName}: skipping crash detection (intentionally stopped)`);
       return;
     }

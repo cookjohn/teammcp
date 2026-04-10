@@ -105,6 +105,68 @@ try { db.exec('ALTER TABLE agents ADD COLUMN api_base_url TEXT'); } catch { /* c
 try { db.exec('ALTER TABLE agents ADD COLUMN api_auth_token TEXT'); } catch { /* column already exists */ }
 try { db.exec('ALTER TABLE agents ADD COLUMN api_model TEXT'); } catch { /* column already exists */ }
 
+try { db.exec('ALTER TABLE agents ADD COLUMN auth_strategy TEXT DEFAULT "legacy"'); } catch {}
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS credential_leases (
+  lease_id TEXT PRIMARY KEY,
+  agent TEXT NOT NULL,
+  leased_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  requested_by TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_credential_leases_agent ON credential_leases(agent);
+`);
+
+// Doc-A v1.6 §11.6 — per-agent lease rate limit (sliding window, persistent)
+db.exec(`
+CREATE TABLE IF NOT EXISTS credential_lease_rate (
+  agent_name   TEXT PRIMARY KEY,
+  window_start INTEGER NOT NULL,
+  count        INTEGER NOT NULL,
+  blocked      INTEGER NOT NULL DEFAULT 0
+);
+`);
+
+// Doc-A v1.6 §11.7 — lease revocations audit trail (stub for future revoke endpoint)
+db.exec(`
+CREATE TABLE IF NOT EXISTS credential_lease_revocations (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent_name   TEXT NOT NULL,
+  lease_id     TEXT,
+  revoked_at   INTEGER NOT NULL,
+  revoked_by   TEXT NOT NULL,
+  reason       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_credential_lease_revocations_agent ON credential_lease_revocations(agent_name);
+`);
+
+// Doc-A v1.6 §11.4 — persistent busyAgents (HR Path A driver lease lock)
+// Replaces in-memory Set in path-a-driver.mjs. Survives driver/server restart.
+// Heartbeat updated every 5s by driver; rows with heartbeat_ts > 30s old are stale → reclaimable.
+db.exec(`
+CREATE TABLE IF NOT EXISTS path_a_busy_agents (
+  agent_name   TEXT PRIMARY KEY,
+  locked_at    INTEGER NOT NULL,
+  heartbeat_ts INTEGER NOT NULL,
+  owner_pid    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_path_a_busy_heartbeat ON path_a_busy_agents(heartbeat_ts);
+`);
+
+// Doc-A v1.6 §11.7 — admin ed25519 keypair public-key registry.
+// Private key lives in DPAPI-sealed file at ${TEAMMCP_HOME}/secrets/admin-keypair.dpapi (CurrentUser scope).
+db.exec(`
+CREATE TABLE IF NOT EXISTS admin_keypair (
+  id              INTEGER PRIMARY KEY CHECK (id = 1),
+  public_key_pem  TEXT NOT NULL,
+  fingerprint     TEXT NOT NULL,
+  generated_at    INTEGER NOT NULL,
+  scope           TEXT NOT NULL DEFAULT 'CurrentUser'
+);
+`);
+
 // ── FTS5 full-text search index ──────────────────────────
 
 db.exec(`
@@ -235,7 +297,7 @@ export function setAgentStatus(name, status) {
 }
 
 export function getAllAgents() {
-  return db.prepare('SELECT name, role, status, last_seen, reports_to, use_resume FROM agents').all();
+  return db.prepare('SELECT name, role, status, last_seen, reports_to, use_resume, auth_mode, auth_strategy FROM agents').all();
 }
 
 export function setUseResume(agentName, useResume) {
@@ -269,6 +331,10 @@ export function setAgentAuthConfig(name, config) {
     WHERE name = ?
   `).run(auth_mode || 'oauth', api_provider || null, api_base_url || null,
          api_auth_token || null, api_model || null, name);
+}
+
+export function setAgentAuthStrategy(name, auth_strategy) {
+  db.prepare('UPDATE agents SET auth_strategy = ? WHERE name = ?').run(auth_strategy, name);
 }
 
 export function getAgentsNeedingRouter() {
@@ -1179,7 +1245,7 @@ export function setState(projectId, field, value, changedBy, reason, opts = {}) 
       return { success: true, version: newVersion, field, project_id: projectId };
     } else {
       // New field: only STATE_ADMINS or human override can create
-      const isAdmin = STATE_ADMINS.includes(changedBy) || isHuman;
+      const isAdmin = STATE_ADMINS.includes(changedBy) || isHuman || opts.allowFieldCreation;
       if (!isAdmin) {
         return { error: 'admin_required', message: 'Only STATE_ADMINS can create new state fields' };
       }
@@ -1998,16 +2064,33 @@ CREATE TABLE IF NOT EXISTS files (
   sha256 TEXT NOT NULL,
   uploaded_by TEXT NOT NULL,
   channel TEXT,
+  folder_id TEXT,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS folders (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  parent_id TEXT,
+  channel TEXT,
+  created_by TEXT NOT NULL,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (parent_id) REFERENCES folders(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_folders_parent ON folders(parent_id);
+CREATE INDEX IF NOT EXISTS idx_folders_channel ON folders(channel);
 `);
 
-export function saveFile(id, originalName, mimeType, size, sha256, uploadedBy, channel) {
+// Migration: add folder_id column to existing files table (no-op if already exists)
+try { db.exec('ALTER TABLE files ADD COLUMN folder_id TEXT'); } catch {}
+try { db.exec('CREATE INDEX IF NOT EXISTS idx_files_folder ON files(folder_id)'); } catch {}
+
+export function saveFile(id, originalName, mimeType, size, sha256, uploadedBy, channel, folderId = null) {
   db.prepare(`
-    INSERT INTO files (id, original_name, mime_type, size, sha256, uploaded_by, channel)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-  `).run(id, originalName, mimeType, size, sha256, uploadedBy, channel);
-  return { id, original_name: originalName, mime_type: mimeType, size, sha256, uploaded_by: uploadedBy, channel };
+    INSERT INTO files (id, original_name, mime_type, size, sha256, uploaded_by, channel, folder_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(id, originalName, mimeType, size, sha256, uploadedBy, channel, folderId);
+  return { id, original_name: originalName, mime_type: mimeType, size, sha256, uploaded_by: uploadedBy, channel, folder_id: folderId };
 }
 
 export function getFile(id) {
@@ -2016,6 +2099,162 @@ export function getFile(id) {
 
 export function getFileMeta(id) {
   return db.prepare('SELECT * FROM files WHERE id = ?').get(id);
+}
+
+export function getFilesByChannel(channel, folderId, limit = 50) {
+  if (folderId === '_all_') {
+    return db.prepare('SELECT * FROM files WHERE channel = ? ORDER BY created_at DESC LIMIT ?').all(channel, limit);
+  }
+  if (folderId === 'root' || folderId === null || folderId === undefined) {
+    return db.prepare('SELECT * FROM files WHERE channel = ? AND folder_id IS NULL ORDER BY created_at DESC LIMIT ?').all(channel, limit);
+  }
+  return db.prepare('SELECT * FROM files WHERE channel = ? AND folder_id = ? ORDER BY created_at DESC LIMIT ?').all(channel, folderId, limit);
+}
+
+export function deleteFile(id) {
+  return db.prepare('DELETE FROM files WHERE id = ?').run(id);
+}
+
+export function moveFile(fileId, folderId) {
+  return db.prepare('UPDATE files SET folder_id = ? WHERE id = ?').run(folderId, fileId);
+}
+
+// ── Folders ──────────────────────────────────────────────
+
+export function createFolder(id, name, parentId, channel, createdBy) {
+  db.prepare(`
+    INSERT INTO folders (id, name, parent_id, channel, created_by)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(id, name, parentId, channel, createdBy);
+  return { id, name, parent_id: parentId, channel, created_by: createdBy };
+}
+
+export function getFolder(id) {
+  return db.prepare('SELECT * FROM folders WHERE id = ?').get(id);
+}
+
+export function getFoldersByParent(channel, parentId) {
+  if (parentId === null || parentId === undefined) {
+    return db.prepare('SELECT * FROM folders WHERE channel = ? AND parent_id IS NULL ORDER BY name').all(channel);
+  }
+  return db.prepare('SELECT * FROM folders WHERE channel = ? AND parent_id = ? ORDER BY name').all(channel, parentId);
+}
+
+export function renameFolder(id, newName) {
+  return db.prepare('UPDATE folders SET name = ? WHERE id = ?').run(newName, id);
+}
+
+export function getFolderDepth(folderId) {
+  let depth = 0;
+  let current = folderId;
+  while (current) {
+    const folder = db.prepare('SELECT parent_id FROM folders WHERE id = ?').get(current);
+    if (!folder) break;
+    depth++;
+    current = folder.parent_id;
+  }
+  return depth;
+}
+
+export const deleteFolderCascade = db.transaction((folderId) => {
+  // Collect all descendant folder IDs (BFS)
+  const ids = [folderId];
+  const queue = [folderId];
+  while (queue.length > 0) {
+    const children = db.prepare('SELECT id FROM folders WHERE parent_id = ?').all(queue.shift());
+    for (const child of children) {
+      ids.push(child.id);
+      queue.push(child.id);
+    }
+  }
+  // Move files in these folders to root
+  for (const id of ids) {
+    db.prepare('UPDATE files SET folder_id = NULL WHERE folder_id = ?').run(id);
+  }
+  // Delete all collected folders
+  for (const id of ids) {
+    db.prepare('DELETE FROM folders WHERE id = ?').run(id);
+  }
+  return { deleted_folders: ids.length };
+});
+
+// ── CC Metrics ──────────────────────────────────────────
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS cc_metrics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  agent TEXT NOT NULL,
+  event TEXT NOT NULL,
+  session_id TEXT,
+  timestamp TEXT NOT NULL,
+  tool_name TEXT,
+  tool_input TEXT,
+  tool_response TEXT,
+  model TEXT,
+  reason TEXT,
+  error TEXT,
+  extra_json TEXT,
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_cc_metrics_agent ON cc_metrics(agent);
+CREATE INDEX IF NOT EXISTS idx_cc_metrics_event ON cc_metrics(event);
+CREATE INDEX IF NOT EXISTS idx_cc_metrics_ts ON cc_metrics(timestamp);
+`);
+
+const insertMetricStmt = db.prepare(`
+  INSERT INTO cc_metrics (agent, event, session_id, timestamp, tool_name, tool_input, tool_response, model, reason, error, extra_json)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
+export function insertMetric({ agent, event, session_id, timestamp, tool_name, tool_input, tool_response, model, reason, error, extra }) {
+  insertMetricStmt.run(
+    agent, event, session_id || null, timestamp,
+    tool_name || null,
+    tool_input ? JSON.stringify(tool_input).slice(0, 2000) : null,
+    tool_response ? JSON.stringify(tool_response).slice(0, 2000) : null,
+    model || null,
+    reason || null,
+    error || null,
+    extra ? JSON.stringify(extra) : null
+  );
+}
+
+export function getMetrics({ agent, event, since, limit = 100 }) {
+  let where = [];
+  let params = [];
+  if (agent) { where.push('agent = ?'); params.push(agent); }
+  if (event) { where.push('event = ?'); params.push(event); }
+  if (since) { where.push('timestamp >= ?'); params.push(since); }
+  const clause = where.length ? 'WHERE ' + where.join(' AND ') : '';
+  return db.prepare(`SELECT * FROM cc_metrics ${clause} ORDER BY timestamp DESC LIMIT ?`).all(...params, limit);
+}
+
+export function getMetricsSummary(window = '1h') {
+  const ms = window === '24h' ? 86400000 : window === '6h' ? 21600000 : 3600000;
+  const since = new Date(Date.now() - ms).toISOString();
+
+  const byAgent = db.prepare(`
+    SELECT agent,
+      COUNT(*) as total_events,
+      SUM(CASE WHEN event = 'PostToolUse' THEN 1 ELSE 0 END) as tool_calls,
+      SUM(CASE WHEN event = 'StopFailure' THEN 1 ELSE 0 END) as failures,
+      MAX(timestamp) as last_seen
+    FROM cc_metrics WHERE timestamp >= ?
+    GROUP BY agent ORDER BY total_events DESC
+  `).all(since);
+
+  const byEvent = db.prepare(`
+    SELECT event, COUNT(*) as count
+    FROM cc_metrics WHERE timestamp >= ?
+    GROUP BY event ORDER BY count DESC
+  `).all(since);
+
+  return { window, since, byAgent, byEvent };
+}
+
+export function cleanupOldMetrics(days = 7) {
+  const cutoff = new Date(Date.now() - days * 86400000).toISOString();
+  return db.prepare('DELETE FROM cc_metrics WHERE timestamp < ?').run(cutoff);
 }
 
 // ── Notifications ───────────────────────────────────────
