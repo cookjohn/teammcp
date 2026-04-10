@@ -4,7 +4,7 @@
  */
 import { ref, computed } from 'vue'
 
-export function useChannelsStore(api) {
+export function useChannelsStore(api, agentName) {
   // ── State ──────────────────────────────────────────────
   const channels = ref([])
   const currentChannelId = ref(null)
@@ -85,7 +85,19 @@ export function useChannelsStore(api) {
       method: 'POST',
       body: JSON.stringify(body)
     })
-    // SSE will handle appending, but optimistically add if no SSE
+    // Server SSE doesn't push message back to sender, so add it locally
+    if (data && data.id) {
+      handleMessage({
+        id: data.id,
+        channel: currentChannelId.value,
+        from: agentName.value,
+        content,
+        timestamp: data.timestamp || new Date().toISOString(),
+        replyTo: replyTo || null,
+        mentions: mentions || [],
+        metadata: data.metadata || null
+      })
+    }
     return data
   }
 

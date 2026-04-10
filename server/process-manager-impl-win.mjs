@@ -5,6 +5,7 @@
 
 import { exec, execSync } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync, readFileSync, unlinkSync, copyFileSync, readdirSync, statSync, lstatSync, cpSync, symlinkSync, linkSync, watch, rmSync, renameSync } from 'node:fs';
+import pty from 'node-pty';
 
 // Doc-A v1.6 §11 dedupe (§6 #13): Path A constants moved to path-a-constants.mjs.
 // Do NOT inline new Path A magic numbers here — extend path-a-constants.mjs instead.
@@ -458,13 +459,8 @@ export async function startAgent(name) {
     }
   }
 
-  // Windows: use Windows Terminal with new window and title for tracking
-  // Generate a startup script to avoid multi-layer argument escaping issues
-  const windowTitle = `Agent-${name}`;
-  const startScript = join(agentDir, '_start_fakechat.ps1');
+  // node-pty: build env object and spawn directly (no .ps1 generation, no wt.exe)
   const pidFile = join(agentDir, '.agent.pid');
-  const useResume = false; // Channel mode: always fresh session
-  const continueFlag = '';
 
   // If agent needs ccrouter, ensure it's running and override api_base_url
   // Only providers that need request transformation (openrouter) require ccrouter.
@@ -483,29 +479,24 @@ export async function startAgent(name) {
     // else: use provider's direct base_url (no ccrouter needed)
   }
 
-  // Build startup script with PowerShell $env: syntax (inherited by child processes)
-  const ps1Lines = [
-    `Set-Location "${agentDir}"`,
-    `$env:CLAUDE_CONFIG_DIR = "${configDir}"`,
-    `$env:CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1"`,
-  ];
+  // Build env object for node-pty (replaces PowerShell $env: lines)
+  const ptyEnv = {
+    ...process.env,
+    CLAUDE_CONFIG_DIR: configDir,
+    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
+    AGENT_NAME: name,
+    TEAMMCP_URL: serverUrl,
+  };
   if (agentKey) {
-    ps1Lines.push(`$env:TEAMMCP_KEY = ${psSingleQuote(agentKey)}`);
-    ps1Lines.push(`$env:AGENT_NAME = ${psSingleQuote(name)}`);
+    ptyEnv.TEAMMCP_KEY = agentKey;
   }
-  ps1Lines.push(`$env:TEAMMCP_URL = ${psSingleQuote(serverUrl)}`);
   if (effectiveAgentInfo && effectiveAgentInfo.auth_mode === 'api_key') {
-    ps1Lines.push(`$env:ANTHROPIC_API_KEY = ''`);
-    ps1Lines.push(`$env:CLAUDE_CODE_OAUTH_TOKEN = 'channel-gate-bypass'`);
-    if (effectiveAgentInfo.api_base_url) ps1Lines.push(`$env:ANTHROPIC_BASE_URL = ${psSingleQuote(effectiveAgentInfo.api_base_url)}`);
-    if (effectiveAgentInfo.api_auth_token) ps1Lines.push(`$env:ANTHROPIC_AUTH_TOKEN = ${psSingleQuote(effectiveAgentInfo.api_auth_token)}`);
-    if (effectiveAgentInfo.api_model) ps1Lines.push(`$env:ANTHROPIC_MODEL = ${psSingleQuote(effectiveAgentInfo.api_model)}`);
+    ptyEnv.ANTHROPIC_API_KEY = '';
+    ptyEnv.CLAUDE_CODE_OAUTH_TOKEN = 'channel-gate-bypass';
+    if (effectiveAgentInfo.api_base_url) ptyEnv.ANTHROPIC_BASE_URL = effectiveAgentInfo.api_base_url;
+    if (effectiveAgentInfo.api_auth_token) ptyEnv.ANTHROPIC_AUTH_TOKEN = effectiveAgentInfo.api_auth_token;
+    if (effectiveAgentInfo.api_model) ptyEnv.ANTHROPIC_MODEL = effectiveAgentInfo.api_model;
   }
-  const channelFlag = '--channels plugin:fakechat@claude-plugins-official';
-  // Doc-C Layer 3 v0.2: stdout NOT piped — TTY preserved, CC session jsonl used by watcher
-  // Permission mode: TestDev uses 'default' for channel permission testing; all others bypass
-  const permFlags = (name === 'TestDev') ? '--permission-mode default' : '--dangerously-skip-permissions --permission-mode bypassPermissions';
-  ps1Lines.push(`claude ${continueFlag}${permFlags} ${channelFlag}`);
 
   // Path A: inject refreshToken-null credentials for path_a agents
   {
@@ -584,35 +575,59 @@ export async function startAgent(name) {
     }
   }
 
-  writeFileSync(startScript, ps1Lines.join('\r\n') + '\r\n', 'utf-8');
+  // node-pty spawn — replaces wt.exe + .ps1 generation
+  const claudeCmd = join(process.env.APPDATA || '', 'npm', 'claude.cmd');
+  const claudeArgs = [
+    '--dangerously-skip-permissions',
+    '--permission-mode', 'bypassPermissions',
+    '--channels', 'plugin:fakechat@claude-plugins-official'
+  ];
 
-  const psCmd = `$p = Start-Process -FilePath 'wt.exe' -ArgumentList '--window new --title ${windowTitle} powershell -ExecutionPolicy Bypass -File ""${startScript}""' -PassThru; Write-Output $p.Id`;
+  const proc = pty.spawn(claudeCmd, claudeArgs, {
+    name: 'xterm-256color',
+    cols: 120,
+    rows: 30,
+    cwd: agentDir,
+    env: ptyEnv
+  });
 
-  const stdout = await execPS(psCmd);
-  const wtPid = parseInt(stdout, 10);
-  if (!wtPid || isNaN(wtPid)) {
-    throw Object.assign(new Error('Failed to get process PID'), { statusCode: 500 });
+  // Register output into pty-manager for Dashboard WebSocket bridge
+  try {
+    const { attachPtyOutput } = await import('./pty-manager.mjs');
+    attachPtyOutput(name, proc);
+  } catch (e) {
+    console.error(`[start-agent] attachPtyOutput failed for ${name}:`, e.message);
   }
 
-  // Wait briefly then find the powershell.exe child running _start_fakechat.ps1 and save its PID
-  await new Promise(r => setTimeout(r, 3000));
-  try {
-    const findPid = await execPSFile(`Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*\\${name}\\_start_fakechat.ps1*' -and $_.Name -eq 'powershell.exe' } | Select-Object -First 1 -ExpandProperty ProcessId`);
-    const cmdPid = parseInt(findPid.trim(), 10);
-    if (cmdPid && !isNaN(cmdPid)) {
-      writeFileSync(pidFile, String(cmdPid), 'utf-8');
+  // Lifecycle: onExit → cleanup + crash detection
+  proc.onExit(({ exitCode }) => {
+    console.log(`[pty] ${name} exited (code ${exitCode})`);
+    processes.delete(name);
+    try { unlinkSync(pidFile); } catch {}
+    if (!isStopped(name)) {
+      // Non-intentional exit — trigger crash detection / auto-restart via SSE
+      import('./sse.mjs').then(({ pushToAgents }) => {
+        pushToAgents(['CEO'], {
+          type: 'status',
+          agent: name,
+          status: 'offline',
+          exitCode,
+          timestamp: new Date().toISOString()
+        });
+      }).catch(() => {});
     }
-  } catch {}
+  });
 
-  processes.set(name, { pid: wtPid, windowTitle: `Agent-${name}`, startedAt: new Date().toISOString() });
-  return { pid: wtPid };
+  // PID record
+  writeFileSync(pidFile, String(proc.pid), 'utf-8');
+  processes.set(name, { pid: proc.pid, ptyHandle: proc, startedAt: new Date().toISOString() });
+  return { pid: proc.pid };
 }
 
 /**
- * Stop an agent process by finding its window title.
- * Uses window title "Agent-{name}" to locate the process, independent of
- * in-memory PID tracking. Works even after server restart or for manually
- * started agents, as long as the window title matches.
+ * Stop an agent process.
+ * Primary: node-pty kill via ptyHandle.
+ * Fallback: taskkill by PID file or tracked PID.
  */
 export async function stopAgent(name) {
   if (!SAFE_NAME_RE.test(name)) {
@@ -623,13 +638,34 @@ export async function stopAgent(name) {
     throw Object.assign(new Error('AGENTS_BASE_DIR not set'), { statusCode: 500 });
   }
 
+  markStopped(name); // Suppress crash detection for intentional stops
+
   const agentDir = join(AGENTS_BASE_DIR, name);
   const pidFile = join(agentDir, '.agent.pid');
-  const safeName = name.replace(/'/g, "''");
   let killed = false;
 
-  // Method 1: Read .agent.pid file and kill process tree
-  if (existsSync(pidFile)) {
+  const entry = processes.get(name);
+
+  // Method 1: node-pty kill (preferred)
+  if (entry?.ptyHandle) {
+    try {
+      entry.ptyHandle.kill();
+      killed = true;
+    } catch (e) {
+      console.log(`[pty] kill ${name} failed: ${e.message}, falling back to taskkill`);
+    }
+  }
+
+  // Method 2: taskkill by tracked PID
+  if (!killed && entry?.pid) {
+    try {
+      exec(`taskkill /PID ${entry.pid} /T /F`, { shell: 'cmd.exe' });
+      killed = true;
+    } catch {}
+  }
+
+  // Method 3: Read .agent.pid file and kill process tree (fallback for restart recovery)
+  if (!killed && existsSync(pidFile)) {
     try {
       const pid = parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
       if (pid && !isNaN(pid)) {
@@ -637,36 +673,17 @@ export async function stopAgent(name) {
         killed = true;
       }
     } catch {}
-    try { unlinkSync(pidFile); } catch {}
   }
 
-  // Method 2: Find by CommandLine matching (fallback)
-  if (!killed) {
-    try {
-      const psScript = `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*agents\\${safeName}*' -or $_.CommandLine -like '*Agent-${safeName}*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue; $_.ProcessId }`;
-      const stdout = await execPSFile(psScript);
-      const killedPids = stdout.trim().split('\n').filter(s => s.trim()).map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
-      if (killedPids.length > 0) killed = true;
-    } catch {}
-  }
-
-  // Method 3: Tracked PID from memory (last resort)
-  const proc = processes.get(name);
-  if (proc && proc.pid) {
-    exec(`taskkill /PID ${proc.pid} /T /F`, { shell: 'cmd.exe' });
-    killed = true;
-  }
+  // Cleanup
+  try { unlinkSync(pidFile); } catch {}
   processes.delete(name);
   try { clearAuthMonitorAgent(name); } catch {}
-
-  // Note: Don't kill WindowsTerminal.exe — multiple agents may share the same WT process.
-  // WT windows auto-close via closeOnExit:always when the agent process ends.
 
   if (!killed) {
     console.warn(`[stopAgent] No running process found for "${name}", marking as stopped`);
   }
 
-  markStopped(name); // Suppress crash detection for intentional stops
   return { stopped: name };
 }
 

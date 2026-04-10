@@ -67,7 +67,7 @@ const wechatExpanded = ref(false)
 
 // ── API & Stores ────────────────────────────────────────
 const { api, post, del } = useApi(() => auth.apiKey.value)
-const channelsStore = useChannelsStore(api)
+const channelsStore = useChannelsStore(api, auth.agentName)
 const agentsStore = useAgentsStore(api)
 const tasksStore = useTasksStore(api)
 
@@ -439,7 +439,7 @@ const unreadCounts = computed(() => channelsStore.unreadCounts.value)
       </div>
 
       <div v-else-if="currentView === 'terminal'" class="view-panel">
-        <TerminalView agent="TestDev" />
+        <TerminalView />
       </div>
     </main>
   </div>
