@@ -39,10 +39,12 @@ import { requireAuth } from './auth.mjs';
 import { redactHeaders, redactBody } from './redact.mjs';
 import {
   addConnection, pushToAgent, pushToAgents,
+  pushWithPriority, pushWithPriorityToAgents,
   broadcastStatus, sendMissedMessages, isOnline, getOnlineAgents,
   pushAgentOutput, getAgentOutputBuffer,
   pushAgentError, getAgentErrorBuffer,
-  pushSessionEvent
+  pushSessionEvent,
+  determinePriority
 } from './sse.mjs';
 import { startAgent, stopAgent, screenshotAgent, sendKeysToAgent, getAgentProcessStatus, checkProcessPermission } from './process-manager.mjs';
 import { publish } from './eventbus.mjs';
@@ -304,6 +306,20 @@ export async function handleRequest(req, res) {
       return json(res, { agents_count: allAgents.length, needs_setup: allAgents.length === 0, server_version: '1.0.0' });
     }
 
+    // ── GET /api/pty-daemon/health (no auth required) ─────
+    if (method === 'GET' && path === '/api/pty-daemon/health') {
+      const { getHealthStatus } = await import('./pty-daemon-client.mjs');
+      const health = getHealthStatus();
+      const statusCode = health.connected ? 200 : 503;
+      res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        connected: health.connected,
+        daemon: health.daemonInfo,
+        failures: health.failures,
+      }));
+      return;
+    }
+
     // ── Credential management API (no auth required for login, status is public) ──
     if (method === 'GET' && path === '/api/auth/status') {
       const { getCredentialStatus } = await import('./credential-manager.mjs');
@@ -330,10 +346,10 @@ export async function handleRequest(req, res) {
     // (verifyHmacBearer in credential-lease.mjs), not the standard TeamMCP API key.
     const isCredentialRoute = path.startsWith('/api/credentials/');
     const isDashboardCredRoute = path.startsWith('/api/dashboard/credentials/');
-    const isPtySessionsRoute = path === '/api/pty-sessions';
     if (path.startsWith('/api/') && path !== '/api/register' && path !== '/api/health' && path !== '/api/setup-status'
+      && path !== '/api/pty-daemon/health'
       && path !== '/api/auth/status' && path !== '/api/auth/login/start' && path !== '/api/auth/login/complete'
-      && !isCredentialRoute && !isDashboardCredRoute && !isPtySessionsRoute) {
+      && !isCredentialRoute && !isDashboardCredRoute) {
       if (!requireAuth(req, res)) return;
     }
 
@@ -401,12 +417,6 @@ export async function handleRequest(req, res) {
       }
       setAgentAuthStrategy(agentName, auth_strategy);
       return json(res, { ok: true, agent: agentName, auth_strategy });
-    }
-
-    // ── GET /api/pty-sessions ──
-    if (method === 'GET' && path === '/api/pty-sessions') {
-      const { getPtyNames } = await import('./pty-manager.mjs');
-      return json(res, { sessions: getPtyNames() });
     }
 
     // ── GET /api/wechat/status ──
@@ -539,7 +549,39 @@ export async function handleRequest(req, res) {
       }
 
       const mentions = body.mentions || [];
-      const msg = saveMessage(channelId, req.agent.name, body.content, mentions, body.replyTo, body.metadata);
+
+      // ── Priority handling ──────────────────────────────
+      let priority = body.priority;
+      let priorityDowngraded = false;
+      let originalPriority;
+      const PRIORITY_PRIVILEGED = ['Chairman', 'CEO', 'System'];
+
+      // Validate explicit priority value
+      if (priority !== undefined && priority !== null && !['now', 'next', 'later'].includes(priority)) {
+        return json(res, { error: 'Invalid priority. Must be "now", "next", or "later".' }, 400);
+      }
+
+      // Permission check: downgrade "now" from non-privileged senders
+      if (priority === 'now' && !PRIORITY_PRIVILEGED.includes(req.agent.name)) {
+        originalPriority = priority;
+        priority = 'next';
+        priorityDowngraded = true;
+        console.warn(`[priority] Downgraded "now" → "next" for non-privileged sender ${req.agent.name}`);
+      }
+
+      // Auto-determine priority if not explicitly set
+      if (!priority) {
+        priority = determinePriority({
+          sender: req.agent.name,
+          explicitPriority: undefined,
+          channelType: channel.type,
+          mentions,
+          replyTo: body.replyTo,
+          metadata: body.metadata
+        });
+      }
+
+      const msg = saveMessage(channelId, req.agent.name, body.content, mentions, body.replyTo, body.metadata, priority);
 
       // ── Push per design doc section 7 ──────────────
       const event = {
@@ -561,7 +603,7 @@ export async function handleRequest(req, res) {
         // DM: push to the other party
         const parts = channelId.split(':');  // dm:agent1:agent2
         const other = parts[1] === req.agent.name ? parts[2] : parts[1];
-        pushToAgent(other, event);
+        pushWithPriority(other, event, priority);
         // Update read_status for online recipient (delivered = read in SSE model)
         if (isOnline(other)) updateReadStatus(other, channelId, msg.id);
 
@@ -603,7 +645,7 @@ export async function handleRequest(req, res) {
         const groupMembers = ensureChairman(getChannelMembers(channelId).filter(m => m !== req.agent.name), req.agent.name);
         // Warn if mentioned agents are not in this channel
         const notInChannel = (mentions || []).filter(m => m !== req.agent.name && !groupMembers.includes(m) && getAgentByName(m));
-        pushToAgents(groupMembers, event);
+        pushWithPriorityToAgents(groupMembers, event, priority);
         // Update read_status for online recipients to prevent duplicates on reconnect
         for (const a of groupMembers) {
           if (isOnline(a)) updateReadStatus(a, channelId, msg.id);
@@ -614,7 +656,7 @@ export async function handleRequest(req, res) {
             // Auto-add mentioned agents to channel and push message
             for (const m of notInChannel) {
               addChannelMember(channelId, m);
-              pushToAgent(m, event);
+              pushWithPriority(m, event, priority);
               if (isOnline(m)) updateReadStatus(m, channelId, msg.id);
             }
             pushToAgent(req.agent.name, {
@@ -649,7 +691,7 @@ export async function handleRequest(req, res) {
       } else if (channel.type === 'topic') {
         // Topic: push to all subscribers except sender + always include Chairman (admin oversight)
         const topicTargets = ensureChairman(getChannelMembers(channelId).filter(m => m !== req.agent.name), req.agent.name);
-        pushToAgents(topicTargets, event);
+        pushWithPriorityToAgents(topicTargets, event, priority);
         // Update read_status for online recipients
         for (const a of topicTargets) {
           if (isOnline(a)) updateReadStatus(a, channelId, msg.id);
@@ -684,7 +726,12 @@ export async function handleRequest(req, res) {
         }
       }
 
-      return json(res, { id: msg.id, timestamp: msg.created_at });
+      return json(res, {
+        id: msg.id,
+        timestamp: msg.created_at,
+        priority,
+        ...(priorityDowngraded ? { priority_downgraded: true, original_priority: originalPriority } : {})
+      });
     }
 
     // ── PUT /api/messages/:id (edit message) ──────────
@@ -1648,7 +1695,7 @@ export async function handleRequest(req, res) {
       if (task.assignee && task.assignee !== req.agent.name) {
         const dmCh = getOrCreateDmChannel(req.agent.name, task.assignee);
         const dmContent = `📌 New task assigned to you: **${task.title}** [${task.priority}]\nTask ID: ${task.id}`;
-        const dmMsg = saveMessage(dmCh.id, req.agent.name, dmContent, [task.assignee]);
+        const dmMsg = saveMessage(dmCh.id, req.agent.name, dmContent, [task.assignee], null, null, 'next');
         pushToAgent(task.assignee, { type: 'message', channel: dmCh.id, from: req.agent.name, content: dmContent, mentions: [task.assignee], id: dmMsg.id, timestamp: dmMsg.created_at });
         if (isOnline(task.assignee)) updateReadStatus(task.assignee, dmCh.id, dmMsg.id);
         updateReadStatus(req.agent.name, dmCh.id, dmMsg.id);
@@ -1777,7 +1824,12 @@ export async function handleRequest(req, res) {
       // Merge progress into metadata
       if (body.progress !== undefined) {
         let meta = {};
-        try { meta = JSON.parse(task.metadata || '{}'); } catch {}
+        try {
+          meta = JSON.parse(task.metadata || '{}');
+          // Handle double-encoded JSON strings
+          if (typeof meta === 'string') meta = JSON.parse(meta);
+        } catch {}
+        if (typeof meta !== 'object' || meta === null) meta = {};
         meta.progress = body.progress;
         body.metadata = JSON.stringify(meta);
         delete body.progress;
@@ -1825,7 +1877,7 @@ export async function handleRequest(req, res) {
 
       for (const [target, dmContent] of notifyTargets) {
         const dmCh = getOrCreateDmChannel(agentName, target);
-        const dmMsg = saveMessage(dmCh.id, agentName, dmContent, [target]);
+        const dmMsg = saveMessage(dmCh.id, agentName, dmContent, [target], null, null, 'next');
         pushToAgent(target, { type: 'message', channel: dmCh.id, from: agentName, content: dmContent, mentions: [target], id: dmMsg.id, timestamp: dmMsg.created_at });
         if (isOnline(target)) updateReadStatus(target, dmCh.id, dmMsg.id);
         updateReadStatus(agentName, dmCh.id, dmMsg.id);

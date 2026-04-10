@@ -83,6 +83,33 @@ const MAX_RESTARTS = 3;
 const RESTART_WINDOW_MS = 5 * 60_000;
 const restartHistory = new Map(); // agentName → [timestamp, ...]
 
+// ── Batch merge window (Phase 2) ─────────────────────────
+const BATCH_ENABLED = process.env.TEAMMCP_BATCH_ENABLED === 'true';
+const BATCH_WINDOW_MS = parseInt(process.env.TEAMMCP_BATCH_WINDOW_MS || '2000', 10);
+const MAX_BATCH_SIZE = 20;
+const NOW_TTL_MS = parseInt(process.env.TEAMMCP_NOW_TTL_MS || '300000', 10); // 5 min default
+
+// Per-agent batch buffer: agentName → { timer, messages: [{data, priority}], windowStart }
+const agentBatchBuffers = new Map();
+
+// Global token bucket for push rate limiting (design doc 12.4)
+const TOKEN_BUCKET_RATE = 100; // tokens per second
+const TOKEN_BUCKET_MAX = 100;
+let tokenBucket = TOKEN_BUCKET_MAX;
+let lastTokenRefill = Date.now();
+
+function consumeToken() {
+  const now = Date.now();
+  const elapsed = (now - lastTokenRefill) / 1000;
+  tokenBucket = Math.min(TOKEN_BUCKET_MAX, tokenBucket + elapsed * TOKEN_BUCKET_RATE);
+  lastTokenRefill = now;
+  if (tokenBucket >= 1) {
+    tokenBucket -= 1;
+    return true;
+  }
+  return false;
+}
+
 /**
  * Register an SSE connection for an agent.
  */
@@ -99,6 +126,13 @@ function removeConnection(agentName, res) {
       connections.delete(agentName);
       setAgentStatus(agentName, 'offline');
       log(`${agentName} disconnected`);
+      // Clean up batch buffer (messages already persisted in DB, will replay on reconnect)
+      const batchBuf = agentBatchBuffers.get(agentName);
+      if (batchBuf) {
+        if (batchBuf.timer) clearTimeout(batchBuf.timer);
+        agentBatchBuffers.delete(agentName);
+        log(`${agentName}: batch buffer cleared (${batchBuf.messages.length} pending msgs discarded)`);
+      }
       scheduleCrashDetection(agentName);
     }
   }
@@ -283,6 +317,149 @@ export function addConnection(agentName, res) {
 }
 
 /**
+ * Determine message priority based on sender, channel type, mentions, and metadata.
+ * Priority levels: "now" (immediate), "next" (soon), "later" (batch-eligible).
+ *
+ * Resolution chain (first match wins):
+ *  1. Privileged sender (Chairman/CEO/System) explicitly requesting "now" → honor it
+ *  2. Chairman messages are always urgent — top of command chain
+ *  3. System critical alerts (e.g. server down) need immediate attention
+ *  4. Any sender may explicitly request "next" or "later"
+ *  5. DMs are person-to-person, likely actionable → elevated priority
+ *  6. @mentions signal the recipient is directly needed
+ *  7. Approval requests block workflows, should not wait
+ *  8. Everything else (general group chat) can be batched
+ */
+export function determinePriority({ sender, explicitPriority, channelType, mentions, replyTo, metadata }) {
+  const PRIVILEGED = ['Chairman', 'CEO', 'System'];
+
+  // 1. Privileged sender explicitly requesting "now" — trusted authority
+  if (explicitPriority === 'now' && PRIVILEGED.includes(sender)) return 'now';
+
+  // 2. Chairman messages always interrupt — highest authority in command chain
+  if (sender === 'Chairman') return 'now';
+
+  // 3. System critical alerts (e.g. crash, security breach) — must page immediately
+  if (sender === 'System' && metadata?.level === 'critical') return 'now';
+
+  // 4. Explicit "next"/"later" from any sender — respect stated intent
+  if (explicitPriority === 'next' || explicitPriority === 'later') return explicitPriority;
+
+  // 5. DMs are direct conversations — likely require action from recipient
+  if (channelType === 'dm') return 'next';
+
+  // 6. @mentions signal the recipient is specifically needed in the discussion
+  if (mentions && mentions.length > 0) return 'next';
+
+  // 7. Approval requests block downstream workflows — don't let them sit
+  if (metadata?.type === 'approval_request') return 'next';
+
+  // 8. Default: general group chat without direct relevance → batch-eligible
+  return 'later';
+}
+
+/**
+ * Flush an agent's batch buffer and push via SSE.
+ * @param {string} agentName
+ * @param {boolean} interrupt - true if triggered by a "now" message
+ */
+function flushBatch(agentName, interrupt = false) {
+  const buf = agentBatchBuffers.get(agentName);
+  if (!buf || buf.messages.length === 0) return;
+
+  // Clear timer
+  if (buf.timer) {
+    clearTimeout(buf.timer);
+    buf.timer = null;
+  }
+
+  const messages = buf.messages.map(m => m.data);
+
+  if (messages.length === 1) {
+    // Single message: use old format for backward compatibility (design doc 4.2)
+    pushToAgent(agentName, messages[0]);
+  } else {
+    // Batch format
+    pushToAgent(agentName, {
+      type: 'message_batch',
+      interrupt,
+      count: messages.length,
+      messages
+    });
+  }
+
+  // Reset buffer
+  buf.messages = [];
+  buf.windowStart = 0;
+
+  log(`⚡ ${agentName}: flushed batch (${messages.length} msgs, interrupt=${interrupt})`);
+}
+
+/**
+ * Push a message with priority-aware batching.
+ * - "now": cancel timer, merge buffered msgs + now msg, flush immediately with interrupt=true
+ * - "next"/"later": add to buffer, start/respect timer, flush on timer or MAX_BATCH_SIZE
+ *
+ * When BATCH_ENABLED=false, falls through to pushToAgent directly.
+ */
+export function pushWithPriority(agentName, data, priority = 'later') {
+  // Feature gate: when disabled, use original push path
+  if (!BATCH_ENABLED) {
+    return pushToAgent(agentName, data);
+  }
+
+  // Ensure buffer exists
+  if (!agentBatchBuffers.has(agentName)) {
+    agentBatchBuffers.set(agentName, { timer: null, messages: [], windowStart: 0 });
+  }
+  const buf = agentBatchBuffers.get(agentName);
+
+  if (priority === 'now') {
+    // Now message: flush everything immediately (design doc 3.4)
+    // Cancel existing timer
+    if (buf.timer) {
+      clearTimeout(buf.timer);
+      buf.timer = null;
+    }
+    // Prepend now message to existing buffer (now msg first)
+    buf.messages.unshift({ data, priority });
+    // Flush with interrupt
+    flushBatch(agentName, true);
+  } else {
+    // next/later: add to buffer
+    buf.messages.push({ data, priority });
+
+    // Check if buffer is full → force flush (design doc 3.5)
+    if (buf.messages.length >= MAX_BATCH_SIZE) {
+      flushBatch(agentName, false);
+      return;
+    }
+
+    // Start timer if not already running
+    if (!buf.timer) {
+      buf.windowStart = Date.now();
+      buf.timer = setTimeout(() => {
+        buf.timer = null;
+        flushBatch(agentName, false);
+      }, BATCH_WINDOW_MS);
+    }
+  }
+}
+
+/**
+ * Push to multiple agents with priority-aware batching.
+ * When BATCH_ENABLED=false, falls back to staggered pushToAgents.
+ */
+export function pushWithPriorityToAgents(agentNames, data, priority = 'later') {
+  if (!BATCH_ENABLED) {
+    return pushToAgents(agentNames, data);
+  }
+  for (const name of agentNames) {
+    pushWithPriority(name, data, priority);
+  }
+}
+
+/**
  * Push an SSE event to a specific agent.
  */
 export function pushToAgent(agentName, data) {
@@ -368,7 +545,30 @@ export function sendMissedMessages(agentName, channelIds) {
     if (count <= SUMMARY_THRESHOLD) {
       // Normal replay for small number of unread messages
       const missed = getUnreadMessages(agentName, chId);
+
+      // Separate by effective priority (now messages may decay per NOW_TTL_MS)
+      const nowMsgs = [];
+      const otherMsgs = [];
+      const nowTs = Date.now();
+
       for (const msg of missed) {
+        let effectivePriority = msg.priority || 'later';
+        if (msg.priority === 'now') {
+          try {
+            const msgAge = nowTs - new Date(msg.created_at).getTime();
+            if (Number.isNaN(msgAge) || msgAge > NOW_TTL_MS) effectivePriority = 'next';
+          } catch { effectivePriority = 'next'; }
+        }
+
+        if (effectivePriority === 'now') {
+          nowMsgs.push({ msg, priority: effectivePriority });
+        } else {
+          otherMsgs.push({ msg, priority: effectivePriority });
+        }
+      }
+
+      // Push "now" messages first, individually (design doc 8.2)
+      for (const { msg } of nowMsgs) {
         if (totalPushes >= MAX_TOTAL_PUSHES) break;
         const pushed = pushToAgent(agentName, {
           type: 'message',
@@ -378,11 +578,61 @@ export function sendMissedMessages(agentName, channelIds) {
           mentions: msg.mentions ? JSON.parse(msg.mentions) : [],
           id: msg.id,
           timestamp: msg.created_at,
-          replyTo: msg.reply_to || null
+          replyTo: msg.reply_to || null,
+          priority: 'now',
+          interrupt: true
         });
         if (pushed) {
           readUpdates.push({ agentName, channelId: chId, msgId: msg.id });
           totalPushes++;
+        }
+      }
+
+      // Push remaining messages
+      if (BATCH_ENABLED && otherMsgs.length > 1) {
+        // Batch mode: send as message_batch
+        const batchData = otherMsgs.map(({ msg, priority }) => ({
+          type: 'message',
+          channel: msg.channel_id,
+          from: msg.from_agent,
+          content: msg.content,
+          mentions: msg.mentions ? JSON.parse(msg.mentions) : [],
+          id: msg.id,
+          timestamp: msg.created_at,
+          replyTo: msg.reply_to || null,
+          priority
+        }));
+        const pushed = pushToAgent(agentName, {
+          type: 'message_batch',
+          interrupt: false,
+          count: batchData.length,
+          messages: batchData
+        });
+        if (pushed) {
+          for (const { msg } of otherMsgs) {
+            readUpdates.push({ agentName, channelId: chId, msgId: msg.id });
+          }
+          totalPushes += otherMsgs.length;
+        }
+      } else {
+        // Non-batch mode or single message: push individually
+        for (const { msg, priority } of otherMsgs) {
+          if (totalPushes >= MAX_TOTAL_PUSHES) break;
+          const pushed = pushToAgent(agentName, {
+            type: 'message',
+            channel: msg.channel_id,
+            from: msg.from_agent,
+            content: msg.content,
+            mentions: msg.mentions ? JSON.parse(msg.mentions) : [],
+            id: msg.id,
+            timestamp: msg.created_at,
+            replyTo: msg.reply_to || null,
+            priority
+          });
+          if (pushed) {
+            readUpdates.push({ agentName, channelId: chId, msgId: msg.id });
+            totalPushes++;
+          }
         }
       }
     } else {
@@ -417,7 +667,8 @@ export function sendMissedMessages(agentName, channelIds) {
           mentions: msg.mentions ? JSON.parse(msg.mentions) : [],
           id: msg.id,
           timestamp: msg.created_at,
-          replyTo: msg.reply_to || null
+          replyTo: msg.reply_to || null,
+          priority: 'now'
         });
         if (pushed) {
           readUpdates.push({ agentName, channelId: chId, msgId: msg.id });
@@ -483,6 +734,12 @@ export function closeAllConnections() {
     clearTimeout(timerId);
   }
   crashTimers.clear();
+
+  // Clear all batch buffers (messages already in DB)
+  for (const [name, buf] of agentBatchBuffers) {
+    if (buf.timer) clearTimeout(buf.timer);
+  }
+  agentBatchBuffers.clear();
 
   for (const [agentName, set] of connections) {
     for (const res of set) {

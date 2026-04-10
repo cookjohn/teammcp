@@ -107,6 +107,10 @@ try { db.exec('ALTER TABLE agents ADD COLUMN api_model TEXT'); } catch { /* colu
 
 try { db.exec('ALTER TABLE agents ADD COLUMN auth_strategy TEXT DEFAULT "legacy"'); } catch {}
 
+// Add priority column to messages for push optimization
+try { db.exec(`ALTER TABLE messages ADD COLUMN priority TEXT DEFAULT 'later'`); } catch { /* column already exists */ }
+db.exec('CREATE INDEX IF NOT EXISTS idx_messages_priority ON messages(priority)');
+
 db.exec(`
 CREATE TABLE IF NOT EXISTS credential_leases (
   lease_id TEXT PRIMARY KEY,
@@ -430,17 +434,18 @@ export function unescapeHtml(str) {
     .replace(/&amp;/g, '&');
 }
 
-export function saveMessage(channelId, fromAgent, content, mentions, replyTo, metadata) {
+export function saveMessage(channelId, fromAgent, content, mentions, replyTo, metadata, priority = 'later') {
   const id = `msg_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
   const now = new Date().toISOString();
   db.prepare(
-    `INSERT INTO messages (id, channel_id, from_agent, content, mentions, reply_to, metadata, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO messages (id, channel_id, from_agent, content, mentions, reply_to, metadata, priority, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id, channelId, fromAgent, content,
     mentions ? JSON.stringify(mentions) : null,
     replyTo || null,
     metadata ? JSON.stringify(metadata) : null,
+    priority,
     now
   );
   // Sync FTS index (store raw content for search)

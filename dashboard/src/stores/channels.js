@@ -124,14 +124,14 @@ export function useChannelsStore(api, agentName) {
 
   async function loadMembers(channelId) {
     const data = await api(`/api/channels/${encodeURIComponent(channelId)}/members`)
-    channelMembers.value = data || []
+    channelMembers.value = data?.members || []
     return data
   }
 
   async function addMember(agentName) {
     await api(`/api/channels/${encodeURIComponent(currentChannelId.value)}/members`, {
       method: 'POST',
-      body: JSON.stringify({ agent: agentName })
+      body: JSON.stringify({ agent_name: agentName })
     })
   }
 

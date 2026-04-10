@@ -80,6 +80,8 @@ function connect() {
 
   ws.onopen = () => {
     connected.value = true
+    // Sync current terminal dimensions to PTY immediately on connect
+    sendResize()
     term.write('\r\n[connected]\r\n')
   }
   ws.onmessage = (e) => { if (term) term.write(e.data) }
@@ -101,7 +103,14 @@ function sendResize() {
 async function selectAgent(name) {
   if (selectedAgent.value === name && connected.value) return
   selectedAgent.value = name
-  if (term) term.clear()
+  if (term) {
+    term.clear()
+    // Re-fit to ensure cols/rows are correct for the container
+    if (fitAddon) {
+      await nextTick()
+      fitAddon.fit()
+    }
+  }
   await nextTick()
   connect()
 }
@@ -136,9 +145,8 @@ onMounted(async () => {
     if (ws && ws.readyState === 1) ws.send(data)
   })
 
-  await fetchSessions()
-
-  // Open terminal DOM element after sessions load
+  // Open terminal DOM element BEFORE fetching sessions, so that
+  // fitAddon.fit() runs before any connect/sendResize call.
   await nextTick()
   if (termRef.value) {
     term.open(termRef.value)
@@ -151,6 +159,8 @@ onMounted(async () => {
     })
     resizeObserver.observe(termRef.value)
   }
+
+  await fetchSessions()
 
   // Refresh sessions every 10s
   const pollTimer = setInterval(fetchSessions, 10000)

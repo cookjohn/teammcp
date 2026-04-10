@@ -6,10 +6,47 @@ import { subscribe } from './eventbus.mjs';
 import { init as initCredentialManager, shutdown as shutdownCredentialManager } from './credential-manager.mjs';
 import { getAgentByName } from './db.mjs';
 import { normalizeAddr } from './auth-token-utils.mjs';
-import { spawnPty, attachWsServer } from './pty-manager.mjs';
+// ── PTY Daemon IPC (two-layer architecture) ────────────────
+import {
+  ensureDaemon,
+  startDaemonHealthMonitor,
+} from './daemon-launcher.mjs';
+import {
+  subscribeAll,
+  onPtyOutput,
+  onPtyExit,
+  isConnected as isDaemonConnected,
+  disconnectFromDaemon,
+} from './pty-daemon-client.mjs';
+import { attachWsServer } from './pty-manager.mjs';
 
 const PORT = process.env.TEAMMCP_PORT || 3100;
 const BIND_HOST = process.env.TEAMMCP_BIND_HOST || '0.0.0.0';
+const isDev = PORT === '3200' || PORT === 3200;
+
+// ── PTY Daemon connection (before HTTP listen) ─────────────
+let daemonConnected = false;
+
+try {
+  console.log('[TeamMCP] Connecting to PTY Daemon...');
+  const result = await ensureDaemon({ isDev });
+  daemonConnected = result.connected;
+  if (daemonConnected) {
+    console.log(`[TeamMCP] PTY Daemon connected (PID: ${result.pid}, spawned: ${result.spawned})`);
+    await subscribeAll();
+    console.log('[TeamMCP] Subscribed to all PTY output');
+    startDaemonHealthMonitor((health) => {
+      if (health.failures > 0) {
+        console.warn(`[TeamMCP] Daemon health: ${health.failures} consecutive failures`);
+      }
+    });
+  } else {
+    console.warn('[TeamMCP] WARNING: PTY Daemon not available, server starting without PTY support');
+  }
+} catch (err) {
+  console.error('[TeamMCP] PTY Daemon connection failed:', err.message);
+  console.warn('[TeamMCP] Server will start without PTY support');
+}
 
 const server = http.createServer((req, res) => {
   const start = Date.now();
@@ -39,16 +76,21 @@ server.listen(PORT, BIND_HOST, () => {
     },
   });
 
-  // ── PTY Terminal (PoC) ────────────────────────────────────
+  // ── PTY WebSocket Terminal (IPC-backed) ──────────────────
   attachWsServer(server);
-  try {
-    const agentsDir = process.env.TEAMMCP_AGENTS_DIR || 'C:/Users/ssdlh/Desktop/agents';
-    spawnPty('TestDev', 'powershell.exe', ['-NoLogo'], {
-      cwd: `${agentsDir}/TestDev`,
-      env: { ...process.env, CLAUDE_CONFIG_DIR: `${agentsDir}/TestDev/.claude` }
+  if (daemonConnected) {
+    onPtyOutput((agent, dataBuffer) => {
+      if (globalThis.__ptyWsBroadcast) {
+        globalThis.__ptyWsBroadcast(agent, dataBuffer);
+      }
     });
-  } catch (e) {
-    console.error('[pty] Failed to spawn TestDev:', e.message);
+    onPtyExit((agent, exitCode) => {
+      console.log(`[TeamMCP] PTY ${agent} exited (code ${exitCode})`);
+      if (globalThis.__onPtyExit) {
+        globalThis.__onPtyExit(agent, exitCode);
+      }
+    });
+    console.log('[TeamMCP] PTY event handlers wired');
   }
 });
 
@@ -295,7 +337,13 @@ function shutdown(signal) {
   }, 5000);
   forceTimer.unref();
 
-  // 1. Close all SSE connections first (unblocks server.close)
+  // 1. Disconnect from PTY Daemon (Daemon keeps running)
+  try {
+    disconnectFromDaemon();
+    console.log('[TeamMCP] PTY Daemon disconnected');
+  } catch {}
+
+  // 2. Close all SSE connections first (unblocks server.close)
   closeAllConnections();
   console.log('[TeamMCP] SSE connections closed');
 
