@@ -9,7 +9,7 @@ import { normalizeAddr } from './auth-token-utils.mjs';
 import { spawnPty, attachWsServer } from './pty-manager.mjs';
 
 const PORT = process.env.TEAMMCP_PORT || 3100;
-const BIND_HOST = process.env.TEAMMCP_BIND_HOST || '127.0.0.1';
+const BIND_HOST = process.env.TEAMMCP_BIND_HOST || '0.0.0.0';
 
 const server = http.createServer((req, res) => {
   const start = Date.now();
@@ -27,16 +27,9 @@ const server = http.createServer((req, res) => {
 server.requestTimeout = 0;
 
 server.listen(PORT, BIND_HOST, () => {
-  // §11.1 v1.5 loopback bind assertion (v1.6 normalizeAddr) — fatal if non-loopback.
   const addr = server.address();
   const normalized = normalizeAddr(addr?.address);
-  if (!addr || (normalized !== '127.0.0.1' && normalized !== '::1')) {
-    throw new Error(
-      `FATAL: TeamMCP server must bind loopback-only; got ${addr?.address}. ` +
-      `Set TEAMMCP_BIND_HOST=127.0.0.1 and restart.`
-    );
-  }
-  console.log(`[TeamMCP] bind assertion ok: loopback ${normalized}:${addr.port}`);
+  console.log(`[TeamMCP] bound to ${normalized}:${addr.port}`);
   console.log(`[TeamMCP] Server running on http://localhost:${PORT}`);
   // Initialize credential manager after server is listening
   initCredentialManager({

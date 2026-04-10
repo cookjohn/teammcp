@@ -65,6 +65,37 @@ export function getPtyNames() {
   return [...ptys.keys()];
 }
 
+/**
+ * Register a PTY process spawned by process-manager into the WebSocket bridge.
+ * Allows Dashboard terminal view to stream output from any agent PTY.
+ */
+const SCROLLBACK_LIMIT = 100000; // 100KB ring buffer per agent
+
+export function attachPtyOutput(name, proc) {
+  const entry = { pty: proc, clients: new Set(), scrollback: '' };
+
+  proc.onData((data) => {
+    // Buffer output for late-joining clients
+    entry.scrollback += data;
+    if (entry.scrollback.length > SCROLLBACK_LIMIT) {
+      entry.scrollback = entry.scrollback.slice(-SCROLLBACK_LIMIT);
+    }
+    for (const ws of entry.clients) {
+      if (ws.readyState === 1) ws.send(data);
+    }
+  });
+
+  proc.onExit(() => {
+    for (const ws of entry.clients) {
+      try { ws.close(1000, 'PTY exited'); } catch {}
+    }
+    ptys.delete(name);
+  });
+
+  ptys.set(name, entry);
+  console.log(`[pty] attached output for: ${name}`);
+}
+
 export function attachWsServer(httpServer) {
   const wss = new WebSocketServer({ noServer: true });
 
@@ -82,6 +113,8 @@ export function attachWsServer(httpServer) {
 
         const entry = ptys.get(agent);
         entry.clients.add(ws);
+        // Send buffered scrollback to late-joining client
+        if (entry.scrollback) ws.send(entry.scrollback);
         console.log(`[pty] client attached: ${agent} (${entry.clients.size} clients)`);
 
         ws.on('message', (msg) => {

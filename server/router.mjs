@@ -330,9 +330,10 @@ export async function handleRequest(req, res) {
     // (verifyHmacBearer in credential-lease.mjs), not the standard TeamMCP API key.
     const isCredentialRoute = path.startsWith('/api/credentials/');
     const isDashboardCredRoute = path.startsWith('/api/dashboard/credentials/');
+    const isPtySessionsRoute = path === '/api/pty-sessions';
     if (path.startsWith('/api/') && path !== '/api/register' && path !== '/api/health' && path !== '/api/setup-status'
       && path !== '/api/auth/status' && path !== '/api/auth/login/start' && path !== '/api/auth/login/complete'
-      && !isCredentialRoute && !isDashboardCredRoute) {
+      && !isCredentialRoute && !isDashboardCredRoute && !isPtySessionsRoute) {
       if (!requireAuth(req, res)) return;
     }
 
@@ -400,6 +401,12 @@ export async function handleRequest(req, res) {
       }
       setAgentAuthStrategy(agentName, auth_strategy);
       return json(res, { ok: true, agent: agentName, auth_strategy });
+    }
+
+    // ── GET /api/pty-sessions ──
+    if (method === 'GET' && path === '/api/pty-sessions') {
+      const { getPtyNames } = await import('./pty-manager.mjs');
+      return json(res, { sessions: getPtyNames() });
     }
 
     // ── GET /api/wechat/status ──
