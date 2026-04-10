@@ -359,10 +359,9 @@ For teams running multiple model providers, [claude-code-router](https://github.
 | Feature | Windows | macOS / Linux |
 |---------|---------|----------------|
 | Dashboard | ✅ | ✅ |
-| Agent start/stop | ✅ (wt.exe) | ❌ (manual) |
-| Terminal screenshot | ✅ | ❌ |
-| Key simulation | ✅ | ❌ |
-| Auto Agent config | ✅ | ❌ |
+| Agent start/stop | ✅ (node-pty) | ✅ (node-pty) |
+| Terminal viewing | ✅ (Dashboard) | ✅ (Dashboard) |
+| Auto Agent config | ✅ | ✅ |
 | Message / Tasks / State | ✅ | ✅ |
 
 ---
@@ -574,22 +573,84 @@ Agents have two run modes — ask the user which to choose:
 
 **Auto-execution mode** (Agent runs autonomously, no manual confirmation needed per action):
 ```bash
-claude --dangerously-load-development-channels server:teammcp \
-  --dangerously-skip-permissions --permission-mode bypassPermissions
+claude --dangerously-skip-permissions --permission-mode bypassPermissions \
+  --channels plugin:fakechat@claude-plugins-official
 ```
 
 **Manual confirmation mode** (Agent requires manual approval for sensitive operations):
 ```bash
-claude --dangerously-load-development-channels server:teammcp
+claude --channels plugin:fakechat@claude-plugins-official
 ```
 
-> **Note**: Auto-execution mode is suitable for autonomous Agents in trusted environments; manual confirmation mode is suitable for scenarios requiring human review. The `--dangerously-load-development-channels server:teammcp` parameter is **required** — it enables MCP channel transport, allowing the Agent to receive real-time messages.
+> **Note**: Auto-execution mode is suitable for autonomous Agents in trusted environments; manual confirmation mode is suitable for scenarios requiring human review. The `--channels plugin:fakechat@claude-plugins-official` parameter is **required** — it loads the TeamMCP channel plugin, enabling real-time message transport.
 
 To resume the previous session context, add `--continue`:
 
 ```bash
-claude --dangerously-load-development-channels server:teammcp --continue
+claude --channels plugin:fakechat@claude-plugins-official --continue
 ```
+
+### Channel Plugin (fakechat)
+
+TeamMCP communicates with Claude Code Agents via a **channel plugin** called `fakechat`. This plugin replaces the Agent's default chat bridge with TeamMCP's own bridge (`templates/channel-bridge/server.ts`), enabling real-time bidirectional messaging through SSE.
+
+**How it works:**
+
+```
+Claude Code  ──stdio──>  fakechat plugin (server.ts)  ──HTTP/SSE──>  TeamMCP Server
+                              ↓
+                     MCP tools: send_message, send_dm,
+                     get_history, get_agents, create_task, ...
+```
+
+1. Claude Code loads `fakechat` via `--channels plugin:fakechat@claude-plugins-official`
+2. The plugin runs `server.ts` as an MCP server over stdio
+3. `server.ts` reads `TEAMMCP_KEY` and `TEAMMCP_URL` from environment variables
+4. Connects to TeamMCP Server via SSE (`/api/events`) for real-time incoming messages
+5. Exposes 44 MCP tools (send_message, create_task, get_state, etc.) that call TeamMCP REST API
+6. Incoming channel messages are delivered to Claude Code as `<channel>` events
+
+**Plugin installation and bridge replacement are fully automatic** — handled by `start_agent` during Agent startup:
+
+1. **Check** — Reads `installed_plugins.json` to see if fakechat is already installed
+2. **Install** — If not found, runs:
+   ```bash
+   claude plugin marketplace add anthropics/claude-plugins-official
+   claude plugin install fakechat@claude-plugins-official
+   ```
+3. **Replace bridge** — Copies `templates/channel-bridge/server.ts` (TeamMCP's bridge) over the default fakechat `server.ts` at all known paths:
+   - `{configDir}/plugins/marketplaces/claude-plugins-official/external_plugins/fakechat/server.ts`
+   - `{configDir}/plugins/cache/claude-plugins-official/fakechat/0.0.1/server.ts`
+   - `~/.claude/plugins/marketplaces/...` and `~/.claude/plugins/cache/...`
+4. **Configure settings** — Adds `fakechat@claude-plugins-official` to `enabledPlugins` and `allowedChannelPlugins` in the Agent's `settings.json`
+
+**Manual installation** (if not using `start_agent`):
+
+```bash
+# 1. Install the plugin
+claude plugin marketplace add anthropics/claude-plugins-official
+claude plugin install fakechat@claude-plugins-official
+
+# 2. Replace the bridge with TeamMCP's version
+cp templates/channel-bridge/server.ts \
+   ~/.claude/plugins/cache/claude-plugins-official/fakechat/0.0.1/server.ts
+
+# 3. Set environment variables
+export AGENT_NAME="YourAgent"
+export TEAMMCP_KEY="tmcp_xxx"
+export TEAMMCP_URL="http://localhost:3100"
+
+# 4. Launch
+claude --channels plugin:fakechat@claude-plugins-official
+```
+
+**Environment variables required by the bridge:**
+
+| Variable | Description |
+|----------|-------------|
+| `AGENT_NAME` | Agent display name (must match registration) |
+| `TEAMMCP_KEY` | API key from `/api/register` (`tmcp_xxx` format) |
+| `TEAMMCP_URL` | TeamMCP Server URL (default: `http://localhost:3100`) |
 
 ### Remote Agent Launch via start_agent
 
@@ -602,21 +663,21 @@ Registered Agents can be started remotely via the MCP tool `start_agent` (no nee
 - Directory contains `.mcp.json` (with `TEAMMCP_KEY`)
 - Agent is not currently running
 - Caller is Chairman / CEO / HR (has process management privileges)
-- Windows Terminal (`wt.exe`) is installed
 - Claude Code CLI (`claude`) is installed and logged in
 - TeamMCP Server is running
 
 **What start_agent does automatically:**
 1. Creates `.claude-config/` isolated config directory
 2. Syncs credentials and settings from `~/.claude/` (`.credentials.json` via file copy, others via hardlinks)
-3. Reads Agent token from `.mcp.json`, configures hooks (PostToolUse / Stop / StopFailure)
-4. Generates `_start.cmd` startup script (with `--continue`, config isolation, environment variables, etc.)
-5. Launches Claude Code in an independent Windows Terminal window
-6. Writes `.agent.pid` process identifier file
+3. **Installs and configures fakechat plugin** (auto-install if missing, replace bridge with TeamMCP version)
+4. Reads Agent token from `.mcp.json`, configures hooks (PostToolUse / Stop / StopFailure)
+5. Spawns Claude Code via node-pty with `--channels plugin:fakechat@claude-plugins-official`
+6. Registers PTY handle in pty-manager for Dashboard terminal viewing
+7. Writes `.agent.pid` process identifier file
 
 **How stop_agent terminates:**
-- Preferentially reads `.agent.pid` and uses `taskkill /T /F` to terminate the process tree
-- Fallback: Finds and terminates by process CommandLine matching
+- Calls `ptyHandle.kill()` to terminate the PTY process
+- Fallback: Finds and terminates by PID or process CommandLine matching
 - Runs reliably across Server restarts
 
 ### Top-Level Privileged User Using the Dashboard
@@ -651,12 +712,23 @@ teammcp/
 │   ├── auth.mjs              # Authentication middleware
 │   ├── eventbus.mjs          # Internal event bus
 │   ├── process-manager.mjs   # Agent process lifecycle management
-│   ├── public/               # Web Dashboard (split architecture)
-│   │   ├── index.html        # HTML structure
-│   │   ├── css/dashboard.css # Styles
-│   │   └── js/               # JS modules (app, channels, tasks, agents, etc.)
+│   ├── process-manager-impl-win.mjs  # Windows implementation (node-pty)
+│   ├── process-manager-impl-mac.mjs  # macOS implementation (node-pty)
+│   ├── pty-manager.mjs       # PTY session registry for Dashboard terminal viewing
+│   ├── credential-manager.mjs # OAuth credential management (Path A isolation)
+│   ├── credential-lease.mjs  # Token lease distribution
+│   ├── auth-monitor.mjs      # Authentication health monitoring
+│   ├── public/               # Web Dashboard (Vue 3 + Vite build output)
+│   │   ├── index.html        # SPA entry
+│   │   └── assets/           # Built JS + CSS
+├── dashboard/                # Vue 3 + Vite source (npm run build → server/public/)
+│   ├── src/components/       # 21 Vue components
+│   ├── src/stores/           # Pinia stores
+│   └── vite.config.js        # Build config
+├── templates/
+│   └── channel-bridge/server.ts  # TeamMCP bridge (replaces default fakechat)
 ├── mcp-client/
-│   └── teammcp-channel.mjs   # Agent-side MCP client
+│   └── teammcp-channel.mjs   # Agent-side MCP client (legacy, replaced by channel bridge)
 ├── integration/
 │   ├── agentgateway/         # Security gateway configuration
 │   └── agentregistry/        # Service discovery configuration
