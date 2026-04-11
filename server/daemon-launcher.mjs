@@ -111,7 +111,8 @@ function spawnDaemon(isDev) {
   // Don't keep the parent alive if daemon is the only thing running
   child.unref();
 
-  writePidFile(isDev, child.pid);
+  // PID file is written by the daemon itself (pty-daemon.mjs writePidFile())
+  // Do NOT write it here — the daemon's checkExistingDaemon() would detect its own PID and exit
   console.log(`[daemon-launcher] Daemon spawned (PID: ${child.pid})`);
 
   return child.pid;

@@ -4,6 +4,8 @@ import { closeAllConnections, pushToAgents, getOnlineAgents } from './sse.mjs';
 import { closeDb, getOverdueTasks, markOverdueNotified, saveMessage, getAllAgents, getSchedulesDue, updateScheduleNextRun, getNextCronRun, getCheckInDueTasks, updateCheckIn, getDoingTasks, saveNotification, updateTaskMetadata, getChannelMembers, getChannel, getPendingTasksCount, setState } from './db.mjs';
 import { subscribe } from './eventbus.mjs';
 import { init as initCredentialManager, shutdown as shutdownCredentialManager } from './credential-manager.mjs';
+import { startMemoryEngine, stopMemoryEngine } from './memory.mjs';
+import db from './db.mjs';
 import { getAgentByName } from './db.mjs';
 import { normalizeAddr } from './auth-token-utils.mjs';
 // ── PTY Daemon IPC (two-layer architecture) ────────────────
@@ -64,9 +66,16 @@ const server = http.createServer((req, res) => {
 server.requestTimeout = 0;
 
 server.listen(PORT, BIND_HOST, () => {
+  // §11.1 v1.5 loopback bind assertion (v1.6 normalizeAddr) — fatal if non-loopback.
   const addr = server.address();
   const normalized = normalizeAddr(addr?.address);
-  console.log(`[TeamMCP] bound to ${normalized}:${addr.port}`);
+  if (!addr || (normalized !== '127.0.0.1' && normalized !== '::1')) {
+    throw new Error(
+      `FATAL: TeamMCP server must bind loopback-only; got ${addr?.address}. ` +
+      `Set TEAMMCP_BIND_HOST=127.0.0.1 and restart.`
+    );
+  }
+  console.log(`[TeamMCP] bind assertion ok: loopback ${normalized}:${addr.port}`);
   console.log(`[TeamMCP] Server running on http://localhost:${PORT}`);
   // Initialize credential manager after server is listening
   initCredentialManager({
@@ -91,6 +100,18 @@ server.listen(PORT, BIND_HOST, () => {
       }
     });
     console.log('[TeamMCP] PTY event handlers wired');
+  }
+
+  // ── Memory Engine (Phase 2) ──────────────────────────────
+  // H1 fix: fail-fast if MEMORY_LLM_KEY is not set
+  if (!process.env.MEMORY_LLM_KEY) {
+    console.warn('[TeamMCP] MEMORY_LLM_KEY not set — memory engine LLM features disabled (classify/summarize/ask will fail)');
+  }
+  try {
+    startMemoryEngine();
+    console.log('[TeamMCP] Memory engine started');
+  } catch (err) {
+    console.error('[TeamMCP] Memory engine failed to start:', err.message);
   }
 });
 
@@ -229,8 +250,8 @@ setInterval(() => {
       const onlineCount = onlineAgents.length;
       const pendingCount = getPendingTasksCount();
 
-      setState('teammcp-dev', 'online_agents_count', String(onlineCount), 'System', 'Auto-computed', { isHumanOverride: true });
-      setState('teammcp-dev', 'pending_tasks_count', String(pendingCount), 'System', 'Auto-computed', { isHumanOverride: true });
+      setState('teammcp-dev', 'online_agents_count', String(onlineCount), 'System', 'Auto-computed', { systemWrite: true, allowFieldCreation: true });
+      setState('teammcp-dev', 'pending_tasks_count', String(pendingCount), 'System', 'Auto-computed', { systemWrite: true, allowFieldCreation: true });
     } catch (e) {
       // Silent fail for auto-state inference
     }
@@ -327,7 +348,7 @@ subscribe('approval_requested', (event) => {
 });
 
 // ── Graceful shutdown ──────────────────────────────────
-function shutdown(signal) {
+async function shutdown(signal) {
   console.log(`\n[TeamMCP] Received ${signal}, shutting down...`);
 
   // Timeout: force exit after 5 seconds if server.close hangs
@@ -347,15 +368,18 @@ function shutdown(signal) {
   closeAllConnections();
   console.log('[TeamMCP] SSE connections closed');
 
-  // 2. Stop accepting new connections
+  // 2. Stop memory engine (before closing DB)
+  try { await stopMemoryEngine(); console.log('[TeamMCP] Memory engine stopped'); } catch {}
+
+  // 3. Stop accepting new connections
   server.close(() => {
     console.log('[TeamMCP] HTTP server closed');
 
-    // 3. Close database
+    // 4. Close database
     closeDb();
     console.log('[TeamMCP] Database closed');
 
-    // 4. Exit
+    // 5. Exit
     console.log('[TeamMCP] Shutdown complete');
     process.exit(0);
   });

@@ -3,6 +3,7 @@ import crypto from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join, extname } from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import {
   registerAgent, getAllAgents, getAgentByName,
@@ -31,9 +32,13 @@ import {
   getReportsTo, setReportsTo, getSubordinates,
   ackMessage, getMessageAcks,
   setUseResume, getUseResume, setAgentAuthConfig, setAgentAuthStrategy,
-  insertMetric, getMetrics, getMetricsSummary, cleanupOldMetrics
+  insertMetric, getMetrics, getMetricsSummary, cleanupOldMetrics,
+  createMemory, getMemory, getMemories, updateMemory, deleteMemory, searchMemories,
+  getCcMetricsSince
 } from './db.mjs';
+import db from './db.mjs';
 import { requireAuth } from './auth.mjs';
+import { askMemory, classifyBatch, deepSummary, reviewSession } from './memory-llm.mjs';
 // Doc-A v1.6 §11.11 (M6) — header/body redaction for any path that logs
 // request context. Audit log builders in credential-lease.mjs import these too.
 import { redactHeaders, redactBody } from './redact.mjs';
@@ -1824,12 +1829,7 @@ export async function handleRequest(req, res) {
       // Merge progress into metadata
       if (body.progress !== undefined) {
         let meta = {};
-        try {
-          meta = JSON.parse(task.metadata || '{}');
-          // Handle double-encoded JSON strings
-          if (typeof meta === 'string') meta = JSON.parse(meta);
-        } catch {}
-        if (typeof meta !== 'object' || meta === null) meta = {};
+        try { meta = JSON.parse(task.metadata || '{}'); } catch {}
         meta.progress = body.progress;
         body.metadata = JSON.stringify(meta);
         delete body.progress;
@@ -2384,6 +2384,406 @@ export async function handleRequest(req, res) {
 
       const pins = getPinnedMessages(channelId);
       return json(res, { pins });
+    }
+
+    // ── GET /api/memories/search (FTS search) ────────────
+    if (method === 'GET' && path === '/api/memories/search') {
+      const q = url.searchParams.get('q');
+      if (!q) return json(res, { error: 'Missing required parameter: q' }, 400);
+
+      const agent = url.searchParams.get('agent') || undefined;
+      const level = url.searchParams.get('level') || undefined;
+      const limit = Number(url.searchParams.get('limit')) || 20;
+
+      const results = searchMemories(q, { agent, level, limit });
+      return json(res, { results });
+    }
+
+    // ── GET /api/memories (list) ─────────────────────────
+    if (method === 'GET' && path === '/api/memories') {
+      const filters = {
+        agent: url.searchParams.get('agent') || undefined,
+        level: url.searchParams.get('level') || undefined,
+        category: url.searchParams.get('category') || undefined,
+        source_type: url.searchParams.get('source_type') || undefined,
+        search: url.searchParams.get('search') || undefined,
+        pinned: url.searchParams.get('pinned') ?? undefined,
+        limit: Number(url.searchParams.get('limit')) || 20,
+        offset: Number(url.searchParams.get('offset')) || 0,
+      };
+
+      const { memories, total } = getMemories(filters);
+      return json(res, { memories, total });
+    }
+
+    // ── POST /api/memories (create) ──────────────────────
+    if (method === 'POST' && path === '/api/memories') {
+      const body = await readBody(req);
+      if (!body.title) return json(res, { error: 'Missing required field: title' }, 400);
+      if (!body.summary) return json(res, { error: 'Missing required field: summary' }, 400);
+      if (!body.source_type) return json(res, { error: 'Missing required field: source_type' }, 400);
+      if (!body.event_hash) return json(res, { error: 'Missing required field: event_hash' }, 400);
+
+      // H3-POST: force agent from auth context; managers may specify body.agent for system memories
+      const actorName = req.agent?.name || 'system';
+      if (body.agent && body.agent !== actorName && !MANAGERS.includes(actorName)) {
+        return json(res, { error: 'Forbidden: cannot create memories on behalf of other agents' }, 403);
+      }
+      body.agent = body.agent || actorName;
+
+      const memory = createMemory(body);
+      return json(res, { memory }, 201);
+    }
+
+    // ── POST /api/memories/ask (LLM natural language query) ──
+    if (method === 'POST' && path === '/api/memories/ask') {
+      const body = await readBody(req);
+      if (!body.question || typeof body.question !== 'string') {
+        return json(res, { error: 'Missing required field: question' }, 400);
+      }
+
+      // 1. FTS5 search for top 10 candidates
+      const candidates = searchMemories(body.question, {
+        agent: body.agent || undefined,
+        level: body.level || undefined,
+        limit: 10,
+      });
+
+      if (candidates.length === 0) {
+        return json(res, { answer: 'No relevant memories found.', sources: [], confidence: 'low', related_notes: '' });
+      }
+
+      // 2. LLM generates structured answer from candidates
+      const result = await askMemory(body.question, candidates);
+      return json(res, result);
+    }
+
+    // ── GET /api/memories/sessions (session snapshots) ──
+    if (method === 'GET' && path === '/api/memories/sessions') {
+      const agent = url.searchParams.get('agent') || undefined;
+      const rawLimit = parseInt(url.searchParams.get('limit') || '20', 10);
+      const limit = Math.max(1, Math.min(isNaN(rawLimit) ? 20 : rawLimit, 100));
+
+      let sql = 'SELECT * FROM memory_sessions';
+      const params = [];
+      const conditions = [];
+
+      if (agent) {
+        conditions.push('agent = ?');
+        params.push(agent);
+      }
+      if (conditions.length > 0) {
+        sql += ' WHERE ' + conditions.join(' AND ');
+      }
+      sql += ' ORDER BY ended_at DESC LIMIT ?';
+      params.push(limit);
+
+      try {
+        const sessions = db.prepare(sql).all(...params);
+        return json(res, { sessions });
+      } catch (err) {
+        return json(res, { sessions: [], error: err.message });
+      }
+    }
+
+    // ── POST /api/memories/trigger-review (manual session review) ──
+    if (method === 'POST' && path === '/api/memories/trigger-review') {
+      const body = await readBody(req);
+      const agentName = body.agent || req.agent?.name;
+      if (!agentName) {
+        return json(res, { error: 'Missing agent name' }, 400);
+      }
+
+      // Get recent cc_metrics for this agent (max 20)
+      const metrics = db.prepare(`
+        SELECT * FROM cc_metrics WHERE agent = ?
+        ORDER BY timestamp DESC LIMIT 20
+      `).all(agentName);
+
+      if (metrics.length < 5) {
+        return json(res, { message: 'Too few metrics for review (need >= 5)', skipped: true });
+      }
+
+      const review = await reviewSession(metrics);
+      return json(res, review);
+    }
+
+    // ── GET /api/memories/:id (detail) ───────────────────
+    if (method === 'GET' && path.startsWith('/api/memories/') && path.split('/').length === 4) {
+      const id = path.split('/')[3];
+      const memory = getMemory(id);
+      if (!memory) return json(res, { error: 'Memory not found' }, 404);
+      return json(res, { memory });
+    }
+
+    // ── PATCH /api/memories/:id (update) ─────────────────
+    if (method === 'PATCH' && path.startsWith('/api/memories/') && path.split('/').length === 4) {
+      const id = path.split('/')[3];
+      const body = await readBody(req);
+      const actor = req.agent?.name || 'system';
+
+      // H3: Ownership check — agent can only modify own memories, managers can modify all
+      const existingMemory = getMemory(id);
+      if (!existingMemory) return json(res, { error: 'Memory not found' }, 404);
+      if (existingMemory.agent !== actor && !MANAGERS.includes(actor)) {
+        return json(res, { error: 'Forbidden: you can only modify your own memories' }, 403);
+      }
+
+      const memory = updateMemory(id, body, actor);
+      if (!memory) return json(res, { error: 'Memory not found' }, 404);
+      return json(res, { memory });
+    }
+
+    // ── DELETE /api/memories/:id (delete) ────────────────
+    if (method === 'DELETE' && path.startsWith('/api/memories/') && path.split('/').length === 4) {
+      const id = path.split('/')[3];
+      const existing = getMemory(id);
+      if (!existing) return json(res, { error: 'Memory not found' }, 404);
+      // H3: Ownership check for delete
+      const actor = req.agent?.name || 'system';
+      if (existing.agent !== actor && !MANAGERS.includes(actor)) {
+        return json(res, { error: 'Forbidden: you can only delete your own memories' }, 403);
+      }
+      const result = deleteMemory(id);
+      return json(res, result);
+    }
+
+    // ── GET /api/config/llm ─────────────────────────────
+    if (method === 'GET' && path === '/api/config/llm') {
+      if (!requireAuth(req, res)) return;
+      const rows = db.prepare('SELECT * FROM llm_config ORDER BY purpose').all();
+      const configs = rows.map(row => ({
+        purpose: row.purpose,
+        provider: row.provider,
+        model: row.model,
+        api_key_masked: row.api_key_enc ? '****' + row.api_key_enc.slice(-4) : '',
+        base_url: row.base_url,
+        max_tokens: row.max_tokens,
+        temperature: row.temperature,
+        timeout_ms: row.timeout_ms,
+        max_daily_cost_usd: row.max_daily_cost_usd,
+        enabled: row.enabled,
+        updated_at: row.updated_at,
+      }));
+      return json(res, { configs, key_configured: !!process.env.MEMORY_LLM_KEY });
+    }
+
+    // ── PUT /api/config/llm ─────────────────────────────
+    if (method === 'PUT' && path === '/api/config/llm') {
+      if (!requireAuth(req, res)) return;
+      const agentName = req.agent.name;
+      if (!MANAGERS.includes(agentName) && agentName !== 'Chairman') {
+        return json(res, { error: 'Only managers or Chairman can update LLM config' }, 403);
+      }
+      const body = await readBody(req);
+      if (!body.purpose) return json(res, { error: 'purpose is required' }, 400);
+
+      // H2-PUT: SSRF protection — whitelist base_url (same as /test endpoint)
+      if (body.base_url) {
+        const PUT_ALLOWED_BASE_URLS = {
+          anthropic: ['https://api.anthropic.com'],
+          openai: ['https://api.openai.com'],
+          openrouter: ['https://openrouter.ai/api/v1'],
+          custom: [],
+        };
+        const normalized = body.base_url.replace(/\/+$/, '');
+        const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(normalized) && !normalized.includes('..');
+        const allowed = PUT_ALLOWED_BASE_URLS[body.provider] || [];
+        const isWhitelisted = allowed.some(prefix => normalized === prefix || normalized.startsWith(prefix + '/'));
+        if (!isLocalhost && !isWhitelisted) {
+          return json(res, { error: `base_url not allowed for provider ${body.provider}. Allowed: ${allowed.join(', ')}, or https://localhost` }, 400);
+        }
+      }
+
+      // Encrypt API key if provided
+      let encFields = {};
+      if (body.api_key) {
+        const encKey = process.env.MEMORY_LLM_KEY;
+        if (!encKey) {
+          return json(res, { error: 'MEMORY_LLM_KEY not configured — cannot encrypt API key' }, 500);
+        }
+        const salt = 'teammcp-memory-llm-v1';
+        const key = crypto.createHmac('sha256', salt).update(encKey).digest();
+        const iv = crypto.randomBytes(12);
+        const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+        let enc = cipher.update(body.api_key, 'utf8', 'hex');
+        enc += cipher.final('hex');
+        const tag = cipher.getAuthTag().toString('hex');
+        encFields = { api_key_enc: enc, api_key_iv: iv.toString('hex'), api_key_tag: tag };
+      }
+
+      const existing = db.prepare('SELECT id FROM llm_config WHERE purpose = ?').get(body.purpose);
+      if (existing) {
+        const sets = [];
+        const params = [];
+        for (const [col, val] of Object.entries({
+          provider: body.provider,
+          model: body.model,
+          ...encFields,
+          base_url: body.base_url,
+          max_tokens: body.max_tokens,
+          temperature: body.temperature,
+          timeout_ms: body.timeout_ms,
+          max_daily_cost_usd: body.max_daily_cost_usd,
+          enabled: body.enabled,
+        })) {
+          if (val !== undefined) { sets.push(`${col} = ?`); params.push(val); }
+        }
+        if (sets.length > 0) {
+          sets.push("updated_at = datetime('now')");
+          params.push(body.purpose);
+          db.prepare(`UPDATE llm_config SET ${sets.join(', ')} WHERE purpose = ?`).run(...params);
+        }
+      } else {
+        if (!body.provider || !body.model) {
+          return json(res, { error: 'provider and model are required for new config' }, 400);
+        }
+        db.prepare(`INSERT INTO llm_config (purpose, provider, model, api_key_enc, api_key_iv, api_key_tag, base_url, max_tokens, temperature, timeout_ms, max_daily_cost_usd)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          body.purpose, body.provider, body.model,
+          encFields.api_key_enc || '', encFields.api_key_iv || '', encFields.api_key_tag || '',
+          body.base_url || null, body.max_tokens || 1024, body.temperature ?? 0.0,
+          body.timeout_ms || 30000, body.max_daily_cost_usd ?? 1.0
+        );
+      }
+
+      // Publish event for hot reload
+      publish('llm_config_changed', { purpose: body.purpose });
+
+      const config = db.prepare('SELECT * FROM llm_config WHERE purpose = ?').get(body.purpose);
+      const { api_key_enc, api_key_iv, api_key_tag, ...safeConfig } = config;
+      return json(res, { updated: true, config: safeConfig });
+    }
+
+    // ── POST /api/config/llm/test ────────────────────────
+    if (method === 'POST' && path === '/api/config/llm/test') {
+      if (!requireAuth(req, res)) return;
+      const agentName = req.agent.name;
+      if (!MANAGERS.includes(agentName) && agentName !== 'Chairman') {
+        return json(res, { error: 'Only managers or Chairman can test LLM connections' }, 403);
+      }
+      const body = await readBody(req);
+      if (!body.provider || !body.model) {
+        return json(res, { error: 'provider and model are required' }, 400);
+      }
+
+      // H2: SSRF protection — whitelist base_url by provider
+      // Allowlist entries are prefixes (to handle /v1/ path variants)
+      const ALLOWED_BASE_URLS = {
+        anthropic: ['https://api.anthropic.com'],
+        openai: ['https://api.openai.com'],
+        openrouter: ['https://openrouter.ai/api/v1'],
+        custom: [], // custom allows localhost only
+      };
+
+      if (body.base_url) {
+        const normalized = body.base_url.replace(/\/+$/, '');
+        // Localhost exception: allow http for local LLMs (e.g. Ollama), but block path traversal
+        const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(normalized) && !normalized.includes('..');
+        const allowed = ALLOWED_BASE_URLS[body.provider] || [];
+        const isWhitelisted = allowed.some(prefix => normalized === prefix || normalized.startsWith(prefix + '/'));
+        if (!isLocalhost && !isWhitelisted) {
+          return json(res, { error: `base_url not allowed for provider ${body.provider}. Allowed: ${allowed.join(', ')}, or https://localhost` }, 400);
+        }
+      }
+
+      const startTime = Date.now();
+      try {
+        let result;
+        if (body.provider === 'anthropic') {
+          const resp = await fetch('https://api.anthropic.com/v1/messages', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'x-api-key': body.api_key || '',
+              'anthropic-version': '2023-06-01',
+            },
+            body: JSON.stringify({
+              model: body.model,
+              max_tokens: 10,
+              messages: [{ role: 'user', content: 'Reply with OK' }],
+            }),
+          });
+          if (!resp.ok) {
+            const errBody = await resp.text();
+            return json(res, { success: false, error: `HTTP ${resp.status}: ${errBody.slice(0, 200)}` });
+          }
+          result = await resp.json();
+        } else {
+          // OpenAI / OpenRouter / Custom
+          const baseUrl = body.base_url || 'https://api.openai.com/v1';
+          const resp = await fetch(`${baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${body.api_key || ''}`,
+            },
+            body: JSON.stringify({
+              model: body.model,
+              max_tokens: 10,
+              messages: [{ role: 'user', content: 'Reply with OK' }],
+            }),
+          });
+          if (!resp.ok) {
+            const errBody = await resp.text();
+            return json(res, { success: false, error: `HTTP ${resp.status}: ${errBody.slice(0, 200)}` });
+          }
+          result = await resp.json();
+        }
+        const latency_ms = Date.now() - startTime;
+        return json(res, { success: true, latency_ms, model: body.model });
+      } catch (err) {
+        return json(res, { success: false, error: err.message });
+      }
+    }
+
+    // ── GET /api/config/llm/usage ───────────────────────
+    if (method === 'GET' && path === '/api/config/llm/usage') {
+      if (!requireAuth(req, res)) return;
+      const period = url.searchParams.get('period') || 'day';
+      let cutoff;
+      const now = new Date();
+      if (period === 'week') {
+        cutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19);
+      } else if (period === 'month') {
+        cutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19);
+      } else {
+        cutoff = now.toISOString().slice(0, 10) + 'T00:00:00';
+      }
+
+      const totals = db.prepare(`
+        SELECT COALESCE(SUM(estimated_cost_usd), 0) as total_cost, COUNT(*) as total_requests
+        FROM llm_usage WHERE created_at >= ?
+      `).get(cutoff);
+
+      const byPurpose = db.prepare(`
+        SELECT purpose, COALESCE(SUM(estimated_cost_usd), 0) as cost, COUNT(*) as requests,
+               SUM(input_tokens) as input_tokens, SUM(output_tokens) as output_tokens
+        FROM llm_usage WHERE created_at >= ?
+        GROUP BY purpose
+      `).all(cutoff);
+
+      const byModel = db.prepare(`
+        SELECT model, COALESCE(SUM(estimated_cost_usd), 0) as cost, COUNT(*) as requests
+        FROM llm_usage WHERE created_at >= ?
+        GROUP BY model
+      `).all(cutoff);
+
+      const trendCutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19);
+      const dailyTrend = db.prepare(`
+        SELECT date(created_at) as date, COALESCE(SUM(estimated_cost_usd), 0) as cost
+        FROM llm_usage WHERE created_at >= ?
+        GROUP BY date(created_at) ORDER BY date
+      `).all(trendCutoff);
+
+      return json(res, {
+        period,
+        total_cost: totals.total_cost,
+        total_requests: totals.total_requests,
+        by_purpose: byPurpose,
+        by_model: byModel,
+        daily_trend: dailyTrend,
+      });
     }
 
     // ── 404 ───────────────────────────────────────────

@@ -172,6 +172,27 @@ export async function killPty(name) {
 }
 
 export function getPtyNames() {
+  // In two-layer arch, query Daemon for running PTYs
+  if (isDaemonConnected()) {
+    try {
+      const { listPtys } = require('./pty-daemon-client.mjs');
+      // listPtys is async but getPtyNames is sync — use cached list
+    } catch {}
+  }
+  return [...wsEntries.keys()];
+}
+
+// Async version that queries Daemon
+export async function getPtyNamesAsync() {
+  if (isDaemonConnected()) {
+    try {
+      const { listPtys } = await import('./pty-daemon-client.mjs');
+      const result = await listPtys();
+      return result.map(a => a.agent || a.name || a);
+    } catch (e) {
+      console.warn('[pty] getPtyNamesAsync failed:', e.message);
+    }
+  }
   return [...wsEntries.keys()];
 }
 
@@ -180,7 +201,30 @@ export function getPtyNames() {
  * Kept for backward compat — but in two-layer arch, Daemon handles this.
  */
 export function attachPtyOutput(name, proc) {
-  console.warn(`[pty] attachPtyOutput(${name}): deprecated in two-layer arch, use IPC instead`);
+  // Still needed: agents are spawned locally until PTY spawn is migrated to Daemon
+  const entry = { clients: new Set(), scrollback: '' };
+
+  proc.onData((data) => {
+    entry.scrollback += data;
+    if (entry.scrollback.length > SCROLLBACK_LIMIT) {
+      entry.scrollback = stripLeadingPartialAnsi(
+        entry.scrollback.slice(entry.scrollback.length - SCROLLBACK_LIMIT)
+      );
+    }
+    for (const ws of entry.clients) {
+      if (ws.readyState === 1) ws.send(data);
+    }
+  });
+
+  proc.onExit(() => {
+    for (const ws of entry.clients) {
+      try { ws.close(1000, 'PTY exited'); } catch {}
+    }
+    wsEntries.delete(name);
+  });
+
+  wsEntries.set(name, entry);
+  console.log(`[pty] attached output for: ${name}`);
 }
 
 export function writeToPty(name, data) {

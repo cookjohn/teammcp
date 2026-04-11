@@ -1176,7 +1176,7 @@ export function setState(projectId, field, value, changedBy, reason, opts = {}) 
 
     // Enforce knowledge check (C5 metacognition principle)
     // Skip for human overrides, approval resolutions, and system operations
-    if (!opts.isHumanOverride && !opts.isApproval && !STATE_ADMINS.includes(changedBy)) {
+    if (!opts.isHumanOverride && !opts.systemWrite && !opts.isApproval && !STATE_ADMINS.includes(changedBy)) {
       const profile = db.prepare('SELECT last_known_versions FROM agent_profiles WHERE agent_id = ?').get(changedBy);
       if (profile) {
         const lkv = JSON.parse(profile.last_known_versions || '{}');
@@ -1187,7 +1187,7 @@ export function setState(projectId, field, value, changedBy, reason, opts = {}) 
       }
       // If no profile exists, allow (agent hasn't been onboarded yet)
     }
-    const isHuman = opts.isHumanOverride === true; // Only set by router for dashboard admin
+    const isHuman = opts.isHumanOverride === true || opts.systemWrite === true; // isHumanOverride for dashboard admin, systemWrite for internal engines
     const existing = db.prepare('SELECT * FROM state_kv WHERE project_id = ? AND field = ?').get(projectId, field);
 
     // Optimistic concurrency control (check before any write path)
@@ -2262,6 +2262,10 @@ export function cleanupOldMetrics(days = 7) {
   return db.prepare('DELETE FROM cc_metrics WHERE timestamp < ?').run(cutoff);
 }
 
+export function getCcMetricsSince(lastId = 0, limit = 200) {
+  return db.prepare('SELECT * FROM cc_metrics WHERE id > ? ORDER BY id ASC LIMIT ?').all(lastId, limit);
+}
+
 // ── Notifications ───────────────────────────────────────
 
 db.exec(`
@@ -2293,6 +2297,248 @@ export function getRecentNotifications(target, channel = 'wechat', since) {
   const sql = "SELECT * FROM notifications WHERE target = ? AND channel = ? AND created_at >= ? ORDER BY created_at DESC";
   return db.prepare(sql).all(target, channel, since);
 }
+
+// ── Memory System Schema (Phase 2) ──────────────────────
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS memories (
+    id              TEXT PRIMARY KEY,
+    agent           TEXT NOT NULL,
+    session_id      TEXT,
+    level           TEXT NOT NULL DEFAULT 'routine',
+    category        TEXT NOT NULL DEFAULT 'general',
+    title           TEXT NOT NULL,
+    summary         TEXT NOT NULL,
+    raw_event       TEXT,
+    source_type     TEXT NOT NULL,
+    source_id       TEXT,
+    event_hash      TEXT NOT NULL,
+    tags            TEXT DEFAULT '[]',
+    related_ids     TEXT DEFAULT '[]',
+    ttl_days        INTEGER DEFAULT 90,
+    pinned          INTEGER DEFAULT 0,
+    last_accessed_at TEXT,
+    access_count    INTEGER DEFAULT 0,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at      TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_memories_agent ON memories(agent);
+CREATE INDEX IF NOT EXISTS idx_memories_level ON memories(level);
+CREATE INDEX IF NOT EXISTS idx_memories_category ON memories(category);
+CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source_type, source_id);
+CREATE INDEX IF NOT EXISTS idx_memories_hash ON memories(event_hash);
+CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);
+CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories(expires_at) WHERE expires_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(session_id) WHERE session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_memories_accessed ON memories(last_accessed_at) WHERE last_accessed_at IS NOT NULL;
+`);
+
+db.exec(`
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    id UNINDEXED, agent UNINDEXED, level UNINDEXED,
+    title, summary, tags
+);
+`);
+
+// ── Memory CRUD Functions ───────────────────────────────
+
+const _insertMemory = db.prepare(`
+  INSERT INTO memories (id, agent, session_id, level, category, title, summary, raw_event, source_type, source_id, event_hash, tags, related_ids, ttl_days, expires_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
+const _insertMemoryFts = db.prepare(`
+  INSERT INTO memories_fts (id, agent, level, title, summary, tags) VALUES (?, ?, ?, ?, ?, ?)
+`);
+
+export function createMemory(data) {
+  const id = randomUUID();
+  const level = data.level || 'routine';
+  const category = data.category || 'general';
+  const tags = data.tags ? (typeof data.tags === 'string' ? data.tags : JSON.stringify(data.tags)) : '[]';
+  const related_ids = data.related_ids ? (typeof data.related_ids === 'string' ? data.related_ids : JSON.stringify(data.related_ids)) : '[]';
+  const ttl_days = data.ttl_days ?? 90;
+  const expires_at = ttl_days ? new Date(Date.now() + ttl_days * 86400000).toISOString() : null;
+
+  const txn = db.transaction(() => {
+    _insertMemory.run(id, data.agent, data.session_id || null, level, category, data.title, data.summary,
+      data.raw_event || null, data.source_type, data.source_id || null, data.event_hash,
+      tags, related_ids, ttl_days, expires_at);
+    _insertMemoryFts.run(id, data.agent, level, data.title, data.summary, tags);
+  });
+  txn();
+
+  return db.prepare('SELECT * FROM memories WHERE id = ?').get(id);
+}
+
+export function getMemory(id) {
+  const row = db.prepare('SELECT * FROM memories WHERE id = ?').get(id);
+  if (row) {
+    db.prepare('UPDATE memories SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?')
+      .run(new Date().toISOString(), id);
+    row.access_count += 1;
+    row.last_accessed_at = new Date().toISOString();
+  }
+  return row || null;
+}
+
+export function getMemories({ agent, level, category, source_type, search, pinned, limit = 20, offset = 0 } = {}) {
+  const conditions = [];
+  const params = [];
+
+  if (agent) { conditions.push('m.agent = ?'); params.push(agent); }
+  if (level) { conditions.push('m.level = ?'); params.push(level); }
+  if (category) { conditions.push('m.category = ?'); params.push(category); }
+  if (source_type) { conditions.push('m.source_type = ?'); params.push(source_type); }
+  if (pinned !== undefined && pinned !== null && pinned !== '') { conditions.push('m.pinned = ?'); params.push(Number(pinned) ? 1 : 0); }
+
+  if (search) {
+    const sanitized = sanitizeFtsQuery(search);
+    if (sanitized) {
+      conditions.push('m.id IN (SELECT id FROM memories_fts WHERE memories_fts MATCH ?)');
+      params.push(sanitized);
+    }
+  }
+
+  const whereClause = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+
+  const total = db.prepare(`SELECT COUNT(*) as cnt FROM memories m ${whereClause}`).get(...params).cnt;
+  const memories = db.prepare(
+    `SELECT m.* FROM memories m ${whereClause} ORDER BY m.created_at DESC LIMIT ? OFFSET ?`
+  ).all(...params, limit, offset);
+
+  return { memories, total };
+}
+
+const _ALLOWED_UPDATE_FIELDS = new Set(['title', 'summary', 'level', 'category', 'tags', 'related_ids', 'pinned', 'ttl_days']);
+
+export function updateMemory(id, changes, actor) {
+  const existing = db.prepare('SELECT * FROM memories WHERE id = ?').get(id);
+  if (!existing) return null;
+
+  const sets = [];
+  const params = [];
+
+  for (const [key, val] of Object.entries(changes)) {
+    if (!_ALLOWED_UPDATE_FIELDS.has(key)) continue;
+    if (key === 'tags' || key === 'related_ids') {
+      sets.push(`${key} = ?`);
+      params.push(typeof val === 'string' ? val : JSON.stringify(val));
+    } else if (key === 'ttl_days') {
+      sets.push('ttl_days = ?');
+      params.push(val);
+      sets.push('expires_at = ?');
+      params.push(val ? new Date(Date.now() + val * 86400000).toISOString() : null);
+    } else {
+      sets.push(`${key} = ?`);
+      params.push(val);
+    }
+  }
+
+  if (sets.length === 0) return existing;
+
+  const txn = db.transaction(() => {
+    db.prepare(`UPDATE memories SET ${sets.join(', ')} WHERE id = ?`).run(...params, id);
+    // Update FTS
+    const updated = db.prepare('SELECT * FROM memories WHERE id = ?').get(id);
+    db.prepare('DELETE FROM memories_fts WHERE id = ?').run(id);
+    _insertMemoryFts.run(updated.id, updated.agent, updated.level, updated.title, updated.summary, updated.tags);
+  });
+  txn();
+
+  return db.prepare('SELECT * FROM memories WHERE id = ?').get(id);
+}
+
+export function deleteMemory(id) {
+  const txn = db.transaction(() => {
+    db.prepare('DELETE FROM memories WHERE id = ?').run(id);
+    db.prepare('DELETE FROM memories_fts WHERE id = ?').run(id);
+  });
+  txn();
+  return { deleted: true };
+}
+
+export function searchMemories(query, { agent, level, limit = 20 } = {}) {
+  const sanitized = sanitizeFtsQuery(query);
+  if (!sanitized) return [];
+
+  const conditions = ['memories_fts MATCH ?'];
+  const params = [sanitized];
+
+  if (agent) { conditions.push('agent = ?'); params.push(agent); }
+  if (level) { conditions.push('level = ?'); params.push(level); }
+
+  const where = conditions.join(' AND ');
+
+  return db.prepare(
+    `SELECT id, agent, level, title, summary, tags
+     FROM memories_fts
+     WHERE ${where}
+     ORDER BY rank
+     LIMIT ?`
+  ).all(...params, limit);
+}
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS memory_sessions (
+    id          TEXT PRIMARY KEY,
+    agent       TEXT NOT NULL,
+    session_id  TEXT NOT NULL UNIQUE,
+    started_at  TEXT NOT NULL,
+    ended_at    TEXT NOT NULL,
+    duration_s  INTEGER,
+    tool_count  INTEGER DEFAULT 0,
+    error_count INTEGER DEFAULT 0,
+    summary     TEXT NOT NULL,
+    key_actions TEXT DEFAULT '[]',
+    lessons     TEXT DEFAULT '[]',
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`);
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS llm_config (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    purpose         TEXT NOT NULL UNIQUE,
+    provider        TEXT NOT NULL,
+    model           TEXT NOT NULL,
+    api_key_enc     TEXT NOT NULL,
+    api_key_iv      TEXT NOT NULL,
+    api_key_tag     TEXT NOT NULL,
+    base_url        TEXT,
+    max_tokens      INTEGER DEFAULT 1024,
+    temperature     REAL DEFAULT 0.0,
+    timeout_ms      INTEGER DEFAULT 30000,
+    max_daily_cost_usd REAL DEFAULT 1.0,
+    enabled         INTEGER DEFAULT 1,
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+INSERT OR IGNORE INTO llm_config (purpose, provider, model, api_key_enc, api_key_iv, api_key_tag)
+VALUES
+    ('classify',  'anthropic', 'claude-haiku-4-5-20251001', '', '', ''),
+    ('summarize', 'anthropic', 'claude-sonnet-4-20250514',  '', '', '');
+`);
+
+db.exec(`
+CREATE TABLE IF NOT EXISTS llm_usage (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider        TEXT NOT NULL,
+    model           TEXT NOT NULL,
+    purpose         TEXT NOT NULL,
+    input_tokens    INTEGER DEFAULT 0,
+    output_tokens   INTEGER DEFAULT 0,
+    estimated_cost_usd REAL DEFAULT 0,
+    latency_ms      INTEGER,
+    success         INTEGER DEFAULT 1,
+    error_message   TEXT,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_llm_usage_date ON llm_usage(created_at);
+CREATE INDEX IF NOT EXISTS idx_llm_usage_purpose ON llm_usage(purpose);
+`);
 
 export function closeDb() {
   try { db.close(); } catch {}

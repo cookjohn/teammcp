@@ -13,6 +13,7 @@ import AgentsView from './components/agents/AgentsView.vue'
 import CredentialsView from './components/credentials/CredentialsView.vue'
 import MonitorView from './components/monitor/MonitorView.vue'
 import TerminalView from './components/terminal/TerminalView.vue'
+import MemoriesView from './components/memory/MemoriesView.vue'
 import SetupWizard from './components/wizard/SetupWizard.vue'
 import WechatPanel from './components/wechat/WechatPanel.vue'
 import en from './i18n/en.js'
@@ -117,6 +118,7 @@ const navItems = [
   { id: 'agents', label: 'Agents', icon: '\u{1F916}' },
   { id: 'credentials', label: 'Credentials', icon: '\u{1F511}' },
   { id: 'monitor', label: 'Monitor', icon: '\u{1F4CA}' },
+  { id: 'memories', label: 'Memories', icon: '\u{1F4AD}' },
   { id: 'terminal', label: 'Terminal', icon: '\u23CE' },
 ]
 
@@ -436,6 +438,10 @@ const unreadCounts = computed(() => channelsStore.unreadCounts.value)
 
       <div v-else-if="currentView === 'monitor'" class="view-panel">
         <MonitorView />
+      </div>
+
+      <div v-else-if="currentView === 'memories'" class="view-panel">
+        <MemoriesView />
       </div>
 
       <div v-else-if="currentView === 'terminal'" class="view-panel">
