@@ -239,16 +239,23 @@ server.listen(PORT, BIND_HOST, () => {
     // Without a scheduler, retention is dormant: R1 (DB日增<1MB) is unverifiable.
     // Add a 1h interval sweep here, gated on the same MEMORY_ENGINE=on +
     // RETENTION_SWEEP=1 conditions. First sweep at boot+5min so startup is clean.
-    setTimeout(() => {
-      sweepAll({ caller: 'scheduler:boot+5min' })
-        .then(r => console.log(`[retention] boot+5min sweep done: scanned=${r.totals.scanned} hardDeleted=${r.totals.hardDeleted} bytesReclaimed=${r.totals.bytesReclaimed} errors=${r.totals.errors} duration=${r.durationMs}ms`))
-        .catch(err => console.error('[retention] boot+5min sweep failed:', err.message));
-    }, 5 * 60 * 1000).unref?.();
-    const retentionTimer = setInterval(() => {
-      sweepAll({ caller: 'scheduler:1h' })
-        .then(r => console.log(`[retention] 1h sweep done: scanned=${r.totals.scanned} hardDeleted=${r.totals.hardDeleted} bytesReclaimed=${r.totals.bytesReclaimed} errors=${r.totals.errors} duration=${r.durationMs}ms`))
-        .catch(err => console.error('[retention] 1h sweep failed:', err.message));
-    }, 60 * 60 * 1000);
+    // sweepAll is SYNCHRONOUS (retention.mjs:410 — plain function, returns
+    // a result object, no Promise). The previous .then()/.catch() chain
+    // threw `TypeError: sweepAll(...).then is not a function` 5 minutes
+    // into every prod boot. Use try/catch instead. sweepAll across 7
+    // policies is fast (single-digit-ms on a healthy DB) so blocking the
+    // event loop briefly is acceptable; if it ever gets slow we wrap
+    // with `await new Promise(r => setImmediate(r))` to yield.
+    const runSweep = (caller) => {
+      try {
+        const r = sweepAll({ caller });
+        console.log(`[retention] ${caller} sweep done: scanned=${r.totals.scanned} hardDeleted=${r.totals.hardDeleted} bytesReclaimed=${r.totals.bytesReclaimed} errors=${r.totals.errors} duration=${r.durationMs}ms`);
+      } catch (err) {
+        console.error(`[retention] ${caller} sweep failed:`, err.message);
+      }
+    };
+    setTimeout(() => runSweep('scheduler:boot+5min'), 5 * 60 * 1000).unref?.();
+    const retentionTimer = setInterval(() => runSweep('scheduler:1h'), 60 * 60 * 1000);
     retentionTimer.unref?.();
     process.once('SIGTERM', () => clearInterval(retentionTimer));
     process.once('SIGINT', () => clearInterval(retentionTimer));
