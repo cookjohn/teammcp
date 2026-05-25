@@ -135,6 +135,69 @@ function memoriesDupCompactSweep(ctx) {
 }
 
 /**
+ * memories_unread_decay (Phase D): aggressively delete routine memories
+ * that nobody has retrieved within 30 days. The normal memories_ttl
+ * policy gives routine memories 90 days regardless of utility; this
+ * policy says "if we wrote it down but never used it, kill it sooner."
+ *
+ * Restrictions, in order of importance:
+ *   - level = 'routine' only — important/critical/lesson are valuable
+ *     by classification regardless of read traffic
+ *   - access_count = 0 — never been retrieved (Phase B v1 reads bump
+ *     this counter, so non-zero means somebody actually used it)
+ *   - pinned = 0 — user-pinned memories are exempt
+ *   - older than 30 days — gives Phase B v1 time to discover them
+ *     after a system rebuild / reindex
+ *
+ * FTS-atomic via the same transaction pattern as memories_dup_compact.
+ */
+function memoriesUnreadDecaySweep(ctx) {
+  try {
+    const cap = Math.max(50, Math.min(5000, ctx.batchSize | 0 || 500));
+    const cutoff = isoAgo(30);
+    const findSql = `
+      SELECT id FROM memories
+      WHERE level = 'routine'
+        AND pinned = 0
+        AND (access_count IS NULL OR access_count = 0)
+        AND datetime(created_at) < datetime(?)
+      LIMIT ?
+    `;
+    const targets = dbDefault.prepare(findSql).all(cutoff, cap);
+    if (targets.length === 0) {
+      return { scanned: 0, softDeleted: 0, hardDeleted: 0 };
+    }
+    const ids = targets.map(r => r.id);
+    if (ctx.dryRun) {
+      return {
+        scanned: ids.length,
+        softDeleted: 0,
+        hardDeleted: 0,
+        sample: ids.slice(0, ctx.sampleLimit | 0 || 5),
+      };
+    }
+    const placeholders = ids.map(() => '?').join(',');
+    const tx = dbDefault.transaction(() => {
+      dbDefault.prepare(`DELETE FROM memories_fts WHERE id IN (${placeholders})`).run(...ids);
+      dbDefault.prepare(`DELETE FROM memories WHERE id IN (${placeholders})`).run(...ids);
+    });
+    tx();
+    return {
+      scanned: ids.length,
+      softDeleted: 0,
+      hardDeleted: ids.length,
+    };
+  } catch (err) {
+    return {
+      scanned: 0,
+      softDeleted: 0,
+      hardDeleted: 0,
+      errors: [err.message],
+    };
+  }
+}
+
+/**
  * memories_raw_trim: for rows older than 7 days with raw_event longer
  * than 200 chars, truncate raw_event to 200 chars + a marker. After a
  * week the LLM classifier (or the heuristic summary) has already
@@ -329,6 +392,19 @@ export function registerDefaultRetentionPolicies() {
     whereParams: () => [],
     batchSize: 500,
     customSweep: memoriesRawTrimSweep,
+  });
+
+  // 10. memories_unread_decay (Phase D) — accelerate deletion of routine
+  //     memories that have never been read after 30 days. Counterpart to
+  //     the Phase B v1 read-side TTL extension: memories that get used
+  //     stay alive, memories that just sit there die faster.
+  registerRetention({
+    name: 'memories_unread_decay',
+    table: 'memories',
+    whereClause: '1=0', // stub — generic scanner never runs
+    whereParams: () => [],
+    batchSize: 500,
+    customSweep: memoriesUnreadDecaySweep,
   });
 }
 
