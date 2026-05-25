@@ -395,8 +395,12 @@ export async function handleRequest(req, res) {
     }
 
     if (method === 'POST' && path === '/api/auth/login/complete') {
-      const body = await readBody(req);
-      const { code, state } = JSON.parse(body);
+      // readBody() already does JSON.parse() (router.mjs:189). Don't
+      // double-parse — the second call coerces the object to
+      // "[object Object]" and throws SyntaxError, which the request-level
+      // try/catch turns into "Invalid JSON in request body" — misleading
+      // since the request body was perfectly valid JSON.
+      const { code, state } = await readBody(req);
       if (!code || !state) return json(res, { error: 'Missing code or state' }, 400);
       const { completeLogin } = await import('./credential-manager.mjs');
       const result = await completeLogin(code, state);
