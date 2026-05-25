@@ -3,6 +3,7 @@ import { createMemory, getState, setState, getCcMetricsSince } from './db.mjs';
 import { subscribe, subscribeAll, publish } from './eventbus.mjs';
 import { ProviderRegistry, TeamSearchProvider } from './memory-providers.mjs';
 import { SkillNudgeProvider } from './skill-nudge-provider.mjs';
+import { LlmClassifierProvider } from './memory-llm-classifier.mjs';
 
 // ── Constants ────────────────────────────────────────────
 
@@ -480,6 +481,12 @@ export function startMemoryEngine() {
   providerRegistry = new ProviderRegistry();
   providerRegistry.register(new TeamSearchProvider());
   providerRegistry.register(new SkillNudgeProvider());
+  // Phase A: LLM enrichment. Only fires when MEMORY_LLM_KEY is set
+  // (used to decrypt the api_key stored in llm_config). Without the
+  // key, classifyBatch falls back to heuristic and we still apply
+  // it via UPDATE so titles get marginally cleaner. The provider
+  // self-limits to lesson/important/critical levels to control cost.
+  providerRegistry.register(new LlmClassifierProvider());
 
   // Forward memory_created events to providers
   subscribe('memory_created', (event) => {
