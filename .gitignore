@@ -52,6 +52,10 @@ scripts/test-sdk-agent.mjs
 # OAuth credentials (real tokens)
 oauth-credentials.json
 
+# Local secret bootstrap (MEMORY_LLM_KEY, etc.) — dot-sourced by start-*.ps1
+secrets.local.ps1
+secrets.local.sh
+
 # Server backups (local only)
 server-backup-*/
 

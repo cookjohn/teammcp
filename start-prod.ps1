@@ -4,7 +4,14 @@ $env:TEAMMCP_HOME = "C:/Users/ssdlh/Desktop/teammcp"
 $env:TEAMMCP_PORT = "3100"
 $env:AGENTS_BASE_DIR = "C:/Users/ssdlh/Desktop/agents"
 $env:TEAMMCP_URL = "http://localhost:3100"
-$env:TEAMMCP_AUTO_RESTART = "1"
+$env:TEAMMCP_AUTO_RESTART = "0"
+
+# Memory engine + retention sweep ENABLED for Gate 1 soak (CEO unblock 2026-04-25).
+# Pre-conditions met: G1.C dedup剥离 + BLOCK 1 retention.mjs §3 8-class severity='error'
+# + BLOCK 2 watchdog rollback_history + 7 retention policies registered + watchdog auto-start.
+# Rollback: set MEMORY_ENGINE='off' or RETENTION_SWEEP='0' or WATCHDOG_DISABLED='1'.
+$env:MEMORY_ENGINE = "on"
+$env:RETENTION_SWEEP = "1"
 
 Set-Location "C:/Users/ssdlh/Desktop/teammcp"
 # Layer 3 v0.3 canary: scan CTO agent only. v0.3 classifyLine uses JSON.parse + top-level
@@ -12,6 +19,10 @@ Set-Location "C:/Users/ssdlh/Desktop/teammcp"
 # against CTO historical JSONL (723 true hits, 0 false positives). Banner text scrubbed
 # to avoid ouroboros self-trigger.
 $env:AUTH_MONITOR_CANARY = "SecTest"
+
+# Local secrets bootstrap: gitignored file sets MEMORY_LLM_KEY etc.
+# Safe to be absent — memory engine just runs without LLM enrichment.
+if (Test-Path "secrets.local.ps1") { . "./secrets.local.ps1" }
 
 # ── PTY Daemon (Layer 1) ────────────────────────────────────
 # Daemon is managed by daemon-launcher.mjs inside index.mjs.
