@@ -11,6 +11,21 @@ const dashboardToken = ref('')
 const loading = ref(false)
 const refreshing = ref(false)
 
+// OAuth re-login inline form state. Replaces window.prompt() because:
+//  - Chrome blocks prompt() after the page calls window.open() in some
+//    configurations (treated as "abusive popup chain")
+//  - Users who once clicked "block dialogs from this site" never see
+//    prompts again, with no obvious way to undo it
+//  - prompts in background tabs (the Dashboard tab loses focus when the
+//    OAuth tab opens) are easy to miss
+// Inline form is always visible while waiting for the user to paste the
+// callback URL — no browser policy can hide it.
+const oauthPending = ref(false)
+const oauthExpectedState = ref('')
+const oauthPasted = ref('')
+const oauthSubmitting = ref(false)
+const oauthError = ref('')
+
 // Dashboard token management — always fetches fresh token on first call,
 // retries once on 403 (token rotates on server restart)
 async function fetchDashboardToken() {
@@ -135,6 +150,7 @@ async function refreshOAuth() {
 }
 
 async function startOAuthLogin() {
+  oauthError.value = ''
   try {
     const token = await ensureDashboardToken()
     const res = await fetch('/api/auth/login/start', {
@@ -145,50 +161,71 @@ async function startOAuthLogin() {
     const oauthUrl = data.authorizeUrl || data.url
     const expectedState = data.state
     if (!oauthUrl) {
-      alert('OAuth login start failed: no authorizeUrl returned')
+      oauthError.value = 'OAuth login start failed: no authorizeUrl returned'
       return
     }
+    // Stash state + reveal the inline paste form FIRST, then open the
+    // OAuth tab. If we open the tab first the user might paste before
+    // the form is rendered (race), and if window.open is blocked the
+    // form still appears so the user can manually navigate.
+    oauthExpectedState.value = expectedState || ''
+    oauthPasted.value = ''
+    oauthPending.value = true
     window.open(oauthUrl, '_blank')
-    // Anthropic redirects to https://platform.claude.com/oauth/code/callback?code=...&state=...
-    // after the user logs in. The callback page just displays the URL; the
-    // user copies it back here. We parse code+state, verify state matches
-    // what /login/start gave us, then POST /login/complete to write the
-    // new token to oauth-credentials.json and redistribute to agents.
-    const pasted = window.prompt(
-      'OAuth window opened in a new tab.\n' +
-      'After logging in, copy the FULL redirect URL (or just the code) from the address bar and paste it here:'
-    )
-    if (!pasted) return
-    let code = null
-    let state = null
-    try {
-      // Accept either a full URL with query params OR a bare code string.
-      const trimmed = pasted.trim()
-      if (trimmed.includes('?') || trimmed.includes('://')) {
-        const u = new URL(trimmed.replace(/^[^?]*\?/, 'https://x.invalid/?'))
-        code = u.searchParams.get('code')
-        state = u.searchParams.get('state')
-      } else if (trimmed.includes('#')) {
-        // Anthropic sometimes returns "code#state" via the redirect display page
-        const [c, s] = trimmed.split('#')
-        code = c
-        state = s
-      } else {
-        code = trimmed
-        state = expectedState
-      }
-    } catch (parseErr) {
-      alert('Could not parse the pasted value. Expected a URL containing ?code=...&state=...\nError: ' + parseErr.message)
-      return
+  } catch (e) {
+    oauthError.value = 'OAuth login failed: ' + e.message
+  }
+}
+
+function cancelOAuthLogin() {
+  oauthPending.value = false
+  oauthExpectedState.value = ''
+  oauthPasted.value = ''
+  oauthError.value = ''
+  oauthSubmitting.value = false
+}
+
+async function submitOAuthCode() {
+  oauthError.value = ''
+  const pasted = (oauthPasted.value || '').trim()
+  if (!pasted) {
+    oauthError.value = 'Please paste the callback URL or code first.'
+    return
+  }
+  // Accept three input shapes:
+  //   1. Full URL like https://platform.claude.com/oauth/code/callback?code=X&state=Y
+  //   2. "code#state" (Anthropic sometimes presents it this way)
+  //   3. Bare code (then we use the state we got from /login/start)
+  let code = null
+  let state = null
+  try {
+    if (pasted.includes('?') || pasted.includes('://')) {
+      const u = new URL(pasted.replace(/^[^?]*\?/, 'https://x.invalid/?'))
+      code = u.searchParams.get('code')
+      state = u.searchParams.get('state')
+    } else if (pasted.includes('#')) {
+      const [c, s] = pasted.split('#')
+      code = c
+      state = s
+    } else {
+      code = pasted
+      state = oauthExpectedState.value
     }
-    if (!code) {
-      alert('No code found in the pasted value.')
-      return
-    }
-    if (expectedState && state && state !== expectedState) {
-      alert('OAuth state mismatch — login session may have expired. Click "重新登录" again to restart.')
-      return
-    }
+  } catch (parseErr) {
+    oauthError.value = 'Could not parse the pasted value: ' + parseErr.message
+    return
+  }
+  if (!code) {
+    oauthError.value = 'No code found in the pasted value.'
+    return
+  }
+  if (oauthExpectedState.value && state && state !== oauthExpectedState.value) {
+    oauthError.value = 'OAuth state mismatch — login session may have expired. Click Re-login to restart.'
+    return
+  }
+  oauthSubmitting.value = true
+  try {
+    const token = await ensureDashboardToken()
     const completeRes = await fetch('/api/auth/login/complete', {
       method: 'POST',
       headers: {
@@ -196,17 +233,20 @@ async function startOAuthLogin() {
         'x-dashboard-token': token,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ code, state: state || expectedState }),
+      body: JSON.stringify({ code, state: state || oauthExpectedState.value }),
     })
     const completeData = await completeRes.json()
     if (!completeRes.ok || completeData.success === false) {
-      alert('Login completion failed: ' + (completeData.error || ('HTTP ' + completeRes.status)))
+      oauthError.value = 'Login completion failed: ' + (completeData.error || ('HTTP ' + completeRes.status))
       return
     }
-    alert('Login complete. Token has been refreshed and distributed to all agents.')
+    // Success — clear the form and refresh the credential overview.
+    cancelOAuthLogin()
     await localStore.loadOverview()
   } catch (e) {
-    alert('OAuth login failed: ' + e.message)
+    oauthError.value = 'Login completion failed: ' + e.message
+  } finally {
+    oauthSubmitting.value = false
   }
 }
 
@@ -359,7 +399,33 @@ onMounted(() => {
           </div>
           <div class="tokenstore-actions">
             <button class="btn-token" @click="refreshOAuth" :disabled="refreshing">{{ t('credentials.refresh') }}</button>
-            <button class="btn-token" @click="startOAuthLogin">{{ t('credentials.reconnect') }}</button>
+            <button class="btn-token" @click="startOAuthLogin" :disabled="oauthPending">{{ t('credentials.reconnect') }}</button>
+          </div>
+          <!-- Inline OAuth completion form (shown after Re-login is clicked).
+               Replaces the previous window.prompt() which was blocked by
+               some browser configurations. -->
+          <div v-if="oauthPending" class="oauth-paste-form">
+            <p class="oauth-paste-hint">
+              1. 在新标签页登录 Anthropic<br>
+              2. 登录后会被 redirect 到 <code>platform.claude.com/oauth/code/callback?code=...&state=...</code><br>
+              3. <strong>复制那个完整 URL（或只复制 code）</strong>，粘贴到下面，点完成
+            </p>
+            <input
+              type="text"
+              v-model="oauthPasted"
+              class="oauth-paste-input"
+              placeholder="https://platform.claude.com/oauth/code/callback?code=...&state=..."
+              :disabled="oauthSubmitting"
+              @keyup.enter="submitOAuthCode"
+              autofocus
+            />
+            <div class="oauth-paste-actions">
+              <button class="btn-token" @click="submitOAuthCode" :disabled="oauthSubmitting || !oauthPasted">
+                {{ oauthSubmitting ? '提交中...' : '完成登录' }}
+              </button>
+              <button class="btn-token btn-cancel" @click="cancelOAuthLogin" :disabled="oauthSubmitting">取消</button>
+            </div>
+            <div v-if="oauthError" class="oauth-paste-error">{{ oauthError }}</div>
           </div>
         </div>
         <div v-else class="cred-loading">{{ t('state.loading') }}</div>
@@ -565,4 +631,50 @@ onMounted(() => {
 }
 .btn-token:hover { background: var(--bg-msg-hover); border-color: var(--accent); }
 .btn-token:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-cancel { color: var(--text-dim); }
+.oauth-paste-form {
+  margin-top: 12px;
+  padding: 12px;
+  background: var(--bg-input);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+}
+.oauth-paste-hint {
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+.oauth-paste-hint code {
+  background: var(--bg-msg-hover);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+.oauth-paste-input {
+  width: 100%;
+  padding: 6px 10px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12px;
+  font-family: monospace;
+  box-sizing: border-box;
+}
+.oauth-paste-input:focus { outline: none; border-color: var(--accent); }
+.oauth-paste-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.oauth-paste-error {
+  margin-top: 8px;
+  padding: 6px 10px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  border-radius: var(--radius-sm);
+  color: #ef4444;
+  font-size: 12px;
+}
 </style>
