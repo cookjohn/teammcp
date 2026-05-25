@@ -25,6 +25,7 @@ import {
   buildRequest,
   buildNotification,
 } from './ipc-protocol.mjs';
+import { readClientToken } from './pipe-token.mjs';
 
 // ── Internal state ────────────────────────────────────────────
 
@@ -320,12 +321,25 @@ function _openSocketAndHandshake(clientVersion) {
       _setupSocketListeners();
 
       const handshakeId = _nextId++;
+      // NB4: read pipe token from disk and include in handshake. The
+      // daemon's IPC server (pty-daemon-ipc.mjs:807) rejects any client
+      // whose handshake params lack a `token` field matching the
+      // pipe-token file. readClientToken does the secure
+      // open-by-descriptor + fstat + uid-check; returns null on any
+      // failure (including missing file pre-daemon-boot).
+      const pipeToken = readClientToken(_isDev);
+      if (!pipeToken) {
+        sock.destroy();
+        reject(new Error(`Pipe token not found at startup — daemon may not have written ~/.teammcp${_isDev ? '-dev' : ''}/pty-daemon.token yet, or read failed (NB4 interim).`));
+        return;
+      }
       const msg = buildRequest(
         IPC_METHODS.HANDSHAKE,
         {
           protocol_version: PROTOCOL_VERSION,
           client: 'http-server',
           client_version: clientVersion ?? '2.0.0',
+          token: pipeToken,
         },
         handshakeId,
       );

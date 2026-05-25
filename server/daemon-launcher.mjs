@@ -117,8 +117,12 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // ── Config ─────────────────────────────────────────────────
 
-const DAEMON_READY_TIMEOUT  = 5000;   // max wait for daemon IPC ready (ms)
+const DAEMON_READY_TIMEOUT  = 15000;  // max wait for daemon IPC ready (ms)
 const DAEMON_READY_INTERVAL = 500;    // retry interval (ms)
+// Bumped from 5s → 15s after first dev boot of 2026-05-25: on Windows the
+// daemon synchronously runs `where binary` for ~10 candidates at startup
+// (resolveAllowedCmdPaths) which takes 1-3s before IPC pipe is open;
+// 5s was too tight when a few candidates (zsh/pwsh) are missing.
 const DAEMON_SCRIPT = join(__dirname, 'pty-daemon.mjs');
 
 // ── H3: env sanitization allow-list ────────────────────────
@@ -386,7 +390,8 @@ function spawnDaemon(isDev) {
 //   the launcher logs a warning and proceeds without verification.
 //   Only an AFFIRMATIVE MAC MISMATCH causes the launcher to abort.
 
-const IDENTITY_CHALLENGE_TIMEOUT_MS = 2000;
+const IDENTITY_CHALLENGE_TIMEOUT_MS = 8000;
+// Bumped from 2s → 8s for the same reason as DAEMON_READY_TIMEOUT above.
 
 async function verifyDaemonIdentity(isDev, identityToken) {
   if (!identityToken) {
@@ -699,7 +704,12 @@ export async function ensureDaemon(options = {}) {
   // waitForDaemonReady loop still runs after this.
   let identityOutcome = { verified: false, mismatch: false, reason: 'not_attempted' };
   const idStart = Date.now();
-  while (Date.now() - idStart < 2000) {
+  // Pipe-wait: same justification as DAEMON_READY_TIMEOUT bump. The daemon
+  // does sync `where` lookups before opening the IPC pipe; on Windows with
+  // missing optional binaries that runs 3-5s. Don't run the identity
+  // challenge until the pipe is connectable, otherwise ENOENT triggers
+  // a soft-fail "skipping verification" that hides real impersonation.
+  while (Date.now() - idStart < 10000) {
     // Quick reachability probe: try to connect once. If it fails, wait.
     try {
       await new Promise((res, rej) => {
