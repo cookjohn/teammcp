@@ -726,6 +726,30 @@ export function getOnlineAgents() {
 }
 
 /**
+ * Force-close all SSE connections for one agent. Called by stopAgent so
+ * the agent flips to offline immediately, even if the underlying process
+ * cleanup missed an orphaned MCP grandchild that was still holding the
+ * connection. The res.end() chain triggers each connection's close handler
+ * → removeConnection() → setAgentStatus(offline) + scheduleCrashDetection
+ * (which is no-op because stopAgent calls markStopped first).
+ *
+ * Returns the count of connections that were open before the call.
+ */
+export function disconnectAgent(agentName) {
+  const set = connections.get(agentName);
+  if (!set || set.size === 0) return 0;
+  const count = set.size;
+  // Snapshot the Set before iterating — close handlers run synchronously
+  // on Windows and call removeConnection, which mutates the same Set;
+  // iterating-and-removing a Set in one pass can skip entries.
+  const list = [...set];
+  for (const res of list) {
+    try { res.end(); } catch {}
+  }
+  return count;
+}
+
+/**
  * Close all SSE connections (for graceful shutdown).
  */
 export function closeAllConnections() {

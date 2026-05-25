@@ -17,7 +17,8 @@ import {
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir, homedir } from 'node:os';
-import { getUseResume, getAgentByName, getAgentsNeedingRouter, setState as dbSetState, saveMessage } from './db.mjs';
+import { getUseResume, getAgentByName, getAgentsNeedingRouter, setState as dbSetState, saveMessage, setAgentStatus } from './db.mjs';
+import { disconnectAgent } from './sse.mjs';
 import { AGENTS_DIR, SCREENSHOTS_DIR, ensureDirectories } from './lib/paths.mjs';
 import { startAuthMonitor, stopAuthMonitor, clearAgent as clearAuthMonitorAgent } from './auth-monitor.mjs';
 
@@ -755,11 +756,55 @@ export async function stopAgent(name) {
 
   const agentDir = join(AGENTS_BASE_DIR, name);
   const pidFile = join(agentDir, '.agent.pid');
-  let killed = false;
-
   const entry = processes.get(name);
 
-  // Method 1: node-pty kill (preferred)
+  // ── Collect every PID we can find for this agent ─────────────
+  //
+  // Previously stopAgent tried 3 strategies in sequence and stopped at the
+  // first success. That failed silently when (a) processes Map was empty
+  // because the server had restarted since startAgent, AND (b) .agent.pid
+  // pointed at a long-dead top-level wrapper, leaving the fakechat MCP
+  // grandchild (bun.exe) running and holding SSE → agent stayed "online"
+  // on the Dashboard.
+  //
+  // Fix: collect PIDs from ALL sources into a Set, then kill them all.
+  // Source D is the new safety net — a wmic scan for any process whose
+  // CommandLine references this agent's .claude-config dir. That finds
+  // orphaned bun MCPs even when every other source is stale.
+  const killSet = new Set();
+  if (entry?.pid) killSet.add(entry.pid);
+  if (entry?.ptyHandle?.pid && entry.ptyHandle.pid !== entry.pid) {
+    killSet.add(entry.ptyHandle.pid);
+  }
+  if (existsSync(pidFile)) {
+    try {
+      const pid = parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
+      if (pid && !isNaN(pid)) killSet.add(pid);
+    } catch {}
+  }
+  // wmic LIKE on CommandLine. SAFE_NAME_RE forbids special chars so direct
+  // interpolation is safe. Forward slashes match how Windows tools print
+  // CLAUDE_CONFIG_DIR cmdline arguments (e.g. bun --cwd uses /). Path
+  // structure agents/<NAME>/.claude-config is unique enough that no other
+  // agent name can collide (SAFE_NAME_RE forbids slashes in names).
+  try {
+    const out = execSync(
+      `wmic process where "CommandLine like '%agents/${name}/.claude-config%'" get processid /value`,
+      { encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10000 }
+    );
+    for (const line of out.split(/\r?\n/)) {
+      const m = line.match(/^ProcessId=(\d+)/);
+      if (!m) continue;
+      const pid = parseInt(m[1], 10);
+      if (pid && pid !== process.pid) killSet.add(pid);
+    }
+  } catch (e) {
+    console.warn(`[stopAgent] wmic scan failed for ${name}: ${e.message}`);
+  }
+
+  // ── Kill ─────────────────────────────────────────────────────
+  let killed = false;
+  // node-pty kill first when tracked — gracefully tears down ConPTY state.
   if (entry?.ptyHandle) {
     try {
       entry.ptyHandle.kill();
@@ -768,36 +813,42 @@ export async function stopAgent(name) {
       console.log(`[pty] kill ${name} failed: ${e.message}, falling back to taskkill`);
     }
   }
-
-  // Method 2: taskkill by tracked PID
-  if (!killed && entry?.pid) {
+  // taskkill every PID we found. /T kills the process tree. Use execSync
+  // so we know the call completed before we move on; the original async
+  // exec() races against our subsequent cleanup and DB update.
+  for (const pid of killSet) {
     try {
-      exec(`taskkill /PID ${entry.pid} /T /F`, { shell: 'cmd.exe' });
+      execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore', timeout: 5000 });
       killed = true;
-    } catch {}
+    } catch {
+      // Already-dead PIDs return non-zero; that's fine, they're "killed".
+    }
   }
 
-  // Method 3: Read .agent.pid file and kill process tree (fallback for restart recovery)
-  if (!killed && existsSync(pidFile)) {
-    try {
-      const pid = parseInt(readFileSync(pidFile, 'utf-8').trim(), 10);
-      if (pid && !isNaN(pid)) {
-        exec(`taskkill /PID ${pid} /T /F`, { shell: 'cmd.exe' });
-        killed = true;
-      }
-    } catch {}
-  }
-
-  // Cleanup
+  // ── Cleanup local + DB state, force SSE close ────────────────
   try { unlinkSync(pidFile); } catch {}
   processes.delete(name);
   try { clearAuthMonitorAgent(name); } catch {}
+  // Close any orphaned SSE connections so isOnline(name) flips false.
+  // bun MCP grandchildren can hold these even after their parent dies;
+  // wmic kill should have caught them but this is belt-and-braces. The
+  // res.end() chain runs the close handler which calls setAgentStatus
+  // offline — but we also do it explicitly in case no SSE was open.
+  try {
+    const closed = disconnectAgent(name);
+    if (closed > 0) console.log(`[stopAgent] closed ${closed} SSE connection(s) for ${name}`);
+  } catch (e) {
+    console.warn(`[stopAgent] disconnectAgent ${name} failed: ${e.message}`);
+  }
+  try { setAgentStatus(name, 'offline'); } catch {}
 
   if (!killed) {
-    console.warn(`[stopAgent] No running process found for "${name}", marking as stopped`);
+    console.warn(`[stopAgent] no running process found for "${name}", marked offline anyway`);
+  } else {
+    console.log(`[stopAgent] ${name}: killed ${killSet.size} PID(s)`);
   }
 
-  return { stopped: name };
+  return { stopped: name, killedPidCount: killSet.size };
 }
 
 /**
