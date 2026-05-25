@@ -665,11 +665,37 @@ export async function handleRequest(req, res) {
       // Always update sender's own read_status (so they don't get their own messages on reconnect)
       updateReadStatus(req.agent.name, channelId, msg.id);
 
+      // Phase B v1: memory injection. For each agent who will actually
+      // RECEIVE this message (DM recipient OR @-mentioned in a group),
+      // look up the top-3 relevant memories and tack them onto the event
+      // metadata as `_memories`. The channel-bridge plugin renders them
+      // into the visible msgText as a "📌 相关记忆" section. Falls back
+      // silently to no injection on FTS failure or empty results.
+      const lookupAndInject = async (recipientName) => {
+        try {
+          const { lookupRelevantMemories } = await import('./memory-injector.mjs');
+          const memories = lookupRelevantMemories(recipientName, msg.content, 3);
+          if (memories.length === 0) return null;
+          // Clone the event so each recipient gets their own metadata
+          // — different agents see different memory shortlists.
+          return {
+            ...event,
+            metadata: { ...(event.metadata || {}), _memories: memories },
+          };
+        } catch (e) {
+          // Inject errors never block delivery.
+          console.warn('[memory-injector] inject for', recipientName, 'failed:', e.message);
+          return null;
+        }
+      };
+
       if (channel.type === 'dm') {
         // DM: push to the other party
         const parts = channelId.split(':');  // dm:agent1:agent2
         const other = parts[1] === req.agent.name ? parts[2] : parts[1];
-        pushWithPriority(other, event, priority);
+        // Try to enrich; fall back to plain event if injection returns null.
+        const enriched = await lookupAndInject(other);
+        pushWithPriority(other, enriched || event, priority);
         // Update read_status for online recipient (delivered = read in SSE model)
         if (isOnline(other)) updateReadStatus(other, channelId, msg.id);
 
@@ -711,7 +737,25 @@ export async function handleRequest(req, res) {
         const groupMembers = ensureChairman(getChannelMembers(channelId).filter(m => m !== req.agent.name), req.agent.name);
         // Warn if mentioned agents are not in this channel
         const notInChannel = (mentions || []).filter(m => m !== req.agent.name && !groupMembers.includes(m) && getAgentByName(m));
-        pushWithPriorityToAgents(groupMembers, event, priority);
+        // Phase B v1: only @-mentioned agents get memory injection in group
+        // messages. Pushing memories to every channel member would (a) waste
+        // FTS queries on uninterested recipients and (b) clutter casual
+        // group chat with hint sections nobody asked for. Mentioned agents
+        // are explicitly addressed → they get the relevance hint.
+        const mentionedRecipients = new Set((mentions || []).filter(m => groupMembers.includes(m)));
+        if (mentionedRecipients.size > 0) {
+          // Personalize per mentioned agent.
+          const plainRecipients = groupMembers.filter(m => !mentionedRecipients.has(m));
+          if (plainRecipients.length > 0) {
+            pushWithPriorityToAgents(plainRecipients, event, priority);
+          }
+          for (const m of mentionedRecipients) {
+            const enriched = await lookupAndInject(m);
+            pushWithPriority(m, enriched || event, priority);
+          }
+        } else {
+          pushWithPriorityToAgents(groupMembers, event, priority);
+        }
         // Update read_status for online recipients to prevent duplicates on reconnect
         for (const a of groupMembers) {
           if (isOnline(a)) updateReadStatus(a, channelId, msg.id);

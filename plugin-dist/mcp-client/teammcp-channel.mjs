@@ -699,6 +699,34 @@ const TOOLS = [
       required: ["file_id"],
     },
   },
+  // Gate 2: memory tools (GATE2_ENABLED=on to activate)
+  {
+    name: "search_memories",
+    description: "搜索团队记忆（FTS 全文检索）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "搜索关键词" },
+        agent: { type: "string", description: "按 agent 过滤，可选" },
+        level: { type: "string", enum: ["critical", "important", "routine", "lesson"], description: "按级别过滤，可选" },
+        limit: { type: "number", description: "返回条数，默认 20" },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "ask_memory",
+    description: "用自然语言向团队记忆提问（LLM 增强检索）",
+    inputSchema: {
+      type: "object",
+      properties: {
+        question: { type: "string", description: "自然语言问题" },
+        agent:   { type: "string", description: "按 agent 过滤，可选" },
+        level:   { type: "string", enum: ["critical", "important", "routine", "lesson"], description: "按级别过滤，可选" },
+      },
+      required: ["question"],
+    },
+  },
 ];
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
@@ -1244,6 +1272,41 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: "text", text: `File: ${meta.original_name}\nSize: ${meta.size} bytes\nMIME: ${meta.mime_type}\nSHA256: ${meta.sha256}\nUploaded by: ${meta.uploaded_by}\n\nContent (base64):\n${base64Content}` }] };
       }
 
+      // Gate 2: memory tools
+      case "search_memories": {
+        if (process.env.GATE2_ENABLED !== 'on') {
+          return { content: [{ type: "text", text: "search_memories is gated behind GATE2_ENABLED=on (Gate 2 soak pending)" }], isError: true };
+        }
+        const params = new URLSearchParams({ q: args.query });
+        if (args.agent) params.set("agent", args.agent);
+        if (args.level) params.set("level", args.level);
+        if (args.limit) params.set("limit", String(args.limit));
+        const result = await apiRequest("GET", `/api/memories/search?${params}`);
+        const memories = result.results || [];
+        if (memories.length === 0) {
+          return { content: [{ type: "text", text: `No memories found for "${args.query}"` }] };
+        }
+        const formatted = memories.map(m =>
+          `[${m.level}] ${m.title}\n  ${m.summary || ''}\n  (agent: ${m.agent}, ${m.created_at})`
+        ).join("\n\n");
+        return { content: [{ type: "text", text: `${memories.length} memory result(s):\n\n${formatted}` }] };
+      }
+
+      case "ask_memory": {
+        if (process.env.GATE2_ENABLED !== 'on') {
+          return { content: [{ type: "text", text: "ask_memory is gated behind GATE2_ENABLED=on (Gate 2 soak pending)" }], isError: true };
+        }
+        const body = { question: args.question };
+        if (args.agent) body.agent = args.agent;
+        if (args.level) body.level = args.level;
+        const result = await apiRequest("POST", "/api/memories/ask", body);
+        const answer = result.answer || '(no answer)';
+        const sources = (result.sources || []).map(s => `- ${s}`).join('\n');
+        const confidence = result.confidence || 'unknown';
+        const relatedNotes = result.related_notes || '';
+        return { content: [{ type: "text", text: `${answer}\n\nConfidence: ${confidence}${sources ? `\nSources:\n${sources}` : ''}${relatedNotes ? `\nRelated: ${relatedNotes}` : ''}` }] };
+      }
+
       default:
         return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
     }
@@ -1376,13 +1439,30 @@ function handleSSEEvent(data) {
     const isDm = channelId.startsWith("dm:");
     const source = isDm ? "dm" : "group";
 
+    // Phase B v1: server attaches `_memories` (array) in metadata when the
+    // agent is the directed recipient (DM or @-mention). Render as a
+    // visible section so Claude actually sees the relevant memories
+    // before composing its reply.
+    let memoriesSection = '';
+    if (event.metadata && Array.isArray(event.metadata._memories) && event.metadata._memories.length > 0) {
+      const lines = event.metadata._memories.map((m, i) => {
+        const title = (m.title || '').slice(0, 100);
+        const ageTag = m.age ? ` _${m.age}_` : '';
+        const levelTag = m.level && m.level !== 'routine' ? ` [${m.level}]` : '';
+        return `  ${i + 1}. ${title}${ageTag}${levelTag}`;
+      });
+      memoriesSection = `\n📌 相关记忆 (${event.metadata._memories.length}):\n${lines.join('\n')}\n`;
+    }
+
     // Format like the working team-sync-watcher: raw text content, meta for routing
-    const msgText = `---\n**${from}** (${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })})\n\n${content}\n`;
+    const msgText = `---\n**${from}** (${new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' })})\n\n${content}\n${memoriesSection}`;
 
     // Pass through metadata fields (thread_id, user, context_token, etc.)
+    // Skip _memories — already rendered into msgText above.
     const extraMeta = {};
     if (event.metadata && typeof event.metadata === 'object') {
       for (const [k, v] of Object.entries(event.metadata)) {
+        if (k === '_memories') continue;
         if (typeof v === 'string') extraMeta[k] = v;
       }
     }
