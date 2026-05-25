@@ -227,8 +227,16 @@ function releaseLock(release) {
 let refreshTimer = null;
 let consecutiveFailures = 0;
 let lastRefreshTime = null;
-let refreshStatus = 'never'; // 'ok' | 'retrying' | 'failed' | 'never'
+let refreshStatus = 'never'; // 'ok' | 'retrying' | 'failed' | 'requires_login' | 'never'
 let retryTimeout = null;
+let lastRefreshError = null;  // surfaced via /api/auth/status when refresh fails
+
+// OAuth errors that Anthropic returns when the refresh token is permanently
+// dead — no amount of retry will fix these, the user must re-login. Match
+// on the error code substring inside the body text we got from the OAuth
+// server: 'invalid_grant' = revoked/expired refresh token, 'invalid_client'
+// = wrong client_id (config bug), 'access_denied' = user revoked.
+const PERMANENT_OAUTH_ERRORS = /(invalid_grant|invalid_client|access_denied|unauthorized_client)/;
 
 /**
  * Attempt to refresh the OAuth access token.
@@ -238,6 +246,14 @@ let retryTimeout = null;
  * collectAgentTokens() will detect and reverse-sync the newer token.
  */
 async function refreshOAuthToken() {
+  // Permanent-failure short-circuit: once we know the refresh token is
+  // dead, stop spamming the OAuth server and the logs every 5 min.
+  // Only completeLogin() (re-login flow) or admin-clearing via state
+  // can flip status off 'requires_login'.
+  if (refreshStatus === 'requires_login') {
+    return;
+  }
+
   // Step 1: Load credentials
   let creds = loadCredentials();
   if (!creds || !creds.claudeAiOauth) {
@@ -342,6 +358,7 @@ async function refreshOAuthToken() {
     // Step 8: Success
     consecutiveFailures = 0;
     refreshStatus = 'ok';
+    lastRefreshError = null;
     lastRefreshTime = new Date().toISOString();
     if (retryTimeout) {
       clearTimeout(retryTimeout);
@@ -352,26 +369,59 @@ async function refreshOAuthToken() {
     // Trap 3: Redistribute to ALL agents after every refresh
     distributeToAgents();
   } catch (err) {
-    // Step 9: Failure — schedule retry
-    logErr('Refresh failed:', err.message);
+    // Step 9: Classify failure — permanent (OAuth server rejected the
+    // refresh token) vs transient (network glitch, 5xx, timeout).
+    // Permanent errors mean re-login is required; retrying is wasteful
+    // and floods logs every 5 min from refreshTimer. Stop both timers.
+    const isPermanent = PERMANENT_OAUTH_ERRORS.test(err.message);
+    lastRefreshError = err.message;
     consecutiveFailures++;
-    refreshStatus = consecutiveFailures >= MAX_RETRIES ? 'failed' : 'retrying';
-    scheduleRetry();
 
-    // Step 10: Alert once when crossing the MAX_RETRIES threshold
-    if (consecutiveFailures === MAX_RETRIES) {
+    if (isPermanent) {
+      logErr(`Refresh permanently failed (${err.message}). Stopping retries.`);
+      logErr('Run POST /api/auth/login/start to re-login (Dashboard → Auth, or curl).');
+      refreshStatus = 'requires_login';
+      // Cancel any pending retry. refreshTimer is left intact; the
+      // early-return at the top of refreshOAuthToken short-circuits it.
+      if (retryTimeout) {
+        clearTimeout(retryTimeout);
+        retryTimeout = null;
+      }
+      // Alert state — fires on FIRST permanent detection so a re-login
+      // happens before agents pile up 401s in their conversations.
       try {
         if (_setStateFn) {
           _setStateFn(
             'teammcp',
             'credentials/refresh_status',
-            'failed',
+            'requires_login',
             'credential-manager',
-            `Auto-refresh failed ${consecutiveFailures} times consecutively. Last error: ${err.message}`,
+            `Refresh token permanently invalid (${err.message}). Re-login required.`,
           );
         }
       } catch (stateErr) {
         logErr('Failed to write state alert:', stateErr.message);
+      }
+    } else {
+      logErr('Refresh failed (transient):', err.message);
+      refreshStatus = consecutiveFailures >= MAX_RETRIES ? 'failed' : 'retrying';
+      scheduleRetry();
+      // Alert once when crossing the MAX_RETRIES threshold for
+      // transient errors only (permanent already alerted above).
+      if (consecutiveFailures === MAX_RETRIES) {
+        try {
+          if (_setStateFn) {
+            _setStateFn(
+              'teammcp',
+              'credentials/refresh_status',
+              'failed',
+              'credential-manager',
+              `Auto-refresh failed ${consecutiveFailures} times consecutively. Last error: ${err.message}`,
+            );
+          }
+        } catch (stateErr) {
+          logErr('Failed to write state alert:', stateErr.message);
+        }
       }
     }
   } finally {
@@ -582,6 +632,7 @@ async function completeLogin(code, state) {
 
     consecutiveFailures = 0;
     refreshStatus = 'ok';
+    lastRefreshError = null;  // clear permanent-failure flag so the timer resumes
     lastRefreshTime = new Date().toISOString();
     startRefreshTimer();
     distributeToAgents();
@@ -774,6 +825,11 @@ function getCredentialStatus() {
     lastRefresh: lastRefreshTime,
     refreshStatus,
     consecutiveFailures,
+    // When refreshStatus is 'requires_login' or 'failed', surface the
+    // last OAuth error so the Dashboard can show a useful message
+    // instead of a generic "expired".
+    lastRefreshError: refreshStatus === 'ok' ? null : lastRefreshError,
+    requiresLogin: refreshStatus === 'requires_login',
   };
 }
 
