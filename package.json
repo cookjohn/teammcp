@@ -10,6 +10,9 @@
   "main": "./server/index.mjs",
   "scripts": {
     "start": "node server/index.mjs",
+    "build": "cd dashboard && npm run build",
+    "build:dashboard": "cd dashboard && npm run build",
+    "dev:dashboard": "cd dashboard && npm run dev",
     "postinstall": "node scripts/postinstall.mjs",
     "setup": "bash scripts/setup.sh",
     "init": "node bin/teammcp.mjs init"

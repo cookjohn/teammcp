@@ -221,7 +221,23 @@ export async function handleRequest(req, res) {
     try {
       const data = await readFile(fullPath);
       const ext = extname(fullPath);
-      res.writeHead(200, { 'Content-Type': MIME_TYPES[ext] || 'application/octet-stream' });
+      // SPA cache strategy:
+      //   - index.html (and any other HTML entry) must NEVER be cached —
+      //     otherwise browsers keep serving the old <script src=index-X.js>
+      //     reference after deploys and users see stale UI until they
+      //     hard-refresh. Vite builds with content-hashed asset filenames,
+      //     so the assets DO get refreshed by simple cache busting, but
+      //     only if index.html itself is fetched fresh.
+      //   - /assets/* filenames are hash-stable: index-DU7S_coX.js can't
+      //     change content without changing the hash, so we cache them
+      //     for a year. Once downloaded the browser never re-requests.
+      const headers = { 'Content-Type': MIME_TYPES[ext] || 'application/octet-stream' };
+      if (filePath.startsWith('/assets/')) {
+        headers['Cache-Control'] = 'public, max-age=31536000, immutable';
+      } else {
+        headers['Cache-Control'] = 'no-cache, must-revalidate';
+      }
+      res.writeHead(200, headers);
       res.end(data);
       return;
     } catch {
