@@ -309,18 +309,21 @@ async function refreshOAuthToken() {
     }
 
     // Step 5: Exchange refresh token for new access token.
-    // Anthropic /v1/oauth/token requires application/x-www-form-urlencoded
-    // per the Claude Code CLI binary's embedded constants. JSON returns
-    // HTTP 400 invalid_request_error "Invalid request format".
+    // Claude Code CLI uses JSON for this call (verified by extracting
+    // from the compiled binary). Earlier we tried form-urlencoded based
+    // on the binary's "application/x-www-form-urlencoded" strings but
+    // those were for a different code path (probably the JWT bearer flow).
+    // The user-OAuth refresh path uses JSON. Body shape from the binary:
+    //   { grant_type, refresh_token, client_id, scope }
     const resp = await fetch(OAUTH_TOKEN_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
         grant_type: 'refresh_token',
         refresh_token: observedRefreshToken,  // Doc-B: snapshotted value
         client_id: OAUTH_CLIENT_ID,
         scope: OAUTH_SCOPES,
-      }).toString(),
+      }),
       signal: AbortSignal.timeout(15_000),
     });
 
@@ -598,18 +601,28 @@ async function completeLogin(code, state) {
   pendingLogins.delete(state);
 
   try {
-    // Anthropic /v1/oauth/token wants form-encoded, see refreshOAuthToken
-    // for the same change. With JSON it returns 400 "Invalid request format".
+    // The Claude Code CLI (extracted from the compiled binary) calls the
+    // token endpoint like this:
+    //   axios.post(TOKEN_URL, {
+    //     grant_type: "authorization_code",
+    //     code, redirect_uri, client_id, code_verifier, state
+    //   }, { headers: { "Content-Type": "application/json" } })
+    // The body includes the `state` field — Anthropic rejects requests
+    // without it with HTTP 400 invalid_request_error "Invalid request
+    // format". The earlier attempt with form-urlencoded was the wrong
+    // direction (form OR json both work transport-wise, but the missing
+    // state field is what triggered the 400).
     const resp = await fetch(OAUTH_TOKEN_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
         grant_type: 'authorization_code',
         code,
+        redirect_uri: 'https://platform.claude.com/oauth/code/callback',
         client_id: OAUTH_CLIENT_ID,
         code_verifier: session.codeVerifier,
-        redirect_uri: 'https://platform.claude.com/oauth/code/callback',
-      }).toString(),
+        state,
+      }),
       signal: AbortSignal.timeout(15_000),
     });
 
