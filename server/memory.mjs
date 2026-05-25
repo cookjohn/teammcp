@@ -1,6 +1,8 @@
 import crypto from 'node:crypto';
 import { createMemory, getState, setState, getCcMetricsSince } from './db.mjs';
-import { subscribe, subscribeAll } from './eventbus.mjs';
+import { subscribe, subscribeAll, publish } from './eventbus.mjs';
+import { ProviderRegistry, TeamSearchProvider } from './memory-providers.mjs';
+import { SkillNudgeProvider } from './skill-nudge-provider.mjs';
 
 // ── Constants ────────────────────────────────────────────
 
@@ -104,7 +106,6 @@ function computeEventHash(event) {
 }
 
 function isDuplicate(hash) {
-  // Check in-memory window
   if (hashWindow.has(hash)) {
     const seenAt = hashWindow.get(hash);
     if (Date.now() - seenAt < DEDUP_WINDOW_MS) {
@@ -113,35 +114,11 @@ function isDuplicate(hash) {
     // Expired entry, remove it
     hashWindow.delete(hash);
   }
-
-  // Check DB for recent duplicate
-  try {
-    const oneHourAgo = new Date(Date.now() - DEDUP_WINDOW_MS).toISOString();
-    const existing = getState('memory', `dup_${hash}`);
-    if (existing) {
-      const ts = existing.value;
-      if (ts && new Date(ts).getTime() > Date.now() - DEDUP_WINDOW_MS) {
-        return true;
-      }
-    }
-  } catch {
-    // If DB check fails, rely on in-memory window only
-  }
-
   return false;
 }
 
 function markHashSeen(hash) {
   hashWindow.set(hash, Date.now());
-  // Persist to DB for cross-process dedup
-  try {
-    setState('memory', `dup_${hash}`, new Date().toISOString(), 'memory-engine', 'dedup tracking', {
-          systemWrite: true,
-          allowFieldCreation: true,
-        });
-  } catch {
-    // Non-critical: in-memory dedup still works within single process
-  }
 }
 
 function cleanupHashWindow() {
@@ -181,7 +158,7 @@ async function processEvent(event) {
   // 2. Compute hash
   const hash = computeEventHash(processed);
 
-  // 3. Dedup check (in-memory + DB)
+  // 3. Dedup check (in-memory window)
   if (isDuplicate(hash)) {
     log(`Duplicate skipped: ${hash}`);
     return;
@@ -211,7 +188,23 @@ async function processEvent(event) {
   // 6. Mark hash as seen
   markHashSeen(hash);
 
-  // 7. Log
+  // 7. Publish memory_created event for providers (e.g. SkillNudgeProvider)
+  try {
+    publish('memory_created', {
+      memory_id: memory.id,
+      agent: memory.agent,
+      level: memory.level,
+      category: memory.category,
+      title: memory.title,
+      source_type: memory.source_type,
+      raw_event: processed.raw_text || null,
+    });
+  } catch (err) {
+    // Non-critical: don't block memory creation on event publish failure
+    console.error('[Memory] Failed to publish memory_created:', err.message);
+  }
+
+  // 8. Log
   log(`Memory created: ${memory.id} [${level}] ${memory.title}`);
 
   return memory;
@@ -224,8 +217,34 @@ let messagesUnsub = null;
 
 function handleEventbusEvent(event) {
   // Filter: skip events produced by the memory engine itself (avoids infinite loop)
+  // 2026-04-25 incident: memory_created loop wrote 625k rows / 3GB in 10min.
+  // Old filter (project_id/changed_by) only covered state_changed shape.
+  // Now reject ANY event that is itself a memory engine output by event.type.
+  if (event.type === 'memory_created') return;
+  if (event.type === 'memory_sweep') return;
   if (event.project_id === 'memory') return;
   if (event.changed_by === 'memory-engine') return;
+  if (event.source_type === 'eventbus' || event.source_type === 'cc_metrics' || event.source_type === 'message' || event.source_type === 'manual') {
+    // Belt-and-suspenders: any event that already carries memory engine source_type tag
+    // means it has already been ingested once. Drop to prevent re-ingestion if/when other
+    // code paths republish such events.
+    if (event.level_hint) return;
+  }
+  // Heartbeat-style state_changed events that fire every minute (auth-monitor
+  // health metrics, etc.) are NOT knowledge worth remembering — they're
+  // monitoring data. Filter by project_id + field prefix. Observed:
+  //   project_id='audit', field='auth-monitor/metrics' — 1 update/min,
+  //   already at version 7000+ from past runs, generated thousands of
+  //   memories per week with zero semantic value.
+  // If a state_changed event is genuinely interesting (a project state
+  // owner changes a real field), the field name won't match this list.
+  if (event.type === 'state_changed') {
+    const field = event.field || '';
+    if (field === 'auth-monitor/metrics') return;
+    if (field.startsWith('memory/')) return;       // memory engine's own bookkeeping
+    if (field.startsWith('credentials/')) return;  // credential refresh status pings
+    if (field.startsWith('pty_daemon.')) return;   // T1 watchdog escalation pings
+  }
 
   const levelHint = EVENT_INTEREST[event.type] || 'routine';
   writeQueue.enqueue({
@@ -265,6 +284,7 @@ async function scanCcMetrics() {
     if (rows.length === 0) return;
 
     let maxId = lastId;
+    let skipped = 0;
     for (const row of rows) {
       if (row.id > maxId) maxId = row.id;
 
@@ -274,6 +294,22 @@ async function scanCcMetrics() {
       else if (row.event === 'StopFailure') levelHint = 'critical';
       else if (row.event === 'SessionStart' || row.event === 'SessionEnd') levelHint = 'routine';
       else if (row.event === 'PostToolUse' && row.error) levelHint = 'lesson';
+
+      // Drop routine PostToolUse without errors. Each tool call (Read, Grep,
+      // Bash, Edit, ...) was previously becoming a memory and the noise
+      // dominated everything semantic. Cross-validated against the 2026-05-25
+      // sample: of 444 CEO cc_metrics in 1h, ~430 were routine PostToolUse
+      // with no error — pure tool-trace, no learning signal. PreToolUse and
+      // session boundaries are kept (small volume, useful for timelines);
+      // PostToolUse with `error` is kept (a 'lesson' that the agent should
+      // remember). Everything else routine and uninteresting is skipped.
+      if (
+        levelHint === 'routine' &&
+        (row.event === 'PostToolUse' || row.event === 'PreToolUse')
+      ) {
+        skipped++;
+        continue;
+      }
 
       writeQueue.enqueue({
         level_hint: levelHint,
@@ -297,6 +333,7 @@ async function scanCcMetrics() {
     }
 
     // Persist scan position
+    if (skipped > 0) log(`cc_metrics: skipped ${skipped} routine PreToolUse/PostToolUse rows (no error)`);
     setState('memory', 'last_scanned_id', String(maxId), 'memory-engine', 'cc_metrics scan position', {
           systemWrite: true,
           allowFieldCreation: true,
@@ -413,6 +450,7 @@ function stopDedupCleanup() {
 
 let writeQueue = null;
 let engineRunning = false;
+let providerRegistry = null;
 
 // ── Exported API ─────────────────────────────────────────
 
@@ -426,14 +464,48 @@ export function startMemoryEngine() {
     return;
   }
 
+  if (process.env.MEMORY_ENGINE !== 'on') {
+    log('MEMORY_ENGINE != "on" — engine disabled. Set MEMORY_ENGINE=on to enable.');
+    log('Reason: memory pipeline has a write-amplification bug (dup_* rows, no TTL) that caused a 201GB DB bloat on 2026-04-17. Kept off until CTO lands the retention primitive + read-path fix.');
+    return;
+  }
+
   writeQueue = new WriteQueue(500);
   subscribeEventbus();
   subscribeMessages();
   startCcMetricsScan();
   startDedupCleanup();
 
+  // ── Provider Registry ──────────────────────────────────
+  providerRegistry = new ProviderRegistry();
+  providerRegistry.register(new TeamSearchProvider());
+  providerRegistry.register(new SkillNudgeProvider());
+
+  // Forward memory_created events to providers
+  subscribe('memory_created', (event) => {
+    providerRegistry.dispatchEvent(event).catch(err => {
+      log(`Provider dispatch error: ${err.message}`);
+    });
+  });
+
+  // Initialize all providers (async, non-blocking)
+  providerRegistry.initAll().catch(err => {
+    log(`Provider init error: ${err.message}`);
+  });
+
   engineRunning = true;
   log('Memory engine started');
+
+  // G1.L: auto-write gate1.soak_opened_at on first successful startup (idempotent)
+  try {
+    const existing = getState('gate1', 'soak_opened_at');
+    if (!existing || !existing.value) {
+      setState('gate1', 'soak_opened_at', new Date().toISOString(), 'memory-engine',
+        'auto-set on first successful memory engine startup', { systemWrite: true, allowFieldCreation: true });
+    }
+  } catch (err) {
+    log(`gate1.soak_opened_at auto-write failed (non-fatal): ${err.message}`);
+  }
 }
 
 /**
@@ -447,6 +519,12 @@ export async function stopMemoryEngine() {
   stopDedupCleanup();
   unsubscribeEventbus();
   unsubscribeMessages();
+
+  // Shutdown providers
+  if (providerRegistry) {
+    await providerRegistry.shutdownAll();
+    providerRegistry = null;
+  }
 
   // Drain remaining queue items
   if (writeQueue && writeQueue.length > 0) {
