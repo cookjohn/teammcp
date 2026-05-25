@@ -280,8 +280,8 @@ onMounted(() => {
           <div class="stat-label">{{ t('credentials.legacy') }}</div>
         </div>
         <div class="cred-stat-card" v-if="localStore.overview.value.tokenStatus">
-          <div class="stat-value" :style="{ color: localStore.overview.value.tokenStatus.loggedIn ? 'var(--green)' : 'var(--red)' }">
-            {{ localStore.overview.value.tokenStatus.loggedIn ? t('credentials.connected') : t('credentials.disconnected') }}
+          <div class="stat-value" :style="{ color: localStore.overview.value.tokenStatus.isValid ? 'var(--green)' : 'var(--red)' }">
+            {{ localStore.overview.value.tokenStatus.isValid ? t('credentials.connected') : t('credentials.disconnected') }}
           </div>
           <div class="stat-label">OAuth</div>
         </div>
@@ -385,14 +385,14 @@ onMounted(() => {
       <!-- TokenStore / OAuth Status Card -->
       <div class="cred-section">
         <div class="section-title">{{ t('credentials.tokenStore') }}</div>
-        <div v-if="localStore.overview.value?.tokenStatus" class="tokenstore-card" :class="localStore.overview.value.tokenStatus.loggedIn ? 'ok' : 'bad'">
+        <div v-if="localStore.overview.value?.tokenStatus" class="tokenstore-card" :class="localStore.overview.value.tokenStatus.isValid ? 'ok' : 'bad'">
           <div class="tokenstore-status">
-            <span class="status-dot" :class="localStore.overview.value.tokenStatus.loggedIn ? 'online' : 'offline'"></span>
-            <span>{{ localStore.overview.value.tokenStatus.loggedIn ? t('credentials.connected') : t('credentials.disconnected') }}</span>
+            <span class="status-dot" :class="localStore.overview.value.tokenStatus.isValid ? 'online' : 'offline'"></span>
+            <span>{{ localStore.overview.value.tokenStatus.isValid ? t('credentials.connected') : t('credentials.disconnected') }}</span>
           </div>
           <div v-if="localStore.overview.value.tokenStatus.expiresAt" class="tokenstore-meta">
             Expires: {{ new Date(localStore.overview.value.tokenStatus.expiresAt).toLocaleString() }}
-            <span class="dim">({{ Math.round((localStore.overview.value.tokenStatus.expiresIn || 0) / 60000) }} min)</span>
+            <span class="dim">({{ localStore.overview.value.tokenStatus.expiresIn }})</span>
           </div>
           <div v-if="localStore.overview.value.tokenStatus.lastRefresh" class="tokenstore-meta">
             {{ t('credentials.lastRefresh') }}: {{ formatDate(localStore.overview.value.tokenStatus.lastRefresh) }} {{ formatTime(localStore.overview.value.tokenStatus.lastRefresh) }}
