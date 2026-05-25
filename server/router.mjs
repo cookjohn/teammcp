@@ -674,7 +674,16 @@ export async function handleRequest(req, res) {
       const lookupAndInject = async (recipientName) => {
         try {
           const { lookupRelevantMemories } = await import('./memory-injector.mjs');
-          const memories = lookupRelevantMemories(recipientName, msg.content, 3);
+          // Phase B v2: pass channelId so the lookup widens the FTS
+          // query with the last 2 messages on this channel. LLM rerank
+          // runs by default and fails-open if unavailable.
+          const memories = await lookupRelevantMemories(recipientName, msg.content, {
+            limit: 3,
+            channelId,
+            contextDepth: 2,
+            minRank: -0.5,
+            useLlmRerank: true,
+          });
           if (memories.length === 0) return null;
           // Clone the event so each recipient gets their own metadata
           // — different agents see different memory shortlists.
