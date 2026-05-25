@@ -161,6 +161,16 @@ export async function killPty(agent, signal = 'SIGTERM') {
 }
 
 /**
+ * Kill a PTY with a recorded reason. Reason flows into the daemon-side
+ * entry.exitReason so subsequent pty.exit notifications can attribute
+ * the kill source (user_stop vs watchdog vs crash). Used by
+ * spawn-pty-via-daemon's DaemonPtyHandle.kill(reason).
+ */
+export async function killPtyWithReason(agent, reason, signal = 'SIGTERM') {
+  return _request(IPC_METHODS.PTY_KILL, { agent, signal, reason });
+}
+
+/**
  * Resize a PTY.
  *
  * @param {string} agent

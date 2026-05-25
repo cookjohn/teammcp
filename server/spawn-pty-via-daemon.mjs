@@ -19,7 +19,7 @@ import {
   killPtyWithReason,
   resizePty,
   writeToPty,
-  onPtyData,
+  onPtyOutput,
   onPtyExit,
   isConnected,
 } from './pty-daemon-client.mjs';
@@ -140,20 +140,27 @@ function wireEventRouting() {
   if (_routingWired) return;
   _routingWired = true;
 
-  onPtyData((agentId, handleId, seq, buf) => {
-    const h = _handlesByAgent.get(agentId);
-    if (h && h.handleId === handleId) {
-      h._emitData(buf);
-    }
+  // Use the v1.0 pty.output event shape (agent, buf). The v1.1 (handleId,
+  // seq, credit-gated) shape exists in the protocol spec but pty-daemon-
+  // client.mjs only emits v1.0 events; v1.1 wiring is T2 scope. Since
+  // _handlesByAgent is one-handle-per-agent, agent name is sufficient
+  // to route — no handleId filter needed.
+  onPtyOutput((agent, buf) => {
+    const h = _handlesByAgent.get(agent);
+    if (h) h._emitData(buf);
   });
 
-  onPtyExit((agent, exitCode, signal, timestamp, meta) => {
+  // pty.exit emitted by pty-daemon-client.mjs is (agent, exitCode, signal,
+  // timestamp). No `reason` field in the v1.0 client signal — the daemon
+  // DOES include it in the notification body, but the client extractor
+  // (pty-daemon-client.mjs:480) drops it. _emitExit just uses null reason.
+  onPtyExit((agent, exitCode, signal /*, timestamp */) => {
     const h = _handlesByAgent.get(agent);
     if (h) {
       // GAP β FIX: clear the handle→agent mapping on exit so stale
       // entries don't linger in the fallback state machine's registry.
       try { unregisterHandleAgent(h.handleId); } catch {}
-      h._emitExit(exitCode, signal, meta?.reason);
+      h._emitExit(exitCode, signal, null);
       _handlesByAgent.delete(agent);
     }
   });
