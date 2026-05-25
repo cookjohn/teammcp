@@ -308,16 +308,19 @@ async function refreshOAuthToken() {
       }
     }
 
-    // Step 5: Exchange refresh token for new access token
+    // Step 5: Exchange refresh token for new access token.
+    // Anthropic /v1/oauth/token requires application/x-www-form-urlencoded
+    // per the Claude Code CLI binary's embedded constants. JSON returns
+    // HTTP 400 invalid_request_error "Invalid request format".
     const resp = await fetch(OAUTH_TOKEN_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
         grant_type: 'refresh_token',
         refresh_token: observedRefreshToken,  // Doc-B: snapshotted value
         client_id: OAUTH_CLIENT_ID,
         scope: OAUTH_SCOPES,
-      }),
+      }).toString(),
       signal: AbortSignal.timeout(15_000),
     });
 
@@ -595,16 +598,18 @@ async function completeLogin(code, state) {
   pendingLogins.delete(state);
 
   try {
+    // Anthropic /v1/oauth/token wants form-encoded, see refreshOAuthToken
+    // for the same change. With JSON it returns 400 "Invalid request format".
     const resp = await fetch(OAUTH_TOKEN_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
         grant_type: 'authorization_code',
         code,
         client_id: OAUTH_CLIENT_ID,
         code_verifier: session.codeVerifier,
         redirect_uri: 'https://platform.claude.com/oauth/code/callback',
-      }),
+      }).toString(),
       signal: AbortSignal.timeout(15_000),
     });
 
