@@ -1634,6 +1634,19 @@ process.on('unhandledRejection', (reason) => {
 // ── Main entry point ───────────────────────────────────────────
 
 async function main() {
+  // Phase 4-T1 core promise: when the parent server dies, our stdio
+  // pipes break and the next console.log/error EPIPEs. Without these
+  // handlers the EPIPE becomes an uncaughtException, which our handler
+  // (line ~1605) turns into shutdown() — killing every agent. Silencing
+  // EPIPE here is what makes "server restart, agent survives" work.
+  // We keep other errors (EBADF, ENOSPC) visible by re-throwing.
+  process.stdout.on('error', (err) => {
+    if (err && err.code !== 'EPIPE') throw err;
+  });
+  process.stderr.on('error', (err) => {
+    if (err && err.code !== 'EPIPE') throw err;
+  });
+
   log(`Starting PTY Daemon (${isDev ? 'DEV' : 'PROD'} mode, pid=${process.pid})`);
 
   // ── Phase 4-T1 H4/H5: read in-memory identity token from stdin BEFORE

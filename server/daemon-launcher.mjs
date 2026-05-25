@@ -303,6 +303,22 @@ function spawnDaemon(isDev) {
     windowsHide: true,
   });
   _currentDaemonChild = child;
+  // Phase 4-T1 core promise: server restart must NOT kill the daemon.
+  // Without unref(), Node's parent event loop tracks the child + its
+  // stdio pipes; on parent exit those pipes close and the daemon's
+  // next write EPIPEs into uncaughtException → shutdown() → kills
+  // agents — defeating two-layer architecture entirely. Daemon-side
+  // also installs an EPIPE-silencer on process.stdout/stderr so even
+  // if our cleanup races, the daemon stays alive.
+  try {
+    child.unref();
+    child.stdout && child.stdout.unref && child.stdout.unref();
+    child.stderr && child.stderr.unref && child.stderr.unref();
+    // child.stdin is intentionally NOT unref'd — we just wrote the
+    // identity token + .end()'d it, so it's already closed-write.
+  } catch (err) {
+    console.warn('[LAUNCHER] unref() failed:', err.message);
+  }
   _currentIdentityToken = identityToken;
   _launcherStats.spawned++;
   console.error(
