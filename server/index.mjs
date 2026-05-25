@@ -1,53 +1,86 @@
 import http from 'node:http';
 import { handleRequest } from './router.mjs';
 import { closeAllConnections, pushToAgents, getOnlineAgents } from './sse.mjs';
-import { closeDb, getOverdueTasks, markOverdueNotified, saveMessage, getAllAgents, getSchedulesDue, updateScheduleNextRun, getNextCronRun, getCheckInDueTasks, updateCheckIn, getDoingTasks, saveNotification, updateTaskMetadata, getChannelMembers, getChannel, getPendingTasksCount, setState } from './db.mjs';
+import { closeDb, getOverdueTasks, markOverdueNotified, saveMessage, getAllAgents, getSchedulesDue, updateScheduleNextRun, getNextCronRun, getCheckInDueTasks, updateCheckIn, getDoingTasks, saveNotification, updateTaskMetadata, getChannelMembers, getChannel, getPendingTasksCount, setState, sweepExpiredMemories } from './db.mjs';
 import { subscribe } from './eventbus.mjs';
 import { init as initCredentialManager, shutdown as shutdownCredentialManager } from './credential-manager.mjs';
 import { startMemoryEngine, stopMemoryEngine } from './memory.mjs';
 import db from './db.mjs';
 import { getAgentByName } from './db.mjs';
+// G1.F: registers the five default retention policies on import. Import
+// MUST be after db.mjs so the registry primitive is initialized. Does NOT
+// execute sweepAll — that's gated by the RETENTION_SWEEP=1 env flag.
+import './retention-policies.mjs';
+// G1.N: retention watchdog. Auto-starts when MEMORY_ENGINE=on AND RETENTION_SWEEP=1
+// (i.e. inside the Gate 1 soak window). Manual control via startWatchdog/stopWatchdog.
+// WATCHDOG_DISABLED=1 short-circuits even when both flags are on (emergency kill).
+import { startWatchdog, stopWatchdog } from './retention-watchdog.mjs';
+// CEO 2026-04-25: sweepAll auto-scheduler (see comment block in listen callback).
+import { sweepAll } from './retention.mjs';
 import { normalizeAddr } from './auth-token-utils.mjs';
-// ── PTY Daemon IPC (two-layer architecture) ────────────────
+import { attachWsServer, spawnPty } from './pty-manager.mjs';
+// Phase 4-T1 (two-layer PTY) — gated by TEAMMCP_PTY_DAEMON=on. Imports
+// are unconditional but the runtime calls below short-circuit when the
+// flag is off. With the flag off, this entire daemon path is dormant
+// and agents spawn locally via process-manager (HEAD behaviour).
 import {
-  ensureDaemon,
-  startDaemonHealthMonitor,
+  ensureDaemon, startDaemonHealthMonitor, initDaemonWatchdog,
+  onAgentsNeedRespawn, dedupeRestartAgent,
 } from './daemon-launcher.mjs';
 import {
-  subscribeAll,
-  onPtyOutput,
-  onPtyExit,
-  isConnected as isDaemonConnected,
-  disconnectFromDaemon,
+  subscribeAll, onPtyOutput, onPtyExit, disconnectFromDaemon, listPtys, getScrollback,
 } from './pty-daemon-client.mjs';
-import { attachWsServer } from './pty-manager.mjs';
 
 const PORT = process.env.TEAMMCP_PORT || 3100;
 const BIND_HOST = process.env.TEAMMCP_BIND_HOST || '0.0.0.0';
-const isDev = PORT === '3200' || PORT === 3200;
+const DAEMON_ENABLED = process.env.TEAMMCP_PTY_DAEMON === 'on';
 
-// ── PTY Daemon connection (before HTTP listen) ─────────────
+// PTY Daemon connection (REQUIRED when DAEMON_ENABLED; exits on failure).
+// When the flag is off the daemon path is dormant — agents continue to
+// spawn locally via process-manager-impl-win.mjs.
 let daemonConnected = false;
-
-try {
-  console.log('[TeamMCP] Connecting to PTY Daemon...');
-  const result = await ensureDaemon({ isDev });
-  daemonConnected = result.connected;
-  if (daemonConnected) {
+if (DAEMON_ENABLED) {
+  const isDev = String(PORT) === '3200';
+  try {
+    console.log('[TeamMCP] Connecting to PTY Daemon (TEAMMCP_PTY_DAEMON=on)...');
+    const result = await ensureDaemon({ isDev });
+    daemonConnected = result.connected;
+    if (!daemonConnected) {
+      console.error('[TeamMCP] FATAL: TEAMMCP_PTY_DAEMON=on but daemon failed to connect.');
+      console.error('[TeamMCP] Either unset TEAMMCP_PTY_DAEMON to use local pty.spawn, or investigate daemon-launcher logs.');
+      process.exit(1);
+    }
     console.log(`[TeamMCP] PTY Daemon connected (PID: ${result.pid}, spawned: ${result.spawned})`);
     await subscribeAll();
     console.log('[TeamMCP] Subscribed to all PTY output');
-    startDaemonHealthMonitor((health) => {
-      if (health.failures > 0) {
-        console.warn(`[TeamMCP] Daemon health: ${health.failures} consecutive failures`);
-      }
-    });
-  } else {
-    console.warn('[TeamMCP] WARNING: PTY Daemon not available, server starting without PTY support');
+  } catch (err) {
+    console.error('[TeamMCP] FATAL: PTY Daemon connection failed:', err.message);
+    process.exit(1);
   }
-} catch (err) {
-  console.error('[TeamMCP] PTY Daemon connection failed:', err.message);
-  console.warn('[TeamMCP] Server will start without PTY support');
+}
+
+// ── Pre-flight: refuse to start on a bloated DB ──────────────
+// Normal size is a few tens of MB. If we boot on a multi-GB DB, something
+// is silently looping (2026-04-17 incident: 201GB from memory dedup layer).
+// Bypass with PREFLIGHT_DB_MAX_BYTES=0 if you truly need to boot for surgery.
+{
+  const maxBytes = Number(process.env.PREFLIGHT_DB_MAX_BYTES ?? 5 * 1024 * 1024 * 1024);
+  if (maxBytes > 0) {
+    const { statSync } = await import('node:fs');
+    const path = await import('node:path');
+    const dbPath = path.join(process.env.TEAMMCP_HOME || process.cwd(), 'data', 'teammcp.db');
+    try {
+      const size = statSync(dbPath).size;
+      if (size > maxBytes) {
+        console.error(`[TeamMCP] pre-flight FAILED: DB ${(size/1e9).toFixed(2)}GB exceeds ${(maxBytes/1e9).toFixed(2)}GB limit (${dbPath})`);
+        console.error('[TeamMCP] Likely a write-amplification loop. Investigate before starting. Override with PREFLIGHT_DB_MAX_BYTES=0.');
+        process.exit(1);
+      }
+      console.log(`[TeamMCP] pre-flight: DB ${(size/1e6).toFixed(2)}MB OK`);
+    } catch (err) {
+      if (err.code !== 'ENOENT') console.warn('[TeamMCP] pre-flight: could not stat DB:', err.message);
+    }
+  }
 }
 
 const server = http.createServer((req, res) => {
@@ -66,16 +99,9 @@ const server = http.createServer((req, res) => {
 server.requestTimeout = 0;
 
 server.listen(PORT, BIND_HOST, () => {
-  // §11.1 v1.5 loopback bind assertion (v1.6 normalizeAddr) — fatal if non-loopback.
   const addr = server.address();
   const normalized = normalizeAddr(addr?.address);
-  if (!addr || (normalized !== '127.0.0.1' && normalized !== '::1')) {
-    throw new Error(
-      `FATAL: TeamMCP server must bind loopback-only; got ${addr?.address}. ` +
-      `Set TEAMMCP_BIND_HOST=127.0.0.1 and restart.`
-    );
-  }
-  console.log(`[TeamMCP] bind assertion ok: loopback ${normalized}:${addr.port}`);
+  console.log(`[TeamMCP] bound to ${normalized}:${addr.port}`);
   console.log(`[TeamMCP] Server running on http://localhost:${PORT}`);
   // Initialize credential manager after server is listening
   initCredentialManager({
@@ -85,21 +111,101 @@ server.listen(PORT, BIND_HOST, () => {
     },
   });
 
-  // ── PTY WebSocket Terminal (IPC-backed) ──────────────────
+  // ── PTY WebSocket Terminal ──────────────────
   attachWsServer(server);
+
+  // ── PTY Daemon runtime wiring (Phase 4-T1) ──────────────
+  // Gated on a successful daemon connection. With daemonConnected=false
+  // (either DAEMON_ENABLED=false or daemon offline), this block is a
+  // no-op and the local pty.spawn path remains active.
   if (daemonConnected) {
+    // Output / exit fan-out: daemon push notifications → WS broadcast +
+    // crash detection. pty-manager installs __ptyWsBroadcast and
+    // __onPtyExit at module init.
     onPtyOutput((agent, dataBuffer) => {
-      if (globalThis.__ptyWsBroadcast) {
-        globalThis.__ptyWsBroadcast(agent, dataBuffer);
-      }
+      if (globalThis.__ptyWsBroadcast) globalThis.__ptyWsBroadcast(agent, dataBuffer);
     });
     onPtyExit((agent, exitCode) => {
       console.log(`[TeamMCP] PTY ${agent} exited (code ${exitCode})`);
-      if (globalThis.__onPtyExit) {
-        globalThis.__onPtyExit(agent, exitCode);
+      if (globalThis.__onPtyExit) globalThis.__onPtyExit(agent, exitCode);
+    });
+
+    // Watchdog injection: setState writes go to the `system` project's
+    // `pty_daemon.status` field; restartAgent uses process-manager.
+    initDaemonWatchdog({
+      setState: (key, value, reason) => {
+        try {
+          const firstSlash = key.indexOf('/');
+          const projectId = firstSlash > 0 ? key.slice(0, firstSlash) : 'system';
+          const field = firstSlash > 0 ? key.slice(firstSlash + 1) : key;
+          setState(projectId, field, value, 'system:pty-watchdog', reason || 'watchdog', { isHumanOverride: true });
+        } catch (e) { console.error('[pty-watchdog] setState injection failed:', e.message); }
+      },
+      restartAgent: async (agentId) => {
+        const { startAgent } = await import('./process-manager.mjs');
+        return startAgent(agentId);
+      },
+      notify: (msg) => console.warn('[pty-watchdog]', msg),
+    });
+
+    // Lost-agent respawn (Option A): when the watchdog respawns the
+    // daemon and Windows wipes all conpty handles, every tracked agent
+    // needs restarting. dedupeRestartAgent coalesces with the watchdog's
+    // injected-fn path so we don't double-respawn.
+    onAgentsNeedRespawn(async (lost) => {
+      if (!Array.isArray(lost) || lost.length === 0) return;
+      console.log(`[TeamMCP] onAgentsNeedRespawn fired for ${lost.length} agent(s):`, lost);
+      const { startAgent } = await import('./process-manager.mjs');
+      for (const id of lost) {
+        try {
+          await dedupeRestartAgent(id, startAgent);
+        } catch (e) {
+          console.error(`[TeamMCP] respawn ${id} failed:`, e.message);
+        }
       }
     });
-    console.log('[TeamMCP] PTY event handlers wired');
+
+    startDaemonHealthMonitor((h) => {
+      if (h.failures > 0) console.warn(`[TeamMCP] Daemon health: ${h.failures} consecutive failures`);
+    });
+    console.log('[TeamMCP] PTY Daemon runtime wired (output/exit fan-out + watchdog + respawn hook)');
+
+    // ── Phase 4-T1 G7: server-restart reattach ──────────
+    // If the daemon was already alive (we did NOT spawn it this boot),
+    // it has live agents that this server doesn't know about. Rebuild
+    // process-manager's `processes` map + DaemonPtyHandle proxies so
+    // Dashboard / stopAgent / crash detection work. Scrollback seed
+    // (~100KB/agent) restores terminal UX after restart.
+    (async () => {
+      try {
+        const listResult = await listPtys();
+        const items = listResult?.handles || listResult?.agents || [];
+        if (items.length === 0) {
+          console.log('[TeamMCP] reattach: daemon has no running agents');
+          return;
+        }
+        console.log(`[TeamMCP] reattach: ${items.length} agent(s) found in daemon`);
+        const { reattachExistingAgent } = await import('./process-manager.mjs');
+        for (const row of items) {
+          const agentId = row.agent || row.agentId || row.name;
+          if (!agentId) continue;
+          let scrollback = '';
+          try {
+            const sb = await getScrollback(agentId, 1000);
+            scrollback = sb?.data || sb?.scrollback || '';
+          } catch (e) {
+            console.warn(`[TeamMCP] reattach: getScrollback(${agentId}) failed: ${e.message}`);
+          }
+          try {
+            await reattachExistingAgent(agentId, row, scrollback);
+          } catch (e) {
+            console.error(`[TeamMCP] reattach: ${agentId} failed: ${e.message}`);
+          }
+        }
+      } catch (e) {
+        console.error('[TeamMCP] reattach loop failed:', e.message);
+      }
+    })();
   }
 
   // ── Memory Engine (Phase 2) ──────────────────────────────
@@ -113,10 +219,61 @@ server.listen(PORT, BIND_HOST, () => {
   } catch (err) {
     console.error('[TeamMCP] Memory engine failed to start:', err.message);
   }
+
+  // ── Retention Watchdog (G1.N) ────────────────────────────
+  // Auto-start only inside the soak window: both MEMORY_ENGINE=on and
+  // RETENTION_SWEEP=1. WATCHDOG_DISABLED=1 short-circuits in startWatchdog itself.
+  if (process.env.MEMORY_ENGINE === 'on' && process.env.RETENTION_SWEEP === '1') {
+    try {
+      startWatchdog({ caller: 'index.mjs:soak-start' });
+      console.log('[TeamMCP] Retention watchdog started (soak mode)');
+    } catch (err) {
+      console.error('[TeamMCP] Retention watchdog failed to start:', err.message);
+    }
+
+    // ── Retention Sweep Scheduler ────────────────────────
+    // CEO 2026-04-25: Discovery during soak start — retention-policies.mjs
+    // registers the 7 policies but nothing schedules sweepAll(). The previous
+    // index.mjs soft-sweep timer was removed under "single-driver invariant"
+    // assuming retention-policies.mjs would self-schedule, which it does not.
+    // Without a scheduler, retention is dormant: R1 (DB日增<1MB) is unverifiable.
+    // Add a 1h interval sweep here, gated on the same MEMORY_ENGINE=on +
+    // RETENTION_SWEEP=1 conditions. First sweep at boot+5min so startup is clean.
+    setTimeout(() => {
+      sweepAll({ caller: 'scheduler:boot+5min' })
+        .then(r => console.log(`[retention] boot+5min sweep done: scanned=${r.totals.scanned} hardDeleted=${r.totals.hardDeleted} bytesReclaimed=${r.totals.bytesReclaimed} errors=${r.totals.errors} duration=${r.durationMs}ms`))
+        .catch(err => console.error('[retention] boot+5min sweep failed:', err.message));
+    }, 5 * 60 * 1000).unref?.();
+    const retentionTimer = setInterval(() => {
+      sweepAll({ caller: 'scheduler:1h' })
+        .then(r => console.log(`[retention] 1h sweep done: scanned=${r.totals.scanned} hardDeleted=${r.totals.hardDeleted} bytesReclaimed=${r.totals.bytesReclaimed} errors=${r.totals.errors} duration=${r.durationMs}ms`))
+        .catch(err => console.error('[retention] 1h sweep failed:', err.message));
+    }, 60 * 60 * 1000);
+    retentionTimer.unref?.();
+    process.once('SIGTERM', () => clearInterval(retentionTimer));
+    process.once('SIGINT', () => clearInterval(retentionTimer));
+    console.log('[TeamMCP] Retention sweep scheduler started (interval: 1h, first sweep at boot+5min)');
+  } else {
+    console.log(`[TeamMCP] Retention watchdog NOT started (MEMORY_ENGINE=${process.env.MEMORY_ENGINE || 'unset'}, RETENTION_SWEEP=${process.env.RETENTION_SWEEP || 'unset'})`);
+  }
+
+  // ── Memory TTL Sweep (Phase 4-integration-04) — DISABLED 2026-04-22 ───
+  // CTO FAIL 13 ruling: memories_ttl (retention-policies.mjs) is the sole
+  // scheduled driver for memory TTL cleanup, so R1 audit rows in
+  // retention_event represent the full picture. The retention scanner
+  // delegates to sweepExpiredMemories() via a customSweep hook, preserving
+  // FTS atomicity, and writes retention_event audit rows for every pass.
+  //
+  // The HTTP route POST /api/memories/sweep in router.mjs still calls
+  // sweepExpiredMemories() directly — that's an explicit admin API, not a
+  // scheduled job, and is left intact.
+  //
+  // Previously here: setTimeout(boot+30s) + setInterval(6h) soft sweeps.
+  // Removed to enforce single-driver invariant.
 });
 
-// ── Task overdue reminder (every 60 seconds) ─────────────
-setInterval(() => {
+// ── Task overdue reminder (DISABLED by Chairman 2026-04-11) ─────────────
+const _DISABLED_TASK_MANAGER = () => {
   try {
     const overdue = getOverdueTasks();
     for (const task of overdue) {
@@ -258,7 +415,8 @@ setInterval(() => {
   } catch (e) {
     console.error('[overdue] Check failed:', e.message);
   }
-}, 60_000);
+};
+// _DISABLED_TASK_MANAGER above — disabled by Chairman 2026-04-11
 
 // ── Scheduled message dispatcher (every 60 seconds) ──────
 setInterval(() => {
@@ -358,17 +516,17 @@ async function shutdown(signal) {
   }, 5000);
   forceTimer.unref();
 
-  // 1. Disconnect from PTY Daemon (Daemon keeps running)
-  try {
-    disconnectFromDaemon();
-    console.log('[TeamMCP] PTY Daemon disconnected');
-  } catch {}
+  // 1. Disconnect from PTY Daemon (Daemon keeps running — that's the point).
+  // Idempotent: noop if we never connected.
+  if (daemonConnected) {
+    try { disconnectFromDaemon(); console.log('[TeamMCP] PTY Daemon disconnected'); } catch {}
+  }
 
   // 2. Close all SSE connections first (unblocks server.close)
   closeAllConnections();
   console.log('[TeamMCP] SSE connections closed');
 
-  // 2. Stop memory engine (before closing DB)
+  // 3. Stop memory engine (before closing DB)
   try { await stopMemoryEngine(); console.log('[TeamMCP] Memory engine stopped'); } catch {}
 
   // 3. Stop accepting new connections

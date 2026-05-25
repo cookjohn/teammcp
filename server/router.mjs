@@ -34,6 +34,7 @@ import {
   setUseResume, getUseResume, setAgentAuthConfig, setAgentAuthStrategy,
   insertMetric, getMetrics, getMetricsSummary, cleanupOldMetrics,
   createMemory, getMemory, getMemories, updateMemory, deleteMemory, searchMemories,
+  sweepExpiredMemories, getMemoriesDiagnostics,
   getCcMetricsSince
 } from './db.mjs';
 import db from './db.mjs';
@@ -283,6 +284,13 @@ export async function handleRequest(req, res) {
     }
 
     // ── GET /api/health (no auth required) ────────────
+    // Phase 4-γ enhancement: operations-visible health check. Fields:
+    //   status          — 'ok' | 'degraded'
+    //   uptime_s        — integer seconds since server start
+    //   db_status       — 'ok' | 'error'
+    //   memories_count  — total rows in memories (best-effort)
+    //   timestamp       — ISO8601
+    // Legacy fields (uptime, uptimeMs, agents) retained for existing consumers.
     if (method === 'GET' && path === '/api/health') {
       const onlineAgents = getOnlineAgents();
       const allAgents = getAllAgents();
@@ -292,8 +300,29 @@ export async function handleRequest(req, res) {
       const minutes = Math.floor((uptimeSec % 3600) / 60);
       const seconds = uptimeSec % 60;
 
-      return json(res, {
-        status: 'ok',
+      // DB probe — cheap round-trip + memories count. Any throw → degraded.
+      let dbStatus = 'ok';
+      let memoriesCount = 0;
+      try {
+        db.prepare('SELECT 1').get();
+        const r = db.prepare('SELECT COUNT(*) AS cnt FROM memories').get();
+        memoriesCount = r?.cnt || 0;
+      } catch (err) {
+        dbStatus = 'error';
+        console.warn('[health] db probe failed:', err.message);
+      }
+
+      const status = dbStatus === 'ok' ? 'ok' : 'degraded';
+      const httpCode = status === 'ok' ? 200 : 503;
+
+      res.writeHead(httpCode, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        status,
+        uptime_s: uptimeSec,
+        db_status: dbStatus,
+        memories_count: memoriesCount,
+        timestamp: new Date().toISOString(),
+        // Legacy / extended fields (non-breaking)
         uptime: `${hours}h ${minutes}m ${seconds}s`,
         uptimeMs,
         agents: {
@@ -301,8 +330,8 @@ export async function handleRequest(req, res) {
           online: onlineAgents.length,
           onlineNames: onlineAgents,
         },
-        timestamp: new Date().toISOString(),
-      });
+      }));
+      return;
     }
 
     // ── GET /api/setup-status (no auth — first-time setup detection) ──
@@ -312,17 +341,29 @@ export async function handleRequest(req, res) {
     }
 
     // ── GET /api/pty-daemon/health (no auth required) ─────
+    // Returns 503 + note when daemon is disabled by flag (HEAD-style
+    // behaviour), otherwise dynamic health from the IPC client.
     if (method === 'GET' && path === '/api/pty-daemon/health') {
+      if (process.env.TEAMMCP_PTY_DAEMON !== 'on') {
+        res.writeHead(503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ connected: false, daemon: null, failures: 0, note: 'PTY Daemon disabled (TEAMMCP_PTY_DAEMON != on)' }));
+        return;
+      }
       const { getHealthStatus } = await import('./pty-daemon-client.mjs');
       const health = getHealthStatus();
-      const statusCode = health.connected ? 200 : 503;
-      res.writeHead(statusCode, { 'Content-Type': 'application/json' });
+      res.writeHead(health.connected ? 200 : 503, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         connected: health.connected,
         daemon: health.daemonInfo,
         failures: health.failures,
       }));
       return;
+    }
+
+    // ── GET /api/pty-sessions (no auth required, used by Dashboard Terminal) ─
+    if (method === 'GET' && path === '/api/pty-sessions') {
+      const { getPtyNames } = await import('./pty-manager.mjs');
+      return json(res, { sessions: getPtyNames() });
     }
 
     // ── Credential management API (no auth required for login, status is public) ──
@@ -2506,6 +2547,51 @@ export async function handleRequest(req, res) {
 
       const review = await reviewSession(metrics);
       return json(res, review);
+    }
+
+    // ── POST /api/memories/sweep (Phase 4-integration-04) ──
+    // Managers-only. Clears expired memories (expires_at < now() AND pinned=0).
+    // Body/query: batchSize (default 500), hardDelete (default false), dryRun (default false).
+    if (method === 'POST' && path === '/api/memories/sweep') {
+      if (!requireAuth(req, res)) return;
+      const actor = req.agent?.name || '';
+      if (!MANAGERS.includes(actor) && actor !== 'Chairman') {
+        return json(res, { error: 'Forbidden: memory sweep requires manager role' }, 403);
+      }
+      let body = {};
+      try { body = await readBody(req); } catch { body = {}; }
+      const qBatch = url.searchParams.get('batchSize');
+      const qHard = url.searchParams.get('hardDelete');
+      const qDry = url.searchParams.get('dryRun');
+      const batchSize = Number(body.batchSize ?? qBatch ?? 500);
+      const toBool = (v) => v === true || v === 'true' || v === 1 || v === '1';
+      const hardDelete = toBool(body.hardDelete ?? qHard ?? false);
+      const dryRun = toBool(body.dryRun ?? qDry ?? false);
+      if (!Number.isFinite(batchSize) || batchSize <= 0) {
+        return json(res, { error: 'batchSize must be a positive integer' }, 400);
+      }
+      try {
+        const result = sweepExpiredMemories({ batchSize, hardDelete, dryRun });
+        console.log(`[memory-sweep] actor=${actor} mode=${result.mode} scanned=${result.scanned} ${result.deleted !== undefined ? 'deleted=' + result.deleted : 'wouldDelete=' + result.wouldDelete} skippedPinned=${result.skippedPinned}`);
+        return json(res, result);
+      } catch (err) {
+        console.error('[memory-sweep] route error:', err.message);
+        return json(res, { error: 'Sweep failed: ' + err.message }, 500);
+      }
+    }
+
+    // ── GET /api/memories/diagnostics (Phase 4-integration-05) ─
+    // Read-only aggregate metrics for memories subsystem.
+    // Any authenticated caller. Response schema is fixed (see db.getMemoriesDiagnostics).
+    // MUST appear before /api/memories/:id to avoid being shadowed by the detail route.
+    if (method === 'GET' && path === '/api/memories/diagnostics') {
+      try {
+        const diag = getMemoriesDiagnostics();
+        return json(res, diag);
+      } catch (err) {
+        console.error('[memories-diagnostics] route error:', err.message);
+        return json(res, { error: 'Diagnostics query failed: ' + err.message }, 500);
+      }
     }
 
     // ── GET /api/memories/:id (detail) ───────────────────

@@ -24,6 +24,12 @@ import { startAuthMonitor, stopAuthMonitor, clearAgent as clearAuthMonitorAgent 
 // agentName → { pid, startedAt }
 const processes = new Map();
 
+// Phase 4-T1 G6: pty-watchdog reads this on daemon respawn to compute
+// the "lost agents" list (tracked by server but missing from new daemon).
+// Without this assignment `lost = []` always and watchdog-driven
+// auto-restart never fires. Pure read-side global; no security impact.
+globalThis.__ptyTrackedAgents = () => [...processes.keys()];
+
 // Track agents that were intentionally stopped (to suppress crash detection)
 const stoppedAgents = new Set();
 export function markStopped(name) { stoppedAgents.add(name); }
@@ -575,7 +581,8 @@ export async function startAgent(name) {
     }
   }
 
-  // node-pty spawn — replaces wt.exe + .ps1 generation
+  // Spawn target & args are identical across both paths; only the
+  // spawn implementation diverges.
   const claudeCmd = join(process.env.APPDATA || '', 'npm', 'claude.cmd');
   const claudeArgs = [
     '--dangerously-skip-permissions',
@@ -583,20 +590,65 @@ export async function startAgent(name) {
     '--channels', 'plugin:fakechat@claude-plugins-official'
   ];
 
-  const proc = pty.spawn(claudeCmd, claudeArgs, {
-    name: 'xterm-256color',
-    cols: 120,
-    rows: 30,
-    cwd: agentDir,
-    env: ptyEnv
-  });
+  const useDaemon = process.env.TEAMMCP_PTY_DAEMON === 'on';
+  let proc;
 
-  // Register output into pty-manager for Dashboard WebSocket bridge
-  try {
-    const { attachPtyOutput } = await import('./pty-manager.mjs');
-    attachPtyOutput(name, proc);
-  } catch (e) {
-    console.error(`[start-agent] attachPtyOutput failed for ${name}:`, e.message);
+  if (useDaemon) {
+    // Daemon path: pty-daemon owns the PTY process. The daemon-side
+    // sanitizeEnv enforces an allow-list, so we hand it a curated env
+    // (no ...process.env spread — that would trip ENV_MAX_KEYS=64).
+    // Host-side env keys the agent legitimately needs are listed here;
+    // the daemon merges its own PATH/APPDATA/etc. from its allow-list.
+    const HOST_ENV_PASSTHROUGH = [
+      'PATH', 'HOME', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA',
+      'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMDATA',
+      'SYSTEMROOT', 'SYSTEMDRIVE', 'WINDIR', 'TEMP', 'TMP',
+      'TERM', 'LANG', 'TZ', 'PROCESSOR_ARCHITECTURE',
+    ];
+    const daemonEnv = {};
+    for (const k of HOST_ENV_PASSTHROUGH) {
+      if (process.env[k] != null) daemonEnv[k] = process.env[k];
+    }
+    daemonEnv.CLAUDE_CONFIG_DIR = configDir;
+    daemonEnv.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = '1';
+    daemonEnv.AGENT_NAME = name;
+    daemonEnv.TEAMMCP_URL = serverUrl;
+    if (agentKey) daemonEnv.TEAMMCP_KEY = agentKey;
+    if (effectiveAgentInfo && effectiveAgentInfo.auth_mode === 'api_key') {
+      daemonEnv.ANTHROPIC_API_KEY = '';
+      daemonEnv.CLAUDE_CODE_OAUTH_TOKEN = 'channel-gate-bypass';
+      if (effectiveAgentInfo.api_base_url) daemonEnv.ANTHROPIC_BASE_URL = effectiveAgentInfo.api_base_url;
+      if (effectiveAgentInfo.api_auth_token) daemonEnv.ANTHROPIC_AUTH_TOKEN = effectiveAgentInfo.api_auth_token;
+      if (effectiveAgentInfo.api_model) daemonEnv.ANTHROPIC_MODEL = effectiveAgentInfo.api_model;
+    }
+    const { spawnPtyViaDaemon } = await import('./spawn-pty-via-daemon.mjs');
+    proc = await spawnPtyViaDaemon(name, claudeCmd, claudeArgs, {
+      cwd: agentDir, env: daemonEnv, cols: 120, rows: 30,
+    });
+    // Daemon path: WS output flows globally via onPtyOutput → __ptyWsBroadcast
+    // (wired in index.mjs). attachPtyOutput's proc.onData subscription
+    // would double the broadcast — use registerWsAgent to just reserve
+    // the wsEntries slot for late-joining clients.
+    try {
+      const { registerWsAgent } = await import('./pty-manager.mjs');
+      registerWsAgent(name);
+    } catch (e) {
+      console.error(`[start-agent] registerWsAgent failed for ${name}:`, e.message);
+    }
+  } else {
+    proc = pty.spawn(claudeCmd, claudeArgs, {
+      name: 'xterm-256color',
+      cols: 120,
+      rows: 30,
+      cwd: agentDir,
+      env: ptyEnv,
+    });
+    try {
+      const { attachPtyOutput } = await import('./pty-manager.mjs');
+      attachPtyOutput(name, proc);
+    } catch (e) {
+      console.error(`[start-agent] attachPtyOutput failed for ${name}:`, e.message);
+    }
   }
 
   // Lifecycle: onExit → cleanup + crash detection
@@ -622,6 +674,67 @@ export async function startAgent(name) {
   writeFileSync(pidFile, String(proc.pid), 'utf-8');
   processes.set(name, { pid: proc.pid, ptyHandle: proc, startedAt: new Date().toISOString() });
   return { pid: proc.pid };
+}
+
+/**
+ * Phase 4-T1 G7: server-side reattach for an agent that was already
+ * running inside the daemon BEFORE this server process started.
+ * Called by index.mjs's reattach loop after subscribeAll() succeeds.
+ *
+ * The daemon survived a server restart; we need to rebuild the
+ * proxy objects so Dashboard / stopAgent / crash-detection work.
+ *
+ * @param {string} name
+ * @param {{handleId: string, pid: number, cols?: number, rows?: number}} daemonRow  from pty.list
+ * @param {string} [scrollback]  optional bytes from pty.scrollback to seed WS late-joiners
+ */
+export async function reattachExistingAgent(name, daemonRow, scrollback) {
+  if (!SAFE_NAME_RE.test(name)) {
+    throw Object.assign(new Error('Invalid agent name'), { statusCode: 400 });
+  }
+  if (processes.has(name)) {
+    return { pid: processes.get(name).pid, reattached: false };
+  }
+  const { makeReattachHandle } = await import('./spawn-pty-via-daemon.mjs');
+  const handle = makeReattachHandle({
+    agentId: name,
+    handleId: daemonRow.handleId,
+    pid: daemonRow.pid,
+  });
+
+  // Mirror the spawn path's onExit wiring so a daemon-side agent
+  // crash is observed identically to a fresh-spawn crash.
+  handle.onExit(({ exitCode }) => {
+    console.log(`[pty] ${name} exited (code ${exitCode}, reattached)`);
+    processes.delete(name);
+    if (!isStopped(name)) {
+      import('./sse.mjs').then(({ pushToAgents }) => {
+        pushToAgents(['CEO'], {
+          type: 'status',
+          agent: name,
+          status: 'offline',
+          exitCode,
+          timestamp: new Date().toISOString(),
+        });
+      }).catch(() => {});
+    }
+  });
+
+  try {
+    const { registerWsAgent } = await import('./pty-manager.mjs');
+    registerWsAgent(name, scrollback);
+  } catch (e) {
+    console.error(`[reattach] registerWsAgent failed for ${name}:`, e.message);
+  }
+
+  processes.set(name, {
+    pid: daemonRow.pid,
+    ptyHandle: handle,
+    startedAt: new Date().toISOString(),
+    reattached: true,
+  });
+  console.log(`[reattach] ${name} reattached (pid=${daemonRow.pid}, handleId=${daemonRow.handleId})`);
+  return { pid: daemonRow.pid, reattached: true };
 }
 
 /**

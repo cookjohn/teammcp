@@ -101,8 +101,15 @@ export function attachWsServer(httpServer) {
           return;
         }
 
-        // Check daemon connectivity
-        if (!isDaemonConnected()) {
+        // When the daemon path is on, the only place WS input can land is
+        // ipcWriteToPty → daemon. Without an IPC channel the terminal is
+        // read-only, so close the upgrade rather than silently swallow
+        // every keystroke. When the daemon path is off (local pty.spawn),
+        // skip this check — input still routes the legacy way via WS
+        // message handler reading from the proc directly (handled by
+        // attachPtyOutput below; pre-existing non-daemon WS input
+        // is partially broken — out of scope here).
+        if (process.env.TEAMMCP_PTY_DAEMON === 'on' && !isDaemonConnected()) {
           ws.close(4004, 'Daemon not connected');
           return;
         }
@@ -200,6 +207,29 @@ export async function getPtyNamesAsync() {
  * Register a PTY process from external source into the WebSocket bridge.
  * Kept for backward compat — but in two-layer arch, Daemon handles this.
  */
+/**
+ * Daemon-path agent registration. The DaemonPtyHandle does NOT need a
+ * proc.onData subscription here — output flows globally through
+ * onPtyOutput → __ptyWsBroadcast (wired in index.mjs). All this helper
+ * does is reserve the wsEntries slot so a Dashboard terminal can open
+ * for the agent before its first byte arrives.
+ *
+ * Caller may pass `seedScrollback` (string) to prime late-joiner display
+ * on server-restart reattach (the daemon keeps a 100KB ring per agent;
+ * we copy a snapshot here so the first WS client sees recent history).
+ */
+export function registerWsAgent(name, seedScrollback) {
+  if (!wsEntries.has(name)) {
+    wsEntries.set(name, {
+      clients: new Set(),
+      scrollback: typeof seedScrollback === 'string' ? seedScrollback : '',
+    });
+  } else if (typeof seedScrollback === 'string' && seedScrollback.length) {
+    // Preserve existing client connections, just refresh the scrollback.
+    wsEntries.get(name).scrollback = seedScrollback;
+  }
+}
+
 export function attachPtyOutput(name, proc) {
   // Still needed: agents are spawned locally until PTY spawn is migrated to Daemon
   const entry = { clients: new Set(), scrollback: '' };

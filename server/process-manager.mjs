@@ -13,7 +13,7 @@ const impl = await (
   : (() => { throw new Error(`[process-manager] unsupported platform: ${PLATFORM}`); })()
 );
 
-// Named re-exports. 10 public functions — frozen surface, any change requires spec bump.
+// Named re-exports. Public surface — any change requires spec bump.
 export const markStopped            = impl.markStopped;
 export const clearStopped           = impl.clearStopped;
 export const isStopped              = impl.isStopped;
@@ -24,5 +24,9 @@ export const sendKeysToAgent        = impl.sendKeysToAgent;
 export const cleanupStaleProcEntry  = impl.cleanupStaleProcEntry;
 export const getAgentProcessStatus  = impl.getAgentProcessStatus;
 export const checkProcessPermission = impl.checkProcessPermission;
+// Phase 4-T1 G7: server-restart reattach. Win-only until mac impl lands
+// the daemon path — keep the dispatcher unbroken on darwin by stubbing.
+export const reattachExistingAgent  = impl.reattachExistingAgent
+  || (async () => { throw new Error('reattachExistingAgent not implemented on this platform'); });
 // Path A shared constants — re-export for credential-lease.mjs et al.
 export const SAFE_NAME_RE          = impl.SAFE_NAME_RE;
