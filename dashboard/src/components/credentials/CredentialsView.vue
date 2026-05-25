@@ -143,8 +143,68 @@ async function startOAuthLogin() {
     })
     const data = await res.json()
     const oauthUrl = data.authorizeUrl || data.url
-    if (oauthUrl) window.open(oauthUrl, '_blank')
-    else alert('OAuth login started. Follow the instructions.')
+    const expectedState = data.state
+    if (!oauthUrl) {
+      alert('OAuth login start failed: no authorizeUrl returned')
+      return
+    }
+    window.open(oauthUrl, '_blank')
+    // Anthropic redirects to https://platform.claude.com/oauth/code/callback?code=...&state=...
+    // after the user logs in. The callback page just displays the URL; the
+    // user copies it back here. We parse code+state, verify state matches
+    // what /login/start gave us, then POST /login/complete to write the
+    // new token to oauth-credentials.json and redistribute to agents.
+    const pasted = window.prompt(
+      'OAuth window opened in a new tab.\n' +
+      'After logging in, copy the FULL redirect URL (or just the code) from the address bar and paste it here:'
+    )
+    if (!pasted) return
+    let code = null
+    let state = null
+    try {
+      // Accept either a full URL with query params OR a bare code string.
+      const trimmed = pasted.trim()
+      if (trimmed.includes('?') || trimmed.includes('://')) {
+        const u = new URL(trimmed.replace(/^[^?]*\?/, 'https://x.invalid/?'))
+        code = u.searchParams.get('code')
+        state = u.searchParams.get('state')
+      } else if (trimmed.includes('#')) {
+        // Anthropic sometimes returns "code#state" via the redirect display page
+        const [c, s] = trimmed.split('#')
+        code = c
+        state = s
+      } else {
+        code = trimmed
+        state = expectedState
+      }
+    } catch (parseErr) {
+      alert('Could not parse the pasted value. Expected a URL containing ?code=...&state=...\nError: ' + parseErr.message)
+      return
+    }
+    if (!code) {
+      alert('No code found in the pasted value.')
+      return
+    }
+    if (expectedState && state && state !== expectedState) {
+      alert('OAuth state mismatch — login session may have expired. Click "重新登录" again to restart.')
+      return
+    }
+    const completeRes = await fetch('/api/auth/login/complete', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + apiKey.value,
+        'x-dashboard-token': token,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ code, state: state || expectedState }),
+    })
+    const completeData = await completeRes.json()
+    if (!completeRes.ok || completeData.success === false) {
+      alert('Login completion failed: ' + (completeData.error || ('HTTP ' + completeRes.status)))
+      return
+    }
+    alert('Login complete. Token has been refreshed and distributed to all agents.')
+    await localStore.loadOverview()
   } catch (e) {
     alert('OAuth login failed: ' + e.message)
   }
