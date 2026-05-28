@@ -264,11 +264,14 @@ export async function startAgent(name) {
   };
   if (agentKey) ptyEnv.TEAMMCP_KEY = agentKey;
   if (agentInfo?.auth_mode === 'api_key') {
+    // Resolve credential profile-first, inline-fallback (same as win/mac).
+    const { resolveAgentCredential } = await import('./db.mjs');
+    const cred = resolveAgentCredential(agentInfo);
     ptyEnv.ANTHROPIC_API_KEY = '';
     ptyEnv.CLAUDE_CODE_OAUTH_TOKEN = 'channel-gate-bypass';
-    if (agentInfo.api_base_url)   ptyEnv.ANTHROPIC_BASE_URL  = agentInfo.api_base_url;
-    if (agentInfo.api_auth_token) ptyEnv.ANTHROPIC_AUTH_TOKEN = agentInfo.api_auth_token;
-    if (agentInfo.api_model)      ptyEnv.ANTHROPIC_MODEL     = agentInfo.api_model;
+    if (cred.base_url) ptyEnv.ANTHROPIC_BASE_URL  = cred.base_url;
+    if (cred.token)    ptyEnv.ANTHROPIC_AUTH_TOKEN = cred.token;
+    if (cred.model)    ptyEnv.ANTHROPIC_MODEL     = cred.model;
   }
 
   const pidFile = join(agentDir, '.agent.pid');

@@ -16,6 +16,7 @@ import { execSync } from 'node:child_process';
 import { join } from 'node:path';
 import { AGENTS_DIR } from './lib/paths.mjs';
 import { getUserConfig } from './user-config.mjs';
+import { getFailedProfilesInUse } from './db.mjs';
 
 function which(bin) {
   // Returns the resolved path if `bin` is on PATH, else null. Cross-platform
@@ -82,12 +83,16 @@ function checkAgentsDir() {
 }
 
 function checkClaudeCli() {
-  const resolved = which('claude');
+  // On Windows, the process-manager spawns claude.cmd (not the bash shim
+  // also named "claude"). Resolve the same way the spawn path does so a
+  // missing .cmd shows up here instead of as a runtime SPAWN_FAILED.
+  const target = process.platform === 'win32' ? 'claude.cmd' : 'claude';
+  const resolved = which(target);
   if (!resolved) {
     return {
       name: 'claude-cli',
       level: 'warn',
-      message: 'claude CLI not found on PATH — claude-runtime agents will not start',
+      message: `${target} not found on PATH — claude-runtime agents will not start`,
       fix: 'Install Claude Code (https://claude.com/claude-code) and run `claude login`',
     };
   }
@@ -134,6 +139,27 @@ function checkCodexBin() {
   return { name: 'codex-bin', level: 'ok', message: `codex.exe: ${path}`, path, configured: true };
 }
 
+function checkCredentialProfiles() {
+  // Live check (runBootChecks runs on each /api/system/health poll): flag
+  // online agents whose credential profile last tested 'fail'.
+  try {
+    const failed = getFailedProfilesInUse();
+    if (!failed.length) {
+      return { name: 'credentials', level: 'ok', message: 'No failing credential profiles in use' };
+    }
+    const names = failed.map(f => `${f.name} (${f.agents_online} online)`).join(', ');
+    return {
+      name: 'credentials',
+      level: 'warn',
+      message: `Credential profile(s) failing their last test but still in use: ${names}`,
+      fix: 'Rotate the token in Credentials → API Key Profiles, then restart the affected agents',
+    };
+  } catch (e) {
+    // Table may not exist on a very old DB — treat as ok.
+    return { name: 'credentials', level: 'ok', message: 'credential profiles not checked', note: e.message };
+  }
+}
+
 export function runBootChecks() {
   const checks = [
     checkRunningUser(),
@@ -141,6 +167,7 @@ export function runBootChecks() {
     checkClaudeCli(),
     checkBun(),
     checkCodexBin(),
+    checkCredentialProfiles(),
   ];
   const verdict = checks.some(c => c.level === 'fail')
     ? 'fail'

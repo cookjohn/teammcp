@@ -33,6 +33,9 @@ import {
   ackMessage, getMessageAcks,
   setUseResume, getUseResume, setAgentAuthConfig, setAgentAuthStrategy,
   setAgentRuntime,
+  createCredentialProfile, updateCredentialProfile, deleteCredentialProfile,
+  listCredentialProfiles, getCredentialProfileRow, resolveCredentialProfile,
+  setProfileTestResult, setAgentCredentialProfile, countAgentsUsingProfile, agentsUsingProfile,
   insertMetric, getMetrics, getMetricsSummary, cleanupOldMetrics,
   createMemory, getMemory, getMemories, updateMemory, deleteMemory, searchMemories,
   sweepExpiredMemories, getMemoriesDiagnostics,
@@ -604,6 +607,79 @@ export async function handleRequest(req, res) {
       }
       setAgentAuthStrategy(agentName, auth_strategy);
       return json(res, { ok: true, agent: agentName, auth_strategy });
+    }
+
+    // ── Credential profiles (dashboard token auth) ────────
+    // GET list (masked tokens)
+    if (method === 'GET' && path === '/api/dashboard/credentials/profiles') {
+      if (!requireDashboardToken(req, res)) return;
+      return json(res, { profiles: listCredentialProfiles() });
+    }
+    // POST create
+    if (method === 'POST' && path === '/api/dashboard/credentials/profiles') {
+      if (!requireDashboardToken(req, res)) return;
+      const body = await readBody(req);
+      const { name, provider, base_url, auth_token, model } = body || {};
+      if (!name || !provider || !base_url || !auth_token) {
+        return json(res, { error: 'name, provider, base_url, auth_token are required' }, 400);
+      }
+      try {
+        const p = createCredentialProfile({ name, provider, base_url, auth_token, model });
+        return json(res, { ok: true, id: p.id, name: p.name });
+      } catch (e) {
+        const code = /UNIQUE/.test(e.message) ? 409 : 400;
+        return json(res, { error: code === 409 ? `profile name "${name}" already exists` : e.message }, code);
+      }
+    }
+    // PUT update / rotate
+    if (method === 'PUT' && path.match(/^\/api\/dashboard\/credentials\/profiles\/\d+$/)) {
+      if (!requireDashboardToken(req, res)) return;
+      const id = parseInt(path.split('/').pop(), 10);
+      if (!getCredentialProfileRow(id)) return json(res, { error: 'profile not found' }, 404);
+      const body = await readBody(req);
+      try {
+        const p = updateCredentialProfile(id, body || {});
+        const rotated = !!(body && body.auth_token);
+        const affected = rotated ? agentsUsingProfile(id).filter(a => a.status === 'online').map(a => a.name) : [];
+        return json(res, { ok: true, id: p.id, name: p.name, rotated, restartNeeded: affected });
+      } catch (e) {
+        const code = /UNIQUE/.test(e.message) ? 409 : 400;
+        return json(res, { error: e.message }, code);
+      }
+    }
+    // DELETE
+    if (method === 'DELETE' && path.match(/^\/api\/dashboard\/credentials\/profiles\/\d+$/)) {
+      if (!requireDashboardToken(req, res)) return;
+      const id = parseInt(path.split('/').pop(), 10);
+      if (!getCredentialProfileRow(id)) return json(res, { error: 'profile not found' }, 404);
+      try {
+        deleteCredentialProfile(id);
+        return json(res, { ok: true });
+      } catch (e) {
+        if (e.statusCode === 409) {
+          return json(res, { error: 'profile still referenced by agents', agents: agentsUsingProfile(id) }, 409);
+        }
+        return json(res, { error: e.message }, 400);
+      }
+    }
+    // POST test connection
+    if (method === 'POST' && path.match(/^\/api\/dashboard\/credentials\/profiles\/\d+\/test$/)) {
+      if (!requireDashboardToken(req, res)) return;
+      const id = parseInt(path.split('/')[5], 10);
+      const resolved = resolveCredentialProfile(id);
+      if (!resolved) return json(res, { error: 'profile not found' }, 404);
+      const { probeCredential } = await import('./credential-probe.mjs');
+      const result = await probeCredential({
+        provider: resolved.provider, base_url: resolved.base_url,
+        token: resolved.auth_token, model: resolved.model,
+      });
+      // Scrub the actual token from the upstream error body before persisting/returning.
+      let detail = String(result.detail || '');
+      if (resolved.auth_token && detail.includes(resolved.auth_token)) {
+        detail = detail.split(resolved.auth_token).join('<redacted>');
+      }
+      setProfileTestResult(id, { status: result.ok ? 'ok' : 'fail', detail });
+      return json(res, { ok: result.ok, status: result.status, detail });
     }
 
     // ── GET /api/wechat/status ──
@@ -1708,6 +1784,17 @@ export async function handleRequest(req, res) {
       })));
     }
 
+    // ── GET /api/agents/credential-profiles ───────────
+    // Read-only, masked profile list for the AgentsView dropdown. Lives in the
+    // Bearer-auth namespace (AgentsView uses the agent API key, not the
+    // dashboard token) and is role-gated to Chairman/CEO/HR.
+    if (method === 'GET' && path === '/api/agents/credential-profiles') {
+      if (req.agent.name !== 'Chairman' && req.agent.name !== 'CEO' && req.agent.name !== 'HR') {
+        return json(res, { error: 'Only Chairman, CEO or HR can view credential profiles' }, 403);
+      }
+      return json(res, { profiles: listCredentialProfiles() });
+    }
+
     // ── PATCH /api/agents/:name ───────────────────────
     if (method === 'PATCH' && path.match(/^\/api\/agents\/[^/]+$/) && path.split('/').length === 4) {
       const name = decodeURIComponent(path.split('/')[3]);
@@ -1738,6 +1825,14 @@ export async function handleRequest(req, res) {
           api_auth_token: body.api_auth_token,
           api_model: body.api_model,
         });
+      }
+      // Credential profile reference (null clears it → falls back to inline/oauth).
+      if (body.credential_profile_id !== undefined) {
+        const pid = body.credential_profile_id;
+        if (pid !== null && !getCredentialProfileRow(pid)) {
+          return json(res, { error: `credential_profile_id ${pid} not found` }, 400);
+        }
+        setAgentCredentialProfile(name, pid);
       }
       return json(res, { ok: true, agent: name, reports_to: body.reports_to, use_resume: body.use_resume });
     }

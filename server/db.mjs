@@ -4,6 +4,7 @@ import path from 'node:path';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { publish } from './eventbus.mjs';
+import { encryptToken, decryptToken, maskToken } from './cred-crypto.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEAMMCP_HOME = process.env.TEAMMCP_HOME || path.join((await import('node:os')).homedir(), '.teammcp');
@@ -106,6 +107,28 @@ try { db.exec('ALTER TABLE agents ADD COLUMN api_auth_token TEXT'); } catch { /*
 try { db.exec('ALTER TABLE agents ADD COLUMN api_model TEXT'); } catch { /* column already exists */ }
 
 try { db.exec('ALTER TABLE agents ADD COLUMN auth_strategy TEXT DEFAULT "legacy"'); } catch {}
+
+// Credential profiles (2026-05-28): agents reference a named, reusable
+// credential set instead of inlining provider token per-row. NULL = use
+// inline columns / oauth (backward compatible). See docs/credential-profiles-design.md.
+try { db.exec('ALTER TABLE agents ADD COLUMN credential_profile_id INTEGER'); } catch { /* exists */ }
+db.exec(`
+CREATE TABLE IF NOT EXISTS credential_profiles (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    name              TEXT NOT NULL UNIQUE,
+    provider          TEXT NOT NULL,
+    base_url          TEXT NOT NULL,
+    auth_token_enc    TEXT NOT NULL,
+    auth_token_iv     TEXT NOT NULL,
+    auth_token_tag    TEXT NOT NULL,
+    model             TEXT,
+    last_tested_at    TEXT,
+    last_test_status  TEXT,
+    last_test_detail  TEXT,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`);
 
 // Codex agent integration (2026-05-26). runtime tags which CLI the agent
 // executes — 'claude' is the historical default (claude.cmd via PTY daemon);
@@ -361,11 +384,160 @@ export function setAgentAuthStrategy(name, auth_strategy) {
 }
 
 export function getAgentsNeedingRouter() {
-  return db.prepare(`
-    SELECT name, api_provider, api_base_url, api_auth_token, api_model
+  // profile-aware: an agent needs the router if it's api_key AND has a provider,
+  // whether the provider/token come from a credential profile or inline columns.
+  const rows = db.prepare(`
+    SELECT name, api_provider, api_base_url, api_auth_token, api_model, credential_profile_id
     FROM agents
-    WHERE auth_mode = 'api_key' AND api_provider IS NOT NULL
+    WHERE auth_mode = 'api_key'
+      AND (api_provider IS NOT NULL OR credential_profile_id IS NOT NULL)
   `).all();
+  return rows.map(r => {
+    if (!r.credential_profile_id) return r;
+    const c = resolveCredentialProfile(r.credential_profile_id); // decrypts token
+    if (!c) return r;
+    return {
+      name: r.name,
+      api_provider: c.provider,
+      api_base_url: c.base_url,
+      api_auth_token: c.auth_token,
+      api_model: r.api_model || c.model,
+      credential_profile_id: r.credential_profile_id,
+    };
+  });
+}
+
+// ── Credential profiles ─────────────────────────────────
+// Tokens are AES-256-GCM encrypted at rest (cred-crypto.mjs). Read helpers
+// that surface profiles to the UI MUST mask the token; only spawn / router /
+// ccrouter internals call the decrypting resolvers.
+
+export function createCredentialProfile({ name, provider, base_url, auth_token, model }) {
+  const { enc, iv, tag } = encryptToken(auth_token);
+  const info = db.prepare(`
+    INSERT INTO credential_profiles (name, provider, base_url, auth_token_enc, auth_token_iv, auth_token_tag, model)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(name, provider, base_url, enc, iv, tag, model || null);
+  return getCredentialProfileRow(info.lastInsertRowid);
+}
+
+export function updateCredentialProfile(id, fields) {
+  const cur = getCredentialProfileRow(id);
+  if (!cur) return null;
+  const name     = fields.name     ?? cur.name;
+  const provider = fields.provider ?? cur.provider;
+  const base_url = fields.base_url ?? cur.base_url;
+  const model    = fields.model !== undefined ? (fields.model || null) : cur.model;
+  let { auth_token_enc, auth_token_iv, auth_token_tag } = cur;
+  // Rotate token only when a non-empty new token is supplied.
+  if (fields.auth_token) {
+    const e = encryptToken(fields.auth_token);
+    auth_token_enc = e.enc; auth_token_iv = e.iv; auth_token_tag = e.tag;
+  }
+  db.prepare(`
+    UPDATE credential_profiles SET
+      name = ?, provider = ?, base_url = ?, model = ?,
+      auth_token_enc = ?, auth_token_iv = ?, auth_token_tag = ?,
+      updated_at = datetime('now')
+    WHERE id = ?
+  `).run(name, provider, base_url, model, auth_token_enc, auth_token_iv, auth_token_tag, id);
+  return getCredentialProfileRow(id);
+}
+
+export function deleteCredentialProfile(id) {
+  if (countAgentsUsingProfile(id) > 0) {
+    const err = new Error('profile still referenced by agents');
+    err.statusCode = 409;
+    throw err;
+  }
+  return db.prepare('DELETE FROM credential_profiles WHERE id = ?').run(id).changes > 0;
+}
+
+// Raw row (includes ciphertext) — internal use.
+export function getCredentialProfileRow(id) {
+  return db.prepare('SELECT * FROM credential_profiles WHERE id = ?').get(id);
+}
+
+// Decrypted resolution — for spawn / router / ccrouter. Returns
+// { id, name, provider, base_url, auth_token, model } or null.
+export function resolveCredentialProfile(id) {
+  const row = getCredentialProfileRow(id);
+  if (!row) return null;
+  let auth_token = '';
+  try {
+    auth_token = decryptToken(row.auth_token_enc, row.auth_token_iv, row.auth_token_tag);
+  } catch (e) {
+    console.error(`[db] credential profile ${id} decrypt failed:`, e.message);
+  }
+  return { id: row.id, name: row.name, provider: row.provider, base_url: row.base_url, auth_token, model: row.model };
+}
+
+// Masked list for UI — never returns plaintext token.
+export function listCredentialProfiles() {
+  const rows = db.prepare('SELECT * FROM credential_profiles ORDER BY name').all();
+  return rows.map(r => {
+    let masked = '(encrypted)';
+    try { masked = maskToken(decryptToken(r.auth_token_enc, r.auth_token_iv, r.auth_token_tag)); } catch {}
+    return {
+      id: r.id, name: r.name, provider: r.provider, base_url: r.base_url, model: r.model,
+      token_preview: masked,
+      agents_count: countAgentsUsingProfile(r.id),
+      last_tested_at: r.last_tested_at, last_test_status: r.last_test_status, last_test_detail: r.last_test_detail,
+      created_at: r.created_at, updated_at: r.updated_at,
+    };
+  });
+}
+
+export function countAgentsUsingProfile(id) {
+  return db.prepare('SELECT COUNT(*) AS c FROM agents WHERE credential_profile_id = ?').get(id).c;
+}
+
+export function agentsUsingProfile(id) {
+  return db.prepare('SELECT name, status FROM agents WHERE credential_profile_id = ?').all(id);
+}
+
+// Health summary: profiles that last tested 'fail' AND are referenced by
+// online agents — surfaced in /api/system/health so a dead key shows up
+// instead of the agent silently 401-ing while appearing online.
+export function getFailedProfilesInUse() {
+  return db.prepare(`
+    SELECT cp.id, cp.name, cp.last_test_detail,
+           COUNT(a.name) AS agents_total,
+           SUM(CASE WHEN a.status = 'online' THEN 1 ELSE 0 END) AS agents_online
+    FROM credential_profiles cp
+    JOIN agents a ON a.credential_profile_id = cp.id
+    WHERE cp.last_test_status = 'fail'
+    GROUP BY cp.id
+    HAVING agents_online > 0
+  `).all();
+}
+
+// All profiles needing a periodic probe (used by the watchdog).
+export function getAllProfileIds() {
+  return db.prepare('SELECT id FROM credential_profiles').all().map(r => r.id);
+}
+
+export function setProfileTestResult(id, { status, detail }) {
+  db.prepare(`
+    UPDATE credential_profiles SET last_tested_at = datetime('now'), last_test_status = ?, last_test_detail = ?
+    WHERE id = ?
+  `).run(status || null, detail || null, id);
+}
+
+export function setAgentCredentialProfile(name, profileId) {
+  db.prepare('UPDATE agents SET credential_profile_id = ? WHERE name = ?').run(profileId ?? null, name);
+}
+
+/**
+ * Resolve an agent's effective LLM credential: profile-first, inline-fallback.
+ * Used by all three spawn impls. Returns { base_url, token, model }.
+ */
+export function resolveAgentCredential(agent) {
+  if (agent && agent.auth_mode === 'api_key' && agent.credential_profile_id) {
+    const p = resolveCredentialProfile(agent.credential_profile_id);
+    if (p) return { provider: p.provider, base_url: p.base_url, token: p.auth_token, model: agent.api_model ?? p.model };
+  }
+  return { provider: agent?.api_provider, base_url: agent?.api_base_url, token: agent?.api_auth_token, model: agent?.api_model };
 }
 
 // ── Channels ────────────────────────────────────────────

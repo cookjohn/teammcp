@@ -85,6 +85,37 @@ if (AGENTS_BASE_DIR) {
 // Only allow safe agent names (letters, digits, hyphen, underscore)
 export const SAFE_NAME_RE = /^[A-Za-z0-9_.\-]+$/;
 
+// Resolve claude.cmd location once and cache. Honors (1) TEAMMCP_CLAUDE_CMD
+// env override, (2) PATH lookup via `where claude.cmd`, (3) legacy
+// %APPDATA%/npm/claude.cmd default. Throws if all three fail so the caller
+// returns a clean 500 rather than the daemon SPAWN_FAILED with a misleading
+// path. The boot-checks logic mirrors this — keep both in sync.
+let _resolvedClaudeCmd = null;
+function resolveClaudeCmd() {
+  if (_resolvedClaudeCmd && existsSync(_resolvedClaudeCmd)) return _resolvedClaudeCmd;
+  if (process.env.TEAMMCP_CLAUDE_CMD && existsSync(process.env.TEAMMCP_CLAUDE_CMD)) {
+    _resolvedClaudeCmd = process.env.TEAMMCP_CLAUDE_CMD;
+    return _resolvedClaudeCmd;
+  }
+  try {
+    const out = execSync('where claude.cmd', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+    const first = out.split(/\r?\n/)[0];
+    if (first && existsSync(first)) {
+      _resolvedClaudeCmd = first;
+      return _resolvedClaudeCmd;
+    }
+  } catch {}
+  const legacy = join(process.env.APPDATA || '', 'npm', 'claude.cmd');
+  if (existsSync(legacy)) {
+    _resolvedClaudeCmd = legacy;
+    return _resolvedClaudeCmd;
+  }
+  throw Object.assign(
+    new Error('claude.cmd not found via PATH, $TEAMMCP_CLAUDE_CMD, or %APPDATA%/npm. Install: npm i -g @anthropic-ai/claude-code'),
+    { statusCode: 500 }
+  );
+}
+
 // SecTest fix (PS injection defense-in-depth):
 // PowerShell single-quoted literals do NOT interpolate $vars / $(expr) / `escapes`,
 // so wrap untrusted strings in single quotes and escape internal single quotes by
@@ -486,11 +517,22 @@ export async function startAgent(name) {
   // Direct providers (xiaomi, etc.) bypass ccrouter and connect directly.
   const ROUTER_PROVIDERS = new Set(['openrouter', 'openai']);
   let effectiveAgentInfo = agentInfo;
-  if (agentInfo && agentInfo.auth_mode === 'api_key' && agentInfo.api_provider) {
-    if (ROUTER_PROVIDERS.has(agentInfo.api_provider.toLowerCase())) {
+  if (agentInfo && agentInfo.auth_mode === 'api_key') {
+    // Resolve credential profile-first, inline-fallback, so the rest of this
+    // block works identically whether the token came from a profile or inline.
+    const { resolveAgentCredential } = await import('./db.mjs');
+    const cred = resolveAgentCredential(agentInfo);
+    effectiveAgentInfo = {
+      ...agentInfo,
+      api_provider: cred.provider,
+      api_base_url: cred.base_url,
+      api_auth_token: cred.token,
+      api_model: cred.model,
+    };
+    if (cred.provider && ROUTER_PROVIDERS.has(cred.provider.toLowerCase())) {
       const routerStarted = await ensureCCRouter();
       if (routerStarted) {
-        effectiveAgentInfo = { ...agentInfo, api_base_url: `http://127.0.0.1:${CCROUTER_PORT}` };
+        effectiveAgentInfo.api_base_url = `http://127.0.0.1:${CCROUTER_PORT}`;
       } else {
         console.warn(`[start-agent] ccrouter failed to start, using direct API for ${name}`);
       }
@@ -596,7 +638,7 @@ export async function startAgent(name) {
 
   // Spawn target & args are identical across both paths; only the
   // spawn implementation diverges.
-  const claudeCmd = join(process.env.APPDATA || '', 'npm', 'claude.cmd');
+  const claudeCmd = resolveClaudeCmd();
   const claudeArgs = [
     '--dangerously-skip-permissions',
     '--permission-mode', 'bypassPermissions',

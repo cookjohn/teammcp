@@ -550,6 +550,14 @@ try {
   console.log('[TeamMCP] WeChat bridge not available:', e.message);
 }
 
+// ── Credential profile probe watchdog (opt-in via CRED_PROBE_INTERVAL_MIN) ──
+try {
+  const { startCredentialProbeWatchdog } = await import('./credential-probe-watchdog.mjs');
+  startCredentialProbeWatchdog();
+} catch (e) {
+  console.log('[cred-probe] watchdog not started:', e.message);
+}
+
 // ── Approval notification → WeChat push ───────────────
 subscribe('approval_requested', (event) => {
   try {

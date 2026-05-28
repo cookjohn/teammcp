@@ -276,11 +276,16 @@ export async function startAgent(name) {
   const agentInfo = getAgentByName(name);
   let apiEnvLines = '';
   if (agentInfo && agentInfo.auth_mode === 'api_key') {
+    // Resolve credential profile-first, inline-fallback (same as win/linux).
+    // Without this, a profile-only agent (no inline columns) gets no token on
+    // mac and silently 401s — the exact failure this feature exists to kill.
+    const { resolveAgentCredential } = await import('./db.mjs');
+    const cred = resolveAgentCredential(agentInfo);
     apiEnvLines += `export ANTHROPIC_API_KEY=""\n`;
     apiEnvLines += `export CLAUDE_CODE_OAUTH_TOKEN="channel-gate-bypass"\n`;
-    if (agentInfo.api_base_url) apiEnvLines += `export ANTHROPIC_BASE_URL="${agentInfo.api_base_url}"\n`;
-    if (agentInfo.api_auth_token) apiEnvLines += `export ANTHROPIC_AUTH_TOKEN="${agentInfo.api_auth_token}"\n`;
-    if (agentInfo.api_model) apiEnvLines += `export ANTHROPIC_MODEL="${agentInfo.api_model}"\n`;
+    if (cred.base_url) apiEnvLines += `export ANTHROPIC_BASE_URL="${cred.base_url}"\n`;
+    if (cred.token) apiEnvLines += `export ANTHROPIC_AUTH_TOKEN="${cred.token}"\n`;
+    if (cred.model) apiEnvLines += `export ANTHROPIC_MODEL="${cred.model}"\n`;
   }
 
   writeFileSync(startScript, `#!/bin/bash

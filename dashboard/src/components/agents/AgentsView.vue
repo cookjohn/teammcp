@@ -64,10 +64,22 @@ function closeCreate() {
   createError.value = ''
 }
 
+// ── Credential profiles (for the auth dropdown) ───────────
+const credProfiles = ref([])
+async function loadCredProfiles() {
+  try {
+    const data = await api('/api/agents/credential-profiles')
+    credProfiles.value = data.profiles || []
+  } catch {
+    credProfiles.value = []  // non-managers get 403; dropdown just falls back to inline
+  }
+}
+
 // ── Detail Panel ──────────────────────────────────────────
 function openDetail(agent) {
   detailAgent.value = { ...agent }
   showDetail.value = true
+  loadCredProfiles()
 }
 function closeDetail() {
   showDetail.value = false
@@ -121,11 +133,21 @@ async function saveConfig() {
   try {
     const updates = { auth_mode: detailAgent.value.auth_mode || 'oauth' }
     if (updates.auth_mode === 'api_key') {
-      updates.api_provider = detailAgent.value.api_provider || ''
-      updates.api_base_url = detailAgent.value.api_base_url || ''
-      updates.api_model = detailAgent.value.api_model || ''
-      const tokenEl = document.getElementById('edit-api-token')
-      if (tokenEl?.value) updates.api_auth_token = tokenEl.value
+      const pid = detailAgent.value.credential_profile_id
+      if (pid) {
+        // Profile-backed: reference the profile, clear inline fields' authority.
+        updates.credential_profile_id = pid
+        // Optional per-agent model override; leave others to the profile.
+        updates.api_model = detailAgent.value.api_model || ''
+      } else {
+        // Inline (custom): persist inline fields and clear any profile link.
+        updates.credential_profile_id = null
+        updates.api_provider = detailAgent.value.api_provider || ''
+        updates.api_base_url = detailAgent.value.api_base_url || ''
+        updates.api_model = detailAgent.value.api_model || ''
+        const tokenEl = document.getElementById('edit-api-token')
+        if (tokenEl?.value) updates.api_auth_token = tokenEl.value
+      }
     }
     await store.updateAgent(detailAgent.value.name, updates)
     await store.loadAgents()
@@ -512,26 +534,40 @@ function runtimeLabel(a) { return runtimeOf(a) === 'codex-pty' ? 'Codex' : 'Clau
             </select>
           </div>
           <template v-if="detailAgent.auth_mode === 'api_key'">
+            <!-- Credential profile selector: pick a shared profile or "Custom" for inline -->
             <div class="detail-field">
-              <div class="detail-label">{{ $t('agentDetail.provider') }}</div>
-              <select v-model="detailAgent.api_provider" class="detail-select">
-                <option value="">{{ $t('agentDetail.select') }}</option>
-                <option value="anthropic">Anthropic</option>
-                <option value="openai">OpenAI</option>
-                <option value="openrouter">OpenRouter</option>
-                <option value="custom">Custom</option>
+              <div class="detail-label">{{ $t('agentDetail.credProfile') }}</div>
+              <select v-model="detailAgent.credential_profile_id" class="detail-select">
+                <option :value="null">{{ $t('agentDetail.credCustom') }}</option>
+                <option v-for="p in credProfiles" :key="p.id" :value="p.id">
+                  {{ p.name }} ({{ p.provider }}){{ p.last_test_status === 'fail' ? ' ✗' : p.last_test_status === 'ok' ? ' ✓' : '' }}
+                </option>
               </select>
             </div>
+            <!-- Inline fields only when no profile is selected -->
+            <template v-if="!detailAgent.credential_profile_id">
+              <div class="detail-field">
+                <div class="detail-label">{{ $t('agentDetail.provider') }}</div>
+                <select v-model="detailAgent.api_provider" class="detail-select">
+                  <option value="">{{ $t('agentDetail.select') }}</option>
+                  <option value="anthropic">Anthropic</option>
+                  <option value="openai">OpenAI</option>
+                  <option value="openrouter">OpenRouter</option>
+                  <option value="custom">Custom</option>
+                </select>
+              </div>
+              <div class="detail-field">
+                <div class="detail-label">{{ $t('agentDetail.baseUrl') }}</div>
+                <input type="text" v-model="detailAgent.api_base_url" class="detail-input" placeholder="https://api.anthropic.com" />
+              </div>
+              <div class="detail-field">
+                <div class="detail-label">{{ $t('agentDetail.token') }}</div>
+                <input type="password" id="edit-api-token" class="detail-input" :placeholder="$t('agentDetail.tokenPlaceholder')" />
+              </div>
+            </template>
+            <!-- Model is editable in both modes (per-agent override of profile default) -->
             <div class="detail-field">
-              <div class="detail-label">{{ $t('agentDetail.baseUrl') }}</div>
-              <input type="text" v-model="detailAgent.api_base_url" class="detail-input" placeholder="https://api.anthropic.com" />
-            </div>
-            <div class="detail-field">
-              <div class="detail-label">{{ $t('agentDetail.token') }}</div>
-              <input type="password" id="edit-api-token" class="detail-input" :placeholder="$t('agentDetail.tokenPlaceholder')" />
-            </div>
-            <div class="detail-field">
-              <div class="detail-label">{{ $t('agentDetail.model') }}</div>
+              <div class="detail-label">{{ $t('agentDetail.model') }}<span v-if="detailAgent.credential_profile_id" class="dim"> ({{ $t('agentDetail.modelOverride') }})</span></div>
               <input type="text" v-model="detailAgent.api_model" class="detail-input" placeholder="claude-sonnet-4-20250514" />
             </div>
           </template>

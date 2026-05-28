@@ -53,6 +53,10 @@ scripts/test-sdk-agent.mjs
 # OAuth credentials (real tokens)
 oauth-credentials.json
 
+# Credential-profile encryption key (AES-256-GCM, auto-generated)
+.cred-key
+**/.cred-key
+
 # Local secret bootstrap (MEMORY_LLM_KEY, etc.) — dot-sourced by start-*.ps1
 secrets.local.ps1
 secrets.local.sh

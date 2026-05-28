@@ -250,10 +250,113 @@ async function submitOAuthCode() {
   }
 }
 
+// ── Credential profiles ───────────────────────────────────
+const PROVIDER_PRESETS = {
+  anthropic:  'https://api.anthropic.com',
+  openai:     'https://api.openai.com/v1',
+  openrouter: 'https://openrouter.ai/api/v1',
+  xiaomi:     'https://token-plan-cn.xiaomimimo.com/anthropic',
+  minimax:    'https://api.minimaxi.com/anthropic',
+  custom:     '',
+}
+const profiles = ref([])
+const profilesLoading = ref(false)
+const showProfileForm = ref(false)
+const editingProfileId = ref(null)
+const testingProfileId = ref(null)
+const profileForm = ref({ name: '', provider: 'anthropic', base_url: '', auth_token: '', model: '' })
+const profileError = ref('')
+
+async function loadProfiles() {
+  profilesLoading.value = true
+  try {
+    const data = await storeCredApi('/api/dashboard/credentials/profiles')
+    profiles.value = data.profiles || []
+  } catch (e) {
+    console.error('Load profiles failed:', e)
+  }
+  profilesLoading.value = false
+}
+
+function openProfileForm(p) {
+  profileError.value = ''
+  if (p) {
+    editingProfileId.value = p.id
+    profileForm.value = { name: p.name, provider: p.provider, base_url: p.base_url, auth_token: '', model: p.model || '' }
+  } else {
+    editingProfileId.value = null
+    profileForm.value = { name: '', provider: 'anthropic', base_url: PROVIDER_PRESETS.anthropic, auth_token: '', model: '' }
+  }
+  showProfileForm.value = true
+}
+
+function onProviderChange() {
+  // Prefill base_url from preset only when empty or matching a known preset.
+  const preset = PROVIDER_PRESETS[profileForm.value.provider]
+  if (preset !== undefined && (!profileForm.value.base_url || Object.values(PROVIDER_PRESETS).includes(profileForm.value.base_url))) {
+    profileForm.value.base_url = preset
+  }
+}
+
+async function saveProfile() {
+  profileError.value = ''
+  const f = profileForm.value
+  if (!f.name || !f.provider || !f.base_url) {
+    profileError.value = t('credProfiles.requiredFields'); return
+  }
+  if (!editingProfileId.value && !f.auth_token) {
+    profileError.value = t('credProfiles.tokenRequired'); return
+  }
+  try {
+    if (editingProfileId.value) {
+      const body = { name: f.name, provider: f.provider, base_url: f.base_url, model: f.model }
+      if (f.auth_token) body.auth_token = f.auth_token  // rotate only if provided
+      const r = await storeCredApi(`/api/dashboard/credentials/profiles/${editingProfileId.value}`, {
+        method: 'PUT', body: JSON.stringify(body),
+      })
+      if (r.rotated && r.restartNeeded && r.restartNeeded.length) {
+        alert(t('credProfiles.restartNeeded') + ' ' + r.restartNeeded.join(', '))
+      }
+    } else {
+      await storeCredApi('/api/dashboard/credentials/profiles', {
+        method: 'POST', body: JSON.stringify(f),
+      })
+    }
+    showProfileForm.value = false
+    await loadProfiles()
+  } catch (e) {
+    profileError.value = e.message
+  }
+}
+
+async function deleteProfile(p) {
+  if (p.agents_count > 0) { alert(t('credProfiles.inUse', { n: p.agents_count })); return }
+  if (!confirm(t('credProfiles.confirmDelete', { name: p.name }))) return
+  try {
+    await storeCredApi(`/api/dashboard/credentials/profiles/${p.id}`, { method: 'DELETE' })
+    await loadProfiles()
+  } catch (e) {
+    alert('Delete failed: ' + e.message)
+  }
+}
+
+async function testProfile(p) {
+  testingProfileId.value = p.id
+  try {
+    const r = await storeCredApi(`/api/dashboard/credentials/profiles/${p.id}/test`, { method: 'POST' })
+    await loadProfiles()
+    if (!r.ok) alert(t('credProfiles.testFail') + '\n' + (r.detail || ''))
+  } catch (e) {
+    alert('Test failed: ' + e.message)
+  }
+  testingProfileId.value = null
+}
+
 // ── SSE ───────────────────────────────────────────────────
 const sse = inject('sse')
 onMounted(() => {
   loadAll()
+  loadProfiles()
 })
 </script>
 
@@ -332,6 +435,86 @@ onMounted(() => {
           </tbody>
         </table>
         <div v-else class="cred-empty">{{ t('credentials.noLeases') }}</div>
+      </div>
+
+      <!-- API Key Profiles -->
+      <div class="cred-section">
+        <div class="section-title-row">
+          <div class="section-title">{{ t('credProfiles.title') }}</div>
+          <button class="cp-add-btn" @click="openProfileForm(null)">+ {{ t('credProfiles.add') }}</button>
+        </div>
+
+        <div v-if="profilesLoading" class="cred-loading">{{ t('state.loading') }}</div>
+        <table v-else-if="profiles.length > 0" class="cred-table">
+          <thead>
+            <tr>
+              <th>{{ t('credProfiles.name') }}</th>
+              <th>{{ t('credProfiles.provider') }}</th>
+              <th>{{ t('credProfiles.model') }}</th>
+              <th>{{ t('credProfiles.token') }}</th>
+              <th>{{ t('credProfiles.usedBy') }}</th>
+              <th>{{ t('credProfiles.testStatus') }}</th>
+              <th>{{ t('credentials.action') }}</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="p in profiles" :key="p.id">
+              <td><strong>{{ p.name }}</strong></td>
+              <td class="dim">{{ p.provider }}</td>
+              <td class="dim">{{ p.model || '-' }}</td>
+              <td class="mono dim">{{ p.token_preview }}</td>
+              <td>{{ p.agents_count }}</td>
+              <td>
+                <span v-if="p.last_test_status === 'ok'" class="cp-status ok" :title="p.last_tested_at">&#10003; {{ t('credProfiles.ok') }}</span>
+                <span v-else-if="p.last_test_status === 'fail'" class="cp-status fail" :title="p.last_test_detail || ''">&#10007; {{ t('credProfiles.fail') }}</span>
+                <span v-else class="cp-status untested">{{ t('credProfiles.untested') }}</span>
+              </td>
+              <td class="cp-actions">
+                <button class="cp-btn" :disabled="testingProfileId === p.id" @click="testProfile(p)">
+                  {{ testingProfileId === p.id ? t('credProfiles.testing') : t('credProfiles.test') }}
+                </button>
+                <button class="cp-btn" @click="openProfileForm(p)">{{ t('credProfiles.edit') }}</button>
+                <button class="cp-btn danger" @click="deleteProfile(p)">{{ t('credProfiles.delete') }}</button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-else class="cred-empty">{{ t('credProfiles.empty') }}</div>
+
+        <!-- Create / edit form -->
+        <div v-if="showProfileForm" class="cp-form">
+          <div class="cp-form-title">{{ editingProfileId ? t('credProfiles.editTitle') : t('credProfiles.addTitle') }}</div>
+          <div class="cp-form-grid">
+            <label>{{ t('credProfiles.name') }}
+              <input v-model="profileForm.name" :placeholder="'xiaomi-mimo'" />
+            </label>
+            <label>{{ t('credProfiles.provider') }}
+              <select v-model="profileForm.provider" @change="onProviderChange">
+                <option value="anthropic">anthropic</option>
+                <option value="openai">openai</option>
+                <option value="openrouter">openrouter</option>
+                <option value="xiaomi">xiaomi</option>
+                <option value="minimax">minimax</option>
+                <option value="custom">custom</option>
+              </select>
+            </label>
+            <label class="cp-wide">{{ t('credProfiles.baseUrl') }}
+              <input v-model="profileForm.base_url" placeholder="https://..." />
+            </label>
+            <label class="cp-wide">{{ t('credProfiles.token') }}
+              <input v-model="profileForm.auth_token" type="password"
+                     :placeholder="editingProfileId ? t('credProfiles.tokenKeep') : 'sk-... / tp-...'" />
+            </label>
+            <label>{{ t('credProfiles.model') }}
+              <input v-model="profileForm.model" placeholder="mimo-v2-pro" />
+            </label>
+          </div>
+          <div v-if="profileError" class="cp-error">{{ profileError }}</div>
+          <div class="cp-form-actions">
+            <button class="cp-btn" @click="showProfileForm = false">{{ t('credProfiles.cancel') }}</button>
+            <button class="cp-btn primary" @click="saveProfile">{{ t('credProfiles.save') }}</button>
+          </div>
+        </div>
       </div>
 
       <!-- Leases Table -->
@@ -680,4 +863,40 @@ onMounted(() => {
   color: #ef4444;
   font-size: 12px;
 }
+
+/* ── Credential profiles ───────────────────────── */
+.section-title-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.cp-add-btn {
+  background: var(--accent); color: #fff; border: none; border-radius: var(--radius-sm);
+  padding: 5px 12px; font-size: 13px; cursor: pointer;
+}
+.cp-add-btn:hover { background: var(--accent-dim); }
+.mono { font-family: monospace; font-size: 12px; }
+.cp-status { font-size: 12px; font-weight: 600; }
+.cp-status.ok { color: var(--green, #22c55e); }
+.cp-status.fail { color: var(--red, #ef4444); cursor: help; }
+.cp-status.untested { color: var(--text-muted); font-weight: 400; }
+.cp-actions { display: flex; gap: 6px; }
+.cp-btn {
+  background: var(--bg-msg); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text-dim); padding: 4px 10px; font-size: 12px; cursor: pointer;
+}
+.cp-btn:hover:not(:disabled) { background: var(--bg-msg-hover); color: var(--text); }
+.cp-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.cp-btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.cp-btn.danger:hover { color: var(--red, #ef4444); border-color: var(--red, #ef4444); }
+.cp-form {
+  margin-top: 12px; padding: 14px; background: var(--bg-msg);
+  border: 1px solid var(--border); border-radius: var(--radius);
+}
+.cp-form-title { font-size: 13px; font-weight: 700; margin-bottom: 10px; }
+.cp-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.cp-form-grid label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-dim); }
+.cp-form-grid label.cp-wide { grid-column: 1 / -1; }
+.cp-form-grid input, .cp-form-grid select {
+  background: var(--bg-input); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  color: var(--text); padding: 7px 10px; font-size: 13px; font-family: inherit;
+}
+.cp-error { margin-top: 10px; color: #ef4444; font-size: 12px; }
+.cp-form-actions { margin-top: 12px; display: flex; gap: 8px; justify-content: flex-end; }
 </style>
