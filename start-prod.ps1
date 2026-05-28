@@ -6,6 +6,10 @@ $env:AGENTS_BASE_DIR = "C:/Users/ssdlh/Desktop/agents"
 $env:TEAMMCP_URL = "http://localhost:3100"
 $env:TEAMMCP_AUTO_RESTART = "0"
 
+# codex-pty runtime: codex.exe lives inside the npm @openai/codex platform
+# package, not on PATH. The daemon needs it on the cmd allowlist.
+$env:TEAMMCP_CMD_ALLOWLIST_EXTRA = "C:\Users\ssdlh\AppData\Roaming\npm\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe"
+
 # Memory engine + retention sweep ENABLED for Gate 1 soak (CEO unblock 2026-04-25).
 # Pre-conditions met: G1.C dedup剥离 + BLOCK 1 retention.mjs §3 8-class severity='error'
 # + BLOCK 2 watchdog rollback_history + 7 retention policies registered + watchdog auto-start.

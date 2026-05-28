@@ -16,26 +16,19 @@ import TerminalView from './components/terminal/TerminalView.vue'
 import MemoriesView from './components/memory/MemoriesView.vue'
 import SetupWizard from './components/wizard/SetupWizard.vue'
 import WechatPanel from './components/wechat/WechatPanel.vue'
-import en from './i18n/en.js'
-import zh from './i18n/zh.js'
+import WatchdogPanel from './components/watchdog/WatchdogPanel.vue'
+
+import { useI18n } from 'vue-i18n'
 
 // ── i18n ────────────────────────────────────────────────
-const locales = { en, zh }
-const locale = ref(localStorage.getItem('teammcp_locale') || 'en')
-
-function t(key) {
-  const keys = key.split('.')
-  let val = locales[locale.value]
-  for (const k of keys) {
-    if (val && typeof val === 'object') val = val[k]
-    else return key
-  }
-  return val !== undefined ? val : key
-}
+// vue-i18n is the single source of truth (drives every $t in the app).
+// The old local `locale` ref + `teammcp_locale` storage key only toggled
+// a Vue ref that nothing read — leaving the UI stuck in English.
+const { t, locale } = useI18n()
 
 function toggleLocale() {
   locale.value = locale.value === 'en' ? 'zh' : 'en'
-  localStorage.setItem('teammcp_locale', locale.value)
+  localStorage.setItem('tmcp-lang', locale.value)
 }
 
 // ── Theme ───────────────────────────────────────────────
@@ -112,14 +105,15 @@ const sse = useSSE(() => auth.apiKey.value, {
 // ── View state ──────────────────────────────────────────
 const currentView = ref('messages')
 
+// Labels resolved via `$t('nav.' + id)` in template \u2014 see i18n/en.js + zh.js.
 const navItems = [
-  { id: 'tasks', label: 'Tasks', icon: '\u2611' },
-  { id: 'state', label: 'State', icon: '\u2699' },
-  { id: 'agents', label: 'Agents', icon: '\u{1F916}' },
-  { id: 'credentials', label: 'Credentials', icon: '\u{1F511}' },
-  { id: 'monitor', label: 'Monitor', icon: '\u{1F4CA}' },
-  { id: 'memories', label: 'Memories', icon: '\u{1F4AD}' },
-  { id: 'terminal', label: 'Terminal', icon: '\u23CE' },
+  { id: 'tasks', icon: '\u2611' },
+  { id: 'state', icon: '\u2699' },
+  { id: 'agents', icon: '\u{1F916}' },
+  { id: 'credentials', icon: '\u{1F511}' },
+  { id: 'monitor', icon: '\u{1F4CA}' },
+  { id: 'memories', icon: '\u{1F4AD}' },
+  { id: 'terminal', icon: '\u23CE' },
 ]
 
 // ── Provide for child components ────────────────────────
@@ -132,6 +126,24 @@ provide('t', t)
 provide('api', api)
 provide('tasksStore', tasksStore)
 provide('fileChangeCounter', fileChangeCounter)
+
+// ── System health badge ─────────────────────────────────
+// Polls /api/system/health every 60s + once on mount. Shows a coloured
+// dot in the header when any dependency check is non-ok. The popover
+// lists failing checks with their suggested fixes.
+const sysHealth = ref(null)
+const sysHealthOpen = ref(false)
+let sysHealthTimer = null
+
+async function loadSysHealth() {
+  try {
+    const r = await fetch('/api/system/health')
+    if (r.ok) sysHealth.value = await r.json()
+  } catch {}
+}
+const sysHealthIssues = computed(() => sysHealth.value?.checks?.filter(c => c.level !== 'ok') || [])
+const sysHealthVerdict = computed(() => sysHealth.value?.verdict || 'unknown')
+function toggleSysHealth() { sysHealthOpen.value = !sysHealthOpen.value }
 
 // ── Lifecycle ───────────────────────────────────────────
 onMounted(async () => {
@@ -156,8 +168,13 @@ onMounted(async () => {
 async function initApp() {
   await Promise.all([
     channelsStore.loadChannels(),
-    agentsStore.loadAgents()
+    agentsStore.loadAgents(),
+    loadSysHealth(),
   ])
+  // Poll system health on a slow cadence — dep status doesn't change often
+  // and the badge is non-critical UX.
+  if (sysHealthTimer) clearInterval(sysHealthTimer)
+  sysHealthTimer = setInterval(loadSysHealth, 60_000)
   sse.connect()
   // Request browser notification permission
   if ('Notification' in window && Notification.permission === 'default') {
@@ -303,18 +320,18 @@ const unreadCounts = computed(() => channelsStore.unreadCounts.value)
   <div v-if="!auth.isAuthenticated.value && !showWizard" class="auth-overlay">
     <div class="auth-card">
       <div class="auth-logo">T</div>
-      <h1 class="auth-title">TeamMCP Dashboard</h1>
-      <p class="auth-subtitle">Enter your API key to connect</p>
+      <h1 class="auth-title">{{ $t('header.title') }}</h1>
+      <p class="auth-subtitle">{{ $t('auth.desc') }}</p>
       <div class="auth-form">
         <input
           v-model="loginKeyInput"
           type="password"
           class="auth-input"
-          placeholder="API Key"
+          :placeholder="$t('auth.placeholder')"
           @keydown.enter="doLogin"
         />
         <button class="auth-btn" :disabled="auth.isLoading.value" @click="doLogin">
-          {{ auth.isLoading.value ? 'Connecting...' : 'Connect' }}
+          {{ auth.isLoading.value ? $t('auth.connecting') : $t('auth.connect') }}
         </button>
       </div>
       <div v-if="auth.authError.value" class="auth-error">{{ auth.authError.value }}</div>
@@ -327,10 +344,29 @@ const unreadCounts = computed(() => channelsStore.unreadCounts.value)
     <header class="app-header">
       <div class="header-left">
         <div class="header-logo">T</div>
-        <h1 class="header-title">TeamMCP Dashboard</h1>
+        <h1 class="header-title">{{ $t('header.title') }}</h1>
         <div class="connection-status">
           <span class="connection-dot" :class="{ connected: sse.connected.value }"></span>
-          <span class="connection-label">{{ sse.connected.value ? 'Connected' : sse.reconnecting.value ? 'Reconnecting...' : 'Disconnected' }}</span>
+          <span class="connection-label">{{ sse.connected.value ? $t('sse.connected') : sse.reconnecting.value ? $t('sse.reconnecting') : $t('sse.disconnected') }}</span>
+        </div>
+        <!-- System health badge — hidden when verdict=='ok' so we don't add
+             chrome noise in the steady state. Click toggles a popover that
+             lists the failing checks with their suggested fixes. -->
+        <div v-if="sysHealth && sysHealthVerdict !== 'ok'" class="sys-health">
+          <button class="sys-health-btn" :class="sysHealthVerdict" @click="toggleSysHealth" :title="$t('sysHealth.title')">
+            <span class="sys-health-icon">⚠</span>
+            {{ sysHealthIssues.length }}
+          </button>
+          <div v-if="sysHealthOpen" class="sys-health-popover" @click.stop>
+            <div class="sys-health-popover-title">{{ $t('sysHealth.title') }}</div>
+            <ul>
+              <li v-for="c in sysHealthIssues" :key="c.name" :class="'lvl-' + c.level">
+                <div class="sys-health-name"><strong>{{ c.name }}</strong> — {{ c.message }}</div>
+                <div v-if="c.fix" class="sys-health-fix">→ {{ c.fix }}</div>
+              </li>
+            </ul>
+            <button class="sys-health-refresh" @click="loadSysHealth">{{ $t('credentials.refresh') }}</button>
+          </div>
         </div>
       </div>
       <div class="header-right">
@@ -341,7 +377,7 @@ const unreadCounts = computed(() => channelsStore.unreadCounts.value)
         <button class="header-toggle-btn" @click="toggleLocale">
           {{ locale === 'en' ? 'ZH' : 'EN' }}
         </button>
-        <button class="header-toggle-btn" @click="doLogout">Logout</button>
+        <button class="header-toggle-btn" @click="doLogout">{{ $t('header.logout') }}</button>
       </div>
     </header>
 
@@ -349,7 +385,7 @@ const unreadCounts = computed(() => channelsStore.unreadCounts.value)
     <aside class="app-sidebar">
       <!-- Channels Section -->
       <div class="sidebar-section">
-        <div class="sidebar-section-title">Channels</div>
+        <div class="sidebar-section-title">{{ $t('nav.channels') }}</div>
         <ul class="channel-list">
           <li
             v-for="ch in channelsStore.channels.value"
@@ -363,14 +399,14 @@ const unreadCounts = computed(() => channelsStore.unreadCounts.value)
             <span v-if="unreadCounts[ch.id] > 0" class="unread-badge">{{ unreadCounts[ch.id] }}</span>
           </li>
           <li v-if="channelsStore.channels.value.length === 0" class="channel-item" style="color: var(--text-muted); cursor: default;">
-            No channels loaded
+            {{ $t('nav.noChannels') }}
           </li>
         </ul>
       </div>
 
       <!-- Navigation Section -->
       <div class="sidebar-section">
-        <div class="sidebar-section-title">Views</div>
+        <div class="sidebar-section-title">{{ $t('nav.views') }}</div>
         <ul class="channel-list">
           <li
             v-for="item in navItems"
@@ -380,15 +416,20 @@ const unreadCounts = computed(() => channelsStore.unreadCounts.value)
             @click="setView(item.id)"
           >
             <span class="channel-icon">{{ item.icon }}</span>
-            <span class="channel-name">{{ item.label }}</span>
+            <span class="channel-name">{{ $t('nav.' + item.id) }}</span>
           </li>
         </ul>
+      </div>
+
+      <!-- Watchdog Section (always visible, auto-collapses detail) -->
+      <div class="sidebar-section sidebar-section-bottom">
+        <WatchdogPanel :api-key="auth.apiKey.value" />
       </div>
 
       <!-- WeChat Section (collapsible) -->
       <div class="sidebar-section sidebar-section-bottom">
         <div class="sidebar-section-title sidebar-section-toggle" @click="wechatExpanded = !wechatExpanded">
-          WeChat
+          {{ $t('nav.wechat') }}
           <span class="sidebar-toggle-arrow">{{ wechatExpanded ? '\u25B4' : '\u25BE' }}</span>
         </div>
         <WechatPanel v-if="wechatExpanded" :api-key="auth.apiKey.value" />
@@ -609,6 +650,72 @@ const unreadCounts = computed(() => channelsStore.unreadCounts.value)
   border-radius: 50%;
   background: var(--red);
 }
+
+/* System health badge — only shown when there are non-ok checks. */
+.sys-health {
+  position: relative;
+  margin-left: 10px;
+}
+.sys-health-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border: 1px solid currentColor;
+  background: transparent;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.sys-health-btn.warn { color: var(--orange); }
+.sys-health-btn.fail { color: var(--red); }
+.sys-health-btn:hover { background: rgba(255,255,255,0.05); }
+.sys-health-icon { font-size: 12px; }
+.sys-health-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 380px;
+  max-width: 90vw;
+  background: var(--bg-sidebar);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  padding: 12px 14px;
+  z-index: 50;
+  font-size: 12px;
+}
+.sys-health-popover-title {
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--text);
+  font-size: 13px;
+}
+.sys-health-popover ul {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 10px;
+}
+.sys-health-popover li {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+.sys-health-popover li:last-child { border-bottom: none; }
+.sys-health-popover li.lvl-warn .sys-health-name strong { color: var(--orange); }
+.sys-health-popover li.lvl-fail .sys-health-name strong { color: var(--red); }
+.sys-health-name { color: var(--text-dim); line-height: 1.45; }
+.sys-health-fix { color: var(--text-muted); font-size: 11px; margin-top: 2px; }
+.sys-health-refresh {
+  padding: 4px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+}
+.sys-health-refresh:hover { background: var(--bg-msg-hover); color: var(--text); }
 
 .connection-dot.connected {
   background: var(--green);

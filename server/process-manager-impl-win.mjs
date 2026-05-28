@@ -130,6 +130,18 @@ export async function startAgent(name) {
 
   clearStopped(name); // Clear intentional-stop flag on restart
 
+  // ── Runtime dispatch ─────────────────────────────────────
+  // codex agents skip the entire claude+PTY stack and run as in-process
+  // @openai/codex-sdk threads. They do still register a wsEntries slot so
+  // Dashboard /api/pty-sessions + Terminal view work the same.
+  const agentRow = getAgentByName(name);
+  if (agentRow?.runtime === 'codex-pty') {
+    // Native codex.exe in ConPTY via daemon. See server/codex-pty-runner.mjs.
+    const { startAgent: codexPtyStart } = await import('./codex-pty-runner.mjs');
+    const result = await codexPtyStart(name);
+    return { pid: result.pid, codexPty: true, reattached: result.reattached };
+  }
+
   if (processes.has(name)) {
     throw Object.assign(new Error(`Agent "${name}" process already tracked (PID: ${processes.get(name).pid})`), { statusCode: 400 });
   }
@@ -750,6 +762,15 @@ export async function stopAgent(name) {
 
   if (!AGENTS_BASE_DIR) {
     throw Object.assign(new Error('AGENTS_BASE_DIR not set'), { statusCode: 500 });
+  }
+
+  // Runtime dispatch — codex agents have no OS process to kill, just abort
+  // the in-process SDK thread state.
+  const agentRow = getAgentByName(name);
+  if (agentRow?.runtime === 'codex-pty') {
+    markStopped(name);
+    const { stopAgent: codexPtyStop } = await import('./codex-pty-runner.mjs');
+    return codexPtyStop(name);
   }
 
   markStopped(name); // Suppress crash detection for intentional stops

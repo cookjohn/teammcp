@@ -12,12 +12,18 @@ const sessions = ref([])
 const selectedAgent = ref(null)
 const connected = ref(false)
 const loading = ref(true)
+const focused = ref(false)  // xterm input focus state — drives visual cue
 const termRef = ref(null)
 
 let term = null
 let fitAddon = null
 let ws = null
 let resizeObserver = null
+let reconnectTimer = null
+let reconnectAttempts = 0
+const RECONNECT_BASE_MS = 1000
+const RECONNECT_MAX_MS = 15000
+let userClosed = false
 
 // ── Dashboard token helpers ──────────────────────────────
 
@@ -65,33 +71,86 @@ async function fetchSessions() {
 
 // ── Terminal / WebSocket ─────────────────────────────────
 
+// Detach all handlers from a WS and close it. Without detaching first, the
+// dying socket's `onclose` would still fire scheduleReconnect() and race
+// against the new connect() — looks like "reconnects every second".
+function teardownWs(sock) {
+  if (!sock) return
+  try {
+    sock.onopen = null
+    sock.onmessage = null
+    sock.onerror = null
+    sock.onclose = null
+  } catch {}
+  try { sock.close() } catch {}
+}
+
 function disconnect() {
-  if (ws) { ws.close(); ws = null }
+  userClosed = true
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+  teardownWs(ws); ws = null
   connected.value = false
 }
 
+function scheduleReconnect() {
+  if (userClosed || !selectedAgent.value) return
+  if (reconnectTimer) return
+  const delay = Math.min(RECONNECT_BASE_MS * 2 ** reconnectAttempts, RECONNECT_MAX_MS)
+  reconnectAttempts++
+  if (term) term.write(`\r\n[reconnecting in ${Math.round(delay/1000)}s...]\r\n`)
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null
+    connect()
+  }, delay)
+}
+
 function connect() {
-  disconnect()
+  // Cancel pending reconnect + tear down any existing socket WITHOUT
+  // triggering its onclose (which would re-arm scheduleReconnect and race
+  // the new socket we're about to create).
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+  teardownWs(ws); ws = null
+  userClosed = false
   if (!selectedAgent.value || !term) return
 
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
   const wsUrl = `${proto}//${location.host}/ws/terminal?agent=${encodeURIComponent(selectedAgent.value)}`
   ws = new WebSocket(wsUrl)
+  // Server emits raw PTY bytes as binary frames; ask for ArrayBuffer so
+  // xterm.write can consume Uint8Array directly. xterm's internal
+  // streaming TextDecoder handles multi-byte UTF-8 split across frames,
+  // which `e.data` as a String cannot.
+  ws.binaryType = 'arraybuffer'
 
   ws.onopen = () => {
     connected.value = true
-    // Sync current terminal dimensions to PTY immediately on connect
+    reconnectAttempts = 0
     sendResize()
     term.write('\r\n[connected]\r\n')
+    // Auto-focus so the user can type immediately on connect. Without
+    // this they have to click the terminal area first — which is the
+    // single biggest source of "I can't type into the terminal" reports.
+    try { term.focus() } catch {}
   }
-  ws.onmessage = (e) => { if (term) term.write(e.data) }
+  ws.onmessage = (e) => {
+    if (!term) return
+    if (e.data instanceof ArrayBuffer) {
+      term.write(new Uint8Array(e.data))
+    } else {
+      // Fallback for stray text frames (shouldn't happen with the
+      // updated server, but harmless).
+      term.write(e.data)
+    }
+  }
   ws.onclose = () => {
     connected.value = false
     if (term) term.write('\r\n[disconnected]\r\n')
+    scheduleReconnect()
   }
   ws.onerror = () => {
     connected.value = false
     if (term) term.write('\r\n[connection error]\r\n')
+    // onclose fires after onerror — scheduleReconnect runs there.
   }
 }
 
@@ -158,6 +217,15 @@ onMounted(async () => {
       }
     })
     resizeObserver.observe(termRef.value)
+    // xterm.js 6.0 does NOT expose term.onFocus / term.onBlur (calling
+    // them throws TypeError and aborts onMounted, leaving loading=true
+    // forever — the "Loading..." stuck bug). Hook the hidden textarea
+    // xterm uses to capture keys, which fires standard DOM focus/blur.
+    const textarea = termRef.value.querySelector('textarea.xterm-helper-textarea')
+    if (textarea) {
+      textarea.addEventListener('focus', () => { focused.value = true })
+      textarea.addEventListener('blur',  () => { focused.value = false })
+    }
   }
 
   await fetchSessions()
@@ -169,7 +237,9 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  if (ws) ws.close()
+  userClosed = true
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+  teardownWs(ws); ws = null
   if (term) {
     if (term._pollTimer) clearInterval(term._pollTimer)
     term.dispose()
@@ -190,16 +260,26 @@ onUnmounted(() => {
           :class="{ active: selectedAgent === name }"
           @click="selectAgent(name)"
         >{{ name }}</button>
-        <span v-if="loading && sessions.length === 0" class="terminal-label">Loading...</span>
-        <span v-if="!loading && sessions.length === 0" class="terminal-label">No terminal sessions</span>
+        <span v-if="loading && sessions.length === 0" class="terminal-label">{{ t('terminal.loading') }}</span>
+        <span v-if="!loading && sessions.length === 0" class="terminal-label">{{ t('terminal.noSessions') }}</span>
       </div>
       <span class="terminal-status" :class="{ online: connected }">
-        {{ connected ? 'Connected' : 'Disconnected' }}
+        {{ connected ? t('terminal.connected') : t('terminal.disconnected') }}
       </span>
-      <button v-if="selectedAgent && !connected" class="terminal-reconnect" @click="connect">Reconnect</button>
+      <span v-if="connected" class="terminal-input-indicator" :class="{ focused }" :title="focused ? t('terminal.keyboardEnabled') : t('terminal.clickToType')">
+        <span class="dot"></span>
+        {{ focused ? t('terminal.typing') : t('terminal.clickHint') }}
+      </span>
+      <button v-if="selectedAgent && !connected" class="terminal-reconnect" @click="connect">{{ t('terminal.reconnect') }}</button>
     </div>
-    <!-- Terminal area -->
-    <div ref="termRef" class="terminal-xterm"></div>
+    <!-- Terminal area. Click-to-focus so users don't have to hit the
+         cursor area exactly — clicking anywhere inside gives focus. -->
+    <div
+      ref="termRef"
+      class="terminal-xterm"
+      :class="{ focused, connected }"
+      @click="() => term && term.focus()"
+    ></div>
   </div>
 </template>
 
@@ -253,6 +333,35 @@ onUnmounted(() => {
   white-space: nowrap;
 }
 .terminal-status.online { color: var(--green); }
+
+.terminal-input-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-muted);
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  white-space: nowrap;
+  cursor: default;
+  transition: all 0.15s;
+}
+.terminal-input-indicator .dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--text-muted);
+  transition: all 0.15s;
+}
+.terminal-input-indicator.focused {
+  color: var(--green);
+  border-color: var(--green);
+  background: rgba(61, 214, 140, 0.08);
+}
+.terminal-input-indicator.focused .dot {
+  background: var(--green);
+  box-shadow: 0 0 4px var(--green);
+}
+
 .terminal-reconnect {
   padding: 3px 10px;
   background: var(--bg-input);
@@ -267,5 +376,15 @@ onUnmounted(() => {
   flex: 1;
   min-height: 0;
   padding: 4px;
+  border: 2px solid transparent;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  cursor: text;
+}
+.terminal-xterm.connected:not(.focused) {
+  border-color: var(--border);
+}
+.terminal-xterm.focused {
+  border-color: var(--green);
+  box-shadow: inset 0 0 0 1px rgba(61, 214, 140, 0.25);
 }
 </style>

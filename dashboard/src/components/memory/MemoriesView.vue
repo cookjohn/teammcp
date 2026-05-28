@@ -110,7 +110,7 @@ async function updateMemory(id, changes) {
 }
 
 async function deleteMemory(id) {
-  if (!confirm('Delete this memory?')) return
+  if (!confirm(t('memory.confirmDelete'))) return
   try {
     await api('/api/memories/' + id, { method: 'DELETE' })
     if (selectedMemory.value?.id === id) selectedMemory.value = null
@@ -150,15 +150,15 @@ onMounted(() => loadMemories())
     <div class="sub-tabs">
       <button
         v-for="tab in [
-          { id: 'memories', label: 'Memories' },
-          { id: 'llm-config', label: 'LLM Config' },
-          { id: 'cost', label: 'Cost Monitor' },
-          { id: 'daemon', label: 'Daemon' }
+          { id: 'memories',   key: 'memory.tabs.memories' },
+          { id: 'llm-config', key: 'memory.tabs.llmConfig' },
+          { id: 'cost',       key: 'memory.tabs.cost' },
+          { id: 'daemon',     key: 'memory.tabs.daemon' }
         ]"
         :key="tab.id"
         :class="['sub-tab', { active: subTab === tab.id }]"
         @click="subTab = tab.id"
-      >{{ tab.label }}</button>
+      >{{ t(tab.key) }}</button>
     </div>
 
     <!-- Memories Tab -->

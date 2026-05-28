@@ -1,6 +1,8 @@
 <script setup>
-import { ref, computed, nextTick } from 'vue'
+import { ref, computed, nextTick, inject } from 'vue'
 import MentionDropdown from './MentionDropdown.vue'
+
+const t = inject('t')
 
 const props = defineProps({
   agents: { type: Array, default: () => [] },
@@ -100,7 +102,7 @@ function send() {
   <div class="compose-box">
     <!-- Reply bar -->
     <div v-if="replyTo" class="reply-bar">
-      <span class="reply-label">Replying to <strong>{{ replyTo.from_agent }}</strong></span>
+      <span class="reply-label">{{ t('msg.replyingTo') }} <strong>{{ replyTo.from_agent }}</strong></span>
       <button class="reply-cancel" @click="$emit('cancelReply')">✕</button>
     </div>
 
@@ -118,7 +120,7 @@ function send() {
           ref="textareaRef"
           v-model="content"
           class="compose-textarea"
-          placeholder="Type a message..."
+          :placeholder="t('compose.placeholder')"
           rows="1"
           :disabled="disabled"
           @input="onInput"
@@ -130,7 +132,7 @@ function send() {
         :disabled="!canSend"
         @click="send"
       >
-        Send
+        {{ t('compose.send') }}
       </button>
     </div>
   </div>

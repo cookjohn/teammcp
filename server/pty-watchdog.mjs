@@ -244,6 +244,24 @@ export function isEscalated() {
 }
 
 /**
+ * Public snapshot for /api/watchdog/status. Includes escalation state +
+ * recent respawn cadence so observability layers can render a traffic-light
+ * style indicator without reaching into module internals.
+ */
+export function getWatchdogSnapshot() {
+  const now = Date.now();
+  _pruneWindow(now);
+  return {
+    escalated: _escalated,
+    escalation_reason: _escalationReason,
+    respawns_in_window: _respawnTimestamps.length,
+    respawn_budget: WATCHDOG_RESPAWN_BUDGET,
+    window_ms: WATCHDOG_RESPAWN_WINDOW_MS,
+    restarting_agents: Array.from(_restartingAgents),
+  };
+}
+
+/**
  * Called after a successful daemon reconnect where pty.list returned
  * empty (or fewer handles than the server tracked). For each agent the
  * server believed was alive, the watchdog:
@@ -307,20 +325,15 @@ export async function requestAgentRestarts(lostAgentIds) {
   }
 
   if (!_restartAgentFn) {
-    console.warn(
-      '[watchdog] No restartAgent function injected via initWatchdog(); ' +
-      'relying on onAgentsNeedRespawn() subscribers to handle recovery.',
-    );
-    // Release our claims immediately — without an injected fn, the
-    // listener (Path 1) is the only respawn path, and without a
-    // deduped listener wrapper there's nothing for the Set to guard.
-    // Holding the claim would pin ids indefinitely and block any
-    // subsequent requestAgentRestarts for the same ids.
+    // Normal path since 2026-05-26: the onAgentsNeedRespawn listener is
+    // the single recovery hook. The listener itself wraps each id with
+    // dedupeRestartAgent, so the Set we just claimed would block its
+    // calls. Release immediately so the listener can take over.
     releaseRestartClaims(claimed);
     return lostAgentIds.map(id => ({
       id,
       restarted: false,
-      reason: 'no_restart_fn_wired',
+      reason: 'delegated_to_listener',
     }));
   }
 

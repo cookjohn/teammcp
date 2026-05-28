@@ -60,20 +60,28 @@ function setIsApiKeyAgent(fn) { _isApiKeyAgent = fn; }
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
+// Use direct console.error here — logErr depends on LOG_PREFIX (declared
+// later in this module), and a module-load fail-fast can't use it (TDZ).
+const LOG_PREFIX = '[credential-mgr]';
+
 if (!process.env.TEAMMCP_HOME) {
-  logErr('FATAL: TEAMMCP_HOME env var is not set. Refusing to use silent fallback ~/.teammcp — this has caused orphan credential files before.');
+  console.error(LOG_PREFIX, 'FATAL: TEAMMCP_HOME env var is not set. Refusing to use silent fallback ~/.teammcp — this has caused orphan credential files before.');
   throw new Error('TEAMMCP_HOME must be set. Check that the server was started via process-manager or start-prod.ps1.');
 }
 const TEAMMCP_HOME = process.env.TEAMMCP_HOME;
 const TOKEN_FILE = join(TEAMMCP_HOME, 'oauth-credentials.json');
 const LOCK_FILE = join(TEAMMCP_HOME, 'teammcp-oauth.lock');
-// NOTE: AGENTS_BASE_DIR is the canonical env var (set by process-manager).
-// TEAMMCP_AGENTS_DIR was a typo kept for backward compat. Prefer AGENTS_BASE_DIR.
-const AGENTS_BASE_DIR = process.env.AGENTS_BASE_DIR || process.env.TEAMMCP_AGENTS_DIR;
-if (!AGENTS_BASE_DIR) {
-  logErr('FATAL: Neither AGENTS_BASE_DIR nor TEAMMCP_AGENTS_DIR env var is set.');
-  throw new Error('AGENTS_BASE_DIR must be set.');
-}
+// NOTE: AGENTS_BASE_DIR is the canonical env var (set by process-manager
+// for prod, or by user-config.mjs from data/user-config.json for wizard-
+// configured installs). TEAMMCP_AGENTS_DIR was a typo kept for backward
+// compat. Fall back to {TEAMMCP_HOME}/agents (matching paths.mjs default)
+// so a brand-new install can boot to show the setup wizard before any
+// agent operation is attempted — module-load fail-fast here used to make
+// the wizard unreachable on a clean machine.
+const AGENTS_BASE_DIR =
+  process.env.AGENTS_BASE_DIR
+  || process.env.TEAMMCP_AGENTS_DIR
+  || join(TEAMMCP_HOME, 'agents');
 
 const OAUTH_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
 const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
@@ -86,7 +94,8 @@ const MAX_RETRIES = 3;
 const RETRY_DELAYS = [60_000, 300_000, 900_000]; // 1 min, 5 min, 15 min
 const LOCK_STALE_MS = 60_000; // lock older than 60s is stale
 
-const LOG_PREFIX = '[credential-mgr]';
+// LOG_PREFIX is defined above (alongside the boot-time fail-fast that
+// needs it). Don't redeclare here.
 
 // ─── Logging ────────────────────────────────────────────────────────────────
 

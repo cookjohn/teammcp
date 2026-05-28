@@ -32,6 +32,14 @@ let _state = STATE_CONNECTED;
 let _reconnectAttempts = 0;
 let _reconnectTimer = null;
 
+// FAILED auto-recovery: previously a terminal state. Now we periodically
+// try ONE more reconnect after a long cooldown — if it works we exit
+// FAILED back to CONNECTED, otherwise we stay FAILED and schedule the
+// next attempt. Override with FALLBACK_FAILED_RECOVERY_MS env (ms).
+const _FAILED_RECOVERY_DEFAULT_MS = 60 * 60 * 1000; // 1h
+let _failedRecoveryTimer = null;
+let _failedRecoveryAttemptFn = null;
+
 // handleId → { chunks: Buffer[], byteLength, pendingResize: {cols,rows}|null }
 const _writeBuffers = new Map();
 let _totalBufferedBytes = 0;
@@ -52,6 +60,22 @@ const _handleAgentMap = new Map();
 
 export function getFallbackState() {
   return _state;
+}
+
+/**
+ * Public snapshot for /api/watchdog/status. Stable shape; safe to consume
+ * from HTTP layer + Dashboard.
+ */
+export function getFallbackSnapshot() {
+  return {
+    state: _state,
+    reconnect_attempts: _reconnectAttempts,
+    reconnect_max: FALLBACK_RECONNECT_MAX_ATTEMPTS,
+    buffered_bytes: _totalBufferedBytes,
+    buffered_handles: _writeBuffers.size,
+    pending_spawns: _pendingSpawns.size,
+    inflight_requests: _inflightRequests.size,
+  };
 }
 
 export function onFallbackStateChange(listener) {
@@ -366,6 +390,11 @@ export function scheduleReconnect(attemptFn, onFail) {
   if (_reconnectAttempts > FALLBACK_RECONNECT_MAX_ATTEMPTS) {
     _setState(STATE_FAILED, 'max_reconnect_attempts_exhausted');
     _reconnectAttempts = 0;
+    // Remember the attempt function so the periodic FAILED-recovery timer
+    // can try it again later. Without this the FSM was a dead end — only
+    // a server restart or a manual reset-escalation cleared FAILED.
+    _failedRecoveryAttemptFn = attemptFn;
+    _scheduleFailedRecovery();
     if (typeof onFail === 'function') {
       try { onFail(); } catch {}
     }
@@ -402,12 +431,53 @@ export function cancelReconnect() {
 
 /**
  * Return the state machine to CONNECTED (e.g. after a successful explicit
- * reconnect from outside the schedule). Resets counters.
+ * reconnect from outside the schedule). Resets counters AND cancels any
+ * pending FAILED-recovery timer.
  */
 export function markConnected() {
   cancelReconnect();
+  _cancelFailedRecovery();
   _reconnectAttempts = 0;
   _setState(STATE_CONNECTED, 'explicit_connect');
+}
+
+function _cancelFailedRecovery() {
+  if (_failedRecoveryTimer) {
+    clearTimeout(_failedRecoveryTimer);
+    _failedRecoveryTimer = null;
+  }
+}
+
+/**
+ * Schedule a single FAILED-recovery probe. Fires once after the cooldown
+ * interval; if the probe succeeds we go back to CONNECTED, if not we
+ * reschedule. Override interval via FALLBACK_FAILED_RECOVERY_MS env (ms).
+ */
+function _scheduleFailedRecovery() {
+  _cancelFailedRecovery();
+  if (_state !== STATE_FAILED) return;
+  if (typeof _failedRecoveryAttemptFn !== 'function') return;
+  const overrideMs = parseInt(process.env.FALLBACK_FAILED_RECOVERY_MS || '', 10);
+  const interval = Number.isFinite(overrideMs) && overrideMs > 0
+    ? overrideMs : _FAILED_RECOVERY_DEFAULT_MS;
+  _failedRecoveryTimer = setTimeout(async () => {
+    _failedRecoveryTimer = null;
+    if (_state !== STATE_FAILED) return; // raced with an external recovery
+    let ok = false;
+    try {
+      ok = await _failedRecoveryAttemptFn(0);
+    } catch {
+      ok = false;
+    }
+    if (ok) {
+      _reconnectAttempts = 0;
+      _setState(STATE_CONNECTED, 'failed_auto_recovery');
+    } else {
+      // Stay FAILED, try again after another cooldown.
+      _scheduleFailedRecovery();
+    }
+  }, interval);
+  if (typeof _failedRecoveryTimer?.unref === 'function') _failedRecoveryTimer.unref();
 }
 
 /**
@@ -427,6 +497,8 @@ export function markReconnecting(reason) {
  */
 export function resetForTest() {
   cancelReconnect();
+  _cancelFailedRecovery();
+  _failedRecoveryAttemptFn = null;
   _state = STATE_CONNECTED;
   _reconnectAttempts = 0;
   _writeBuffers.clear();

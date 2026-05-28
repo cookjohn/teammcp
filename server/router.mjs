@@ -32,6 +32,7 @@ import {
   getReportsTo, setReportsTo, getSubordinates,
   ackMessage, getMessageAcks,
   setUseResume, getUseResume, setAgentAuthConfig, setAgentAuthStrategy,
+  setAgentRuntime,
   insertMetric, getMetrics, getMetricsSummary, cleanupOldMetrics,
   createMemory, getMemory, getMemories, updateMemory, deleteMemory, searchMemories,
   sweepExpiredMemories, getMemoriesDiagnostics,
@@ -356,6 +357,15 @@ export async function handleRequest(req, res) {
       return json(res, { agents_count: allAgents.length, needs_setup: allAgents.length === 0, server_version: '1.0.0' });
     }
 
+    // ── GET /api/system/health (no auth — dep snapshot for dashboard badge) ──
+    // Refreshes the snapshot on each request (cheap; `which` calls are sub-ms
+    // on Windows and we only have ~4 checks). The dashboard polls this on a
+    // slow interval (~60s) and on demand when the user clicks the badge.
+    if (method === 'GET' && path === '/api/system/health') {
+      const { refreshBootSnapshot } = await import('./boot-checks.mjs');
+      return json(res, refreshBootSnapshot());
+    }
+
     // ── GET /api/pty-daemon/health (no auth required) ─────
     // Returns 503 + note when daemon is disabled by flag (HEAD-style
     // behaviour), otherwise dynamic health from the IPC client.
@@ -380,6 +390,72 @@ export async function handleRequest(req, res) {
     if (method === 'GET' && path === '/api/pty-sessions') {
       const { getPtyNames } = await import('./pty-manager.mjs');
       return json(res, { sessions: getPtyNames() });
+    }
+
+    // ── GET /api/watchdog/status (no auth) ─────────────
+    // Aggregates the four independent watchdogs (PTY daemon, fallback FSM,
+    // retention, daemon health-ping) into one snapshot. Read-only. Each
+    // sub-tree is lazy-imported so module-level state we don't strictly
+    // need doesn't get pulled in during cold paths.
+    if (method === 'GET' && path === '/api/watchdog/status') {
+      const out = { timestamp: new Date().toISOString() };
+      // PTY watchdog
+      try {
+        const { getWatchdogSnapshot } = await import('./pty-watchdog.mjs');
+        out.pty_watchdog = getWatchdogSnapshot();
+      } catch (e) { out.pty_watchdog = { error: e.message }; }
+      // Fallback FSM
+      try {
+        const { getFallbackSnapshot } = await import('./pty-fallback-state-machine.mjs');
+        out.fallback_fsm = getFallbackSnapshot();
+      } catch (e) { out.fallback_fsm = { error: e.message }; }
+      // Daemon health-ping (only when daemon path is on)
+      if (process.env.TEAMMCP_PTY_DAEMON === 'on') {
+        try {
+          const { getHealthStatus, watchdogPing } = await import('./pty-daemon-client.mjs');
+          const h = getHealthStatus();
+          out.daemon_health = {
+            connected: h.connected,
+            consecutive_failures: h.failures,
+            daemon: h.daemonInfo,
+          };
+          // watchdog.ping returns enriched per-handle health (credit,
+          // paused, queued chunks). Only attempt if the IPC is healthy
+          // — otherwise the request would hang and 503 the whole API.
+          if (h.connected) {
+            try {
+              out.daemon_watchdog = await watchdogPing();
+            } catch (e) {
+              out.daemon_watchdog = { error: e.message };
+            }
+          }
+        } catch (e) { out.daemon_health = { error: e.message }; }
+      } else {
+        out.daemon_health = { connected: false, note: 'TEAMMCP_PTY_DAEMON != on' };
+      }
+      // Launcher stats (cumulative since boot)
+      try {
+        const { getLauncherStats } = await import('./daemon-launcher.mjs');
+        out.daemon_launcher = getLauncherStats();
+      } catch (e) { out.daemon_launcher = { error: e.message }; }
+      // Retention watchdog
+      try {
+        const { getWatchdogStatus } = await import('./retention-watchdog.mjs');
+        out.retention_watchdog = getWatchdogStatus();
+      } catch (e) { out.retention_watchdog = { error: e.message }; }
+      // Aggregate single-color verdict for UI badge
+      const verdict = (() => {
+        if (out.pty_watchdog?.escalated) return 'critical';
+        if (out.retention_watchdog?.rollback_fired) return 'critical';
+        if (out.fallback_fsm?.state === 'failed') return 'critical';
+        if (out.fallback_fsm?.state === 'reconnecting' ||
+            out.fallback_fsm?.state === 'degraded') return 'warning';
+        if (out.daemon_health?.consecutive_failures > 0) return 'warning';
+        if (out.pty_watchdog?.respawns_in_window > 0) return 'warning';
+        return 'ok';
+      })();
+      out.verdict = verdict;
+      return json(res, out);
     }
 
     // ── Credential management API (no auth required for login, status is public) ──
@@ -413,10 +489,47 @@ export async function handleRequest(req, res) {
     const isCredentialRoute = path.startsWith('/api/credentials/');
     const isDashboardCredRoute = path.startsWith('/api/dashboard/credentials/');
     if (path.startsWith('/api/') && path !== '/api/register' && path !== '/api/health' && path !== '/api/setup-status'
+      && path !== '/api/system/health'
       && path !== '/api/pty-daemon/health'
       && path !== '/api/auth/status' && path !== '/api/auth/login/start' && path !== '/api/auth/login/complete'
       && !isCredentialRoute && !isDashboardCredRoute) {
       if (!requireAuth(req, res)) return;
+    }
+
+    // ── GET /api/config/user ── current persisted user config (wizard form prefill)
+    if (method === 'GET' && path === '/api/config/user') {
+      const { getUserConfig } = await import('./user-config.mjs');
+      return json(res, getUserConfig());
+    }
+
+    // ── PUT /api/config/user ── upsert wizard-collected config
+    // Requires Chairman/CEO/HR. Triggers a boot-snapshot refresh so the
+    // dashboard health badge updates immediately, even though some env
+    // values are only picked up on next server restart.
+    if (method === 'PUT' && path === '/api/config/user') {
+      if (!checkProcessPermission(req.agent)) {
+        return json(res, { error: 'Forbidden: Chairman/CEO/HR only' }, 403);
+      }
+      const body = await readBody(req);
+      const { setUserConfig } = await import('./user-config.mjs');
+      const { refreshBootSnapshot } = await import('./boot-checks.mjs');
+      const saved = setUserConfig(body || {});
+      // Apply env changes for the running process so the FIRST agent start
+      // after wizard works without requiring a restart. New module-scope
+      // caches are still stale, but lazy consumers (credential-lease,
+      // daemon-launcher) read process.env on each request. Empty/missing
+      // fields clear the env var (otherwise we'd be stuck with stale
+      // values from a previous PUT until restart).
+      const sync = (configKey, envName) => {
+        const v = saved[configKey];
+        if (v) process.env[envName] = v;
+        else delete process.env[envName];
+      };
+      sync('agentsDir',      'AGENTS_BASE_DIR');
+      sync('codexBinPath',   'TEAMMCP_CMD_ALLOWLIST_EXTRA');
+      sync('registerSecret', 'TEAMMCP_REGISTER_SECRET');
+      const snapshot = refreshBootSnapshot();
+      return json(res, { config: saved, health: snapshot });
     }
 
     // ── POST /api/auth/refresh (auth-gated, manual trigger) ──
@@ -452,7 +565,15 @@ export async function handleRequest(req, res) {
     if (method === 'GET' && path === '/api/dashboard/credentials/leases') {
       if (!requireDashboardToken(req, res)) return;
       const { default: db } = await import('./db.mjs');
-      const leases = db.prepare('SELECT * FROM credential_leases ORDER BY leased_at DESC').all();
+      const rows = db.prepare('SELECT * FROM credential_leases ORDER BY leased_at DESC').all();
+      // The schema has no status column — derive it from expires_at vs now.
+      // (There's also no revoked_at column yet, so we can't distinguish
+      // revoked from expired here; the revoke endpoint deletes the row.)
+      const now = Date.now();
+      const leases = rows.map(r => ({
+        ...r,
+        status: (r.expires_at && r.expires_at > now) ? 'active' : 'expired',
+      }));
       return json(res, { leases });
     }
 
@@ -501,13 +622,48 @@ export async function handleRequest(req, res) {
       return json(res, result);
     }
 
+    // ── POST /api/watchdog/reset-escalation (Chairman/CEO only) ──
+    // Clears the PTY daemon watchdog's escalated state so automatic
+    // respawn resumes. Use after manual investigation of why daemon kept
+    // crashing. Also clears the fallback FSM if it's stuck in 'failed'
+    // (out-of-band recovery for the dead-end state). Logs the reset.
+    if (method === 'POST' && path === '/api/watchdog/reset-escalation') {
+      if (req.agent.name !== 'Chairman' && req.agent.name !== 'CEO') {
+        return json(res, { error: 'Only Chairman or CEO can reset watchdog escalation' }, 403);
+      }
+      const body = await readBody(req).catch(() => ({}));
+      const reason = body?.reason || `manual_reset_by_${req.agent.name}`;
+      const result = { reason, reset_at: new Date().toISOString() };
+      try {
+        const { resetDaemonEscalation, isEscalated } = await import('./pty-watchdog.mjs');
+        const wasEscalated = isEscalated();
+        await resetDaemonEscalation(reason);
+        result.pty_watchdog = { was_escalated: wasEscalated, escalated_now: isEscalated() };
+      } catch (e) { result.pty_watchdog = { error: e.message }; }
+      try {
+        const { getFallbackState, markConnected, STATE_FAILED } = await import('./pty-fallback-state-machine.mjs');
+        const prevState = getFallbackState();
+        if (prevState === STATE_FAILED) {
+          markConnected();
+          result.fallback_fsm = { prev_state: prevState, current_state: getFallbackState(), reset: true };
+        } else {
+          result.fallback_fsm = { prev_state: prevState, reset: false };
+        }
+      } catch (e) { result.fallback_fsm = { error: e.message }; }
+      console.log(`[watchdog] Reset by ${req.agent.name}: reason="${reason}"`);
+      return json(res, result);
+    }
+
     // ── POST /api/wechat/disconnect (Chairman/CEO only) ──
+    // Full logout: stops the poll loop, clears session state, deletes the
+    // token file. Next bind starts from a fresh QR. If you just want to
+    // pause polling without forgetting the bot, call stopPolling() directly.
     if (method === 'POST' && path === '/api/wechat/disconnect') {
       if (req.agent.name !== 'Chairman' && req.agent.name !== 'CEO') {
         return json(res, { error: 'Only Chairman or CEO can manage WeChat connection' }, 403);
       }
-      const { stopPolling } = await import('./wechat-bridge.mjs');
-      stopPolling();
+      const { disconnectAndLogout } = await import('./wechat-bridge.mjs');
+      disconnectAndLogout();
       return json(res, { ok: true, status: 'disconnected' });
     }
 
@@ -1563,6 +1719,16 @@ export async function handleRequest(req, res) {
       if (!target) return json(res, { error: 'Agent not found' }, 404);
       if (body.reports_to !== undefined) setReportsTo(name, body.reports_to);
       if (body.use_resume !== undefined) setUseResume(name, body.use_resume);
+      // Runtime: claude (default) or codex-pty (native TUI). Reject anything
+      // else — unknown values would silently fall through to the claude spawn
+      // path and confuse operators.
+      if (body.runtime !== undefined) {
+        const ALLOWED_RUNTIMES = new Set(['claude', 'codex-pty']);
+        if (!ALLOWED_RUNTIMES.has(body.runtime)) {
+          return json(res, { error: `Invalid runtime "${body.runtime}". Must be one of: claude, codex-pty.` }, 400);
+        }
+        setAgentRuntime(name, body.runtime);
+      }
       // Persist auth configuration
       if (body.auth_mode !== undefined) {
         setAgentAuthConfig(name, {
@@ -1674,6 +1840,30 @@ export async function handleRequest(req, res) {
         return json(res, { name, ...result });
       } catch (err) {
         return json(res, { error: err.message }, err.statusCode || 500);
+      }
+    }
+
+    // ── POST /api/debug/pty-raw ─────────────────────────
+    // Debug-only: write raw bytes to a daemon-managed PTY. Used to test
+    // win32-input-mode Enter encoding for codex agents without touching
+    // codex-pty-runner.mjs / restarting. Body: { agent, bytes_b64 }.
+    if (method === 'POST' && path === '/api/debug/pty-raw') {
+      const body = await readBody(req);
+      if (!body.agent || !body.bytes_b64) {
+        return json(res, { error: 'agent and bytes_b64 required' }, 400);
+      }
+      try {
+        const buf = Buffer.from(body.bytes_b64, 'base64');
+        // The daemon's IPC layer serialises this over JSON, so the Buffer
+        // would arrive as {type:'Buffer', data:[…]} and node-pty.write would
+        // reject it. Send as latin1 string so every byte (including ESC
+        // 0x1B) survives a UTF-8 round-trip and gets re-bytes-ified intact
+        // on the daemon side via the default string-write path.
+        const { writeToPty: ipcWriteToPty } = await import('./pty-daemon-client.mjs');
+        await ipcWriteToPty(body.agent, buf.toString('latin1'));
+        return json(res, { agent: body.agent, bytes_written: buf.length });
+      } catch (err) {
+        return json(res, { error: err.message }, 500);
       }
     }
 

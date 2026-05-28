@@ -1,5 +1,5 @@
 <script setup>
-import { ref, inject, computed } from 'vue'
+import { ref, inject, computed, onMounted } from 'vue'
 
 const emit = defineEmits(['complete', 'enter'])
 const t = inject('t', (k) => k)
@@ -8,8 +8,9 @@ const t = inject('t', (k) => k)
 const step = ref(1)
 const error = ref('')
 const wizardData = ref({
-  // Step 2: config
-  agentsDir: './agents',
+  // Step 2: config (agentsDir prefilled from /api/system/health on mount)
+  agentsDir: '',
+  codexBinPath: '',
   port: '3100',
   secret: '',
   // Step 3: profile
@@ -18,6 +19,7 @@ const wizardData = ref({
   // Step 4: agent
   agentName: '',
   agentRole: '',
+  runtime: 'claude',
   authMode: 'oauth',
   apiProvider: '',
   apiBaseUrl: '',
@@ -28,6 +30,36 @@ const wizardData = ref({
 })
 
 const totalSteps = 6
+
+// Boot-check snapshot drives both step-2 default prefill (so the user sees the
+// real path the server resolved) and step-5 warnings (e.g. "claude CLI not
+// found — agent won't start"). Loaded lazily; the no-auth /api/system/health
+// endpoint is safe to hit before login.
+const healthSnapshot = ref(null)
+async function loadHealth() {
+  try {
+    const r = await fetch('/api/system/health')
+    if (r.ok) healthSnapshot.value = await r.json()
+  } catch {}
+}
+onMounted(async () => {
+  await loadHealth()
+  const dirCheck = healthSnapshot.value?.checks?.find(c => c.name === 'agents-dir')
+  if (dirCheck?.path) wizardData.value.agentsDir = dirCheck.path
+  const codexCheck = healthSnapshot.value?.checks?.find(c => c.name === 'codex-bin')
+  if (codexCheck?.path && codexCheck.configured) wizardData.value.codexBinPath = codexCheck.path
+})
+
+const healthWarnings = computed(() => {
+  if (!healthSnapshot.value) return []
+  return healthSnapshot.value.checks.filter(c => c.level !== 'ok')
+})
+
+// First-agent start UX (step 5). Driven from a dedicated state so we can show
+// spinners + the eventual outcome without re-fetching after entering dashboard.
+const startingAgent = ref(false)
+const startedAgent = ref(false)
+const startError = ref('')
 
 // ── Navigation ─────────────────────────────────────────
 function next() {
@@ -91,6 +123,27 @@ async function registerProfile() {
     }
     const data = await res.json()
     wizardData.value.apiKey = data.api_key || data.apiKey || ''
+
+    // Persist wizard config now that we have the chairman key. Failing this
+    // is non-fatal — agent registration still works, the values just won't
+    // survive a server restart. Surface as a warning but proceed.
+    try {
+      const configBody = {
+        agentsDir: wizardData.value.agentsDir || '',
+        codexBinPath: wizardData.value.codexBinPath || '',
+        registerSecret: wizardData.value.secret || '',
+      }
+      const cfgRes = await fetch('/api/config/user', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + wizardData.value.apiKey },
+        body: JSON.stringify(configBody)
+      })
+      if (cfgRes.ok) {
+        const r = await cfgRes.json()
+        if (r.health) healthSnapshot.value = r.health
+      }
+    } catch {}
+
     step.value++
   } catch (e) {
     error.value = t('wizard.registerFailed') + e.message
@@ -129,15 +182,21 @@ async function registerAgent() {
       throw new Error(data.error || `HTTP ${res.status}`)
     }
 
-    // If auth mode is api_key, PATCH agent config
+    // Build a single PATCH body covering runtime + (optional) api_key auth.
+    // Runtime only needs an explicit PATCH when it's not the default 'claude';
+    // skipping it for default keeps DB rows cleaner.
+    const patchBody = {}
+    if (wizardData.value.runtime && wizardData.value.runtime !== 'claude') {
+      patchBody.runtime = wizardData.value.runtime
+    }
     if (wizardData.value.authMode === 'api_key') {
-      const patchBody = {
-        auth_mode: 'api_key',
-        api_provider: wizardData.value.apiProvider || undefined,
-        api_base_url: wizardData.value.apiBaseUrl || undefined,
-        api_auth_token: wizardData.value.apiAuthToken || undefined,
-        model: wizardData.value.apiModel || undefined,
-      }
+      patchBody.auth_mode = 'api_key'
+      if (wizardData.value.apiProvider)  patchBody.api_provider  = wizardData.value.apiProvider
+      if (wizardData.value.apiBaseUrl)   patchBody.api_base_url  = wizardData.value.apiBaseUrl
+      if (wizardData.value.apiAuthToken) patchBody.api_auth_token = wizardData.value.apiAuthToken
+      if (wizardData.value.apiModel)     patchBody.api_model     = wizardData.value.apiModel
+    }
+    if (Object.keys(patchBody).length > 0) {
       await fetch(`/api/agents/${encodeURIComponent(name)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', ...authHeader },
@@ -148,6 +207,33 @@ async function registerAgent() {
     step.value++
   } catch (e) {
     error.value = t('wizard.registerFailed') + e.message
+  }
+}
+
+// ── Step 5: optional one-click start ──────────────────
+// Lets the user finish the wizard with a running agent instead of "register
+// and hope you remember to click Start on the Agents page". codex-pty agents
+// take 5-15s to flip online; claude is faster. We mark startedAgent on the
+// first successful POST and let the eventual SSE status change update the
+// real Agents-page button state.
+async function startFirstAgent() {
+  const name = (wizardData.value.agentName || t('wizard.defaultAgentName')).trim()
+  startError.value = ''
+  startingAgent.value = true
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(name)}/start`, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + wizardData.value.apiKey }
+    })
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}))
+      throw new Error(d.error || `HTTP ${res.status}`)
+    }
+    startedAgent.value = true
+  } catch (e) {
+    startError.value = e.message
+  } finally {
+    startingAgent.value = false
   }
 }
 
@@ -194,11 +280,22 @@ function copyKey() {
         <p class="wizard-desc">{{ t('wizard.configDesc') }}</p>
         <div class="wizard-form">
           <label class="wizard-label">{{ t('wizard.agentsDir') }}</label>
-          <input v-model="wizardData.agentsDir" class="wizard-input" />
-          <label class="wizard-label">{{ t('wizard.port') }}</label>
-          <input v-model="wizardData.port" class="wizard-input" />
+          <input v-model="wizardData.agentsDir" class="wizard-input" :placeholder="t('wizard.agentsDirPlaceholder')" />
+          <div class="wizard-hint">{{ t('wizard.agentsDirHint') }}</div>
+          <label class="wizard-label">{{ t('wizard.codexBin') }}</label>
+          <input v-model="wizardData.codexBinPath" class="wizard-input" :placeholder="t('wizard.codexBinPlaceholder')" />
+          <div class="wizard-hint">{{ t('wizard.codexBinHint') }}</div>
           <label class="wizard-label">{{ t('wizard.secret') }}</label>
           <input v-model="wizardData.secret" class="wizard-input" :placeholder="t('wizard.secretPlaceholder')" />
+        </div>
+        <div v-if="healthWarnings.length > 0" class="wizard-warnings">
+          <div class="wizard-warnings-label">{{ t('wizard.healthWarnings') }}</div>
+          <ul>
+            <li v-for="c in healthWarnings" :key="c.name">
+              <strong>{{ c.name }}</strong>: {{ c.message }}
+              <span v-if="c.fix" class="wizard-warn-fix">→ {{ c.fix }}</span>
+            </li>
+          </ul>
         </div>
       </div>
 
@@ -239,12 +336,20 @@ function copyKey() {
             class="wizard-input"
             :placeholder="t('wizard.agentRolePlaceholder')"
           />
-          <label class="wizard-label">{{ t('wizard.agentAuthMode') }}</label>
-          <select v-model="wizardData.authMode" class="wizard-input">
-            <option value="oauth">{{ t('wizard.authModeOauth') }}</option>
-            <option value="api_key">{{ t('wizard.authModeApiKey') }}</option>
+          <label class="wizard-label">{{ t('wizard.agentRuntime') }}</label>
+          <select v-model="wizardData.runtime" class="wizard-input">
+            <option value="claude">{{ t('wizard.runtimeClaude') }}</option>
+            <option value="codex-pty">{{ t('wizard.runtimeCodexPty') }}</option>
           </select>
-          <template v-if="wizardData.authMode === 'api_key'">
+          <div v-if="wizardData.runtime === 'codex-pty'" class="wizard-hint">{{ t('wizard.runtimeCodexHint') }}</div>
+          <template v-if="wizardData.runtime === 'claude'">
+            <label class="wizard-label">{{ t('wizard.agentAuthMode') }}</label>
+            <select v-model="wizardData.authMode" class="wizard-input">
+              <option value="oauth">{{ t('wizard.authModeOauth') }}</option>
+              <option value="api_key">{{ t('wizard.authModeApiKey') }}</option>
+            </select>
+          </template>
+          <template v-if="wizardData.runtime === 'claude' && wizardData.authMode === 'api_key'">
             <label class="wizard-label">{{ t('wizard.apiProvider') }}</label>
             <input v-model="wizardData.apiProvider" class="wizard-input" />
             <label class="wizard-label">{{ t('wizard.apiBaseUrl') }}</label>
@@ -267,11 +372,34 @@ function copyKey() {
           <div v-if="copied" class="wizard-copied">Copied!</div>
         </div>
         <p class="wizard-warn">{{ t('wizard.saveApiKey') }}</p>
+
+        <!-- One-click first-agent start. Without this users frequently leave
+             the wizard thinking the agent is running, then later wonder why
+             nothing's online. The button is opt-in so users who want to
+             configure further can skip it. -->
+        <div class="wizard-start-agent">
+          <button
+            v-if="!startedAgent"
+            class="wizard-btn wizard-btn-start"
+            :disabled="startingAgent"
+            @click="startFirstAgent"
+          >
+            {{ startingAgent
+                ? t('wizard.startingAgent')
+                : t('wizard.startAgentNow', { name: wizardData.agentName || t('wizard.defaultAgentName') }) }}
+          </button>
+          <div v-else class="wizard-start-success">
+            ✓ {{ t('wizard.agentStarting', { name: wizardData.agentName || t('wizard.defaultAgentName') }) }}
+          </div>
+          <div v-if="startError" class="wizard-start-error">{{ startError }}</div>
+        </div>
+
         <div class="wizard-next-steps">
           <div class="wizard-next-label">{{ t('wizard.nextSteps') }}</div>
           <ul>
-            <li>{{ t('wizard.stepInstall') }}</li>
-            <li>{{ t('wizard.stepVisit').replace('{port}', wizardData.port || '3100') }}</li>
+            <li v-if="!startedAgent">{{ t('wizard.nextStartAgent', { name: wizardData.agentName || t('wizard.defaultAgentName') }) }}</li>
+            <li v-else>{{ t('wizard.nextWaitOnline') }}</li>
+            <li>{{ t('wizard.nextExploreChannels') }}</li>
             <li>{{ t('wizard.stepShare') }}</li>
           </ul>
         </div>
@@ -604,5 +732,66 @@ select.wizard-input {
 
 .wizard-btn-next:hover {
   background: var(--accent-dim);
+}
+
+.wizard-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
+  line-height: 1.4;
+}
+
+.wizard-warnings {
+  background: rgba(212, 132, 62, 0.1);
+  border: 1px solid var(--orange);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  margin-top: 14px;
+  text-align: left;
+  font-size: 12px;
+}
+.wizard-warnings-label {
+  font-weight: 600;
+  color: var(--orange);
+  margin-bottom: 6px;
+}
+.wizard-warnings ul {
+  list-style: disc;
+  padding-left: 20px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+.wizard-warnings strong { color: var(--text); }
+.wizard-warn-fix { display: block; color: var(--text-muted); font-size: 11px; margin-top: 2px; }
+
+.wizard-start-agent {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+  text-align: center;
+}
+.wizard-btn-start {
+  background: var(--green);
+  color: #fff;
+  border-color: var(--green);
+  padding: 10px 22px;
+  font-size: 14px;
+}
+.wizard-btn-start:disabled { opacity: 0.6; cursor: progress; }
+.wizard-start-success {
+  display: inline-block;
+  padding: 8px 16px;
+  color: var(--green);
+  font-weight: 600;
+  font-size: 14px;
+}
+.wizard-start-error {
+  margin-top: 8px;
+  padding: 6px 10px;
+  background: rgba(229, 83, 75, 0.1);
+  border: 1px solid rgba(229, 83, 75, 0.3);
+  border-radius: var(--radius-sm);
+  color: var(--red);
+  font-size: 12px;
 }
 </style>

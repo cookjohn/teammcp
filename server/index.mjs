@@ -1,3 +1,8 @@
+// MUST be first: user-config injects values from {TEAMMCP_HOME}/data/user-config.json
+// into process.env (only when not already exported externally), so any consumer
+// that caches AGENTS_BASE_DIR / TEAMMCP_CMD_ALLOWLIST_EXTRA at module-load picks
+// up the wizard-written values. See server/user-config.mjs.
+import './user-config.mjs';
 import http from 'node:http';
 import { handleRequest } from './router.mjs';
 import { closeAllConnections, pushToAgents, getOnlineAgents } from './sse.mjs';
@@ -83,6 +88,14 @@ if (DAEMON_ENABLED) {
   }
 }
 
+// ── Boot checks: log dependency status (claude CLI, bun, codex, agents dir) ──
+// Non-fatal; just informs the user what they're missing. Dashboard surfaces the
+// same data via /api/system/health.
+{
+  const { logBootChecks } = await import('./boot-checks.mjs');
+  logBootChecks();
+}
+
 const server = http.createServer((req, res) => {
   const start = Date.now();
   const origEnd = res.end.bind(res);
@@ -97,6 +110,24 @@ const server = http.createServer((req, res) => {
 
 // SSE long-lived connections: only disable request timeout
 server.requestTimeout = 0;
+
+// Hot-restart support: when an old server's TCP socket is still in TIME_WAIT
+// (or just hasn't released the listener yet), retry briefly instead of dying
+// on EADDRINUSE. Caps at ~5s — beyond that something else is squatting and
+// failing loudly is correct.
+const LISTEN_RETRY_MAX_MS = 5000;
+const LISTEN_RETRY_INTERVAL_MS = 250;
+let _listenRetryStart = null;
+server.on('error', (err) => {
+  if (err.code !== 'EADDRINUSE') throw err;
+  if (_listenRetryStart === null) _listenRetryStart = Date.now();
+  if (Date.now() - _listenRetryStart > LISTEN_RETRY_MAX_MS) {
+    console.error(`[TeamMCP] FATAL: port ${PORT} still in use after ${LISTEN_RETRY_MAX_MS}ms`);
+    process.exit(1);
+  }
+  console.log(`[TeamMCP] port ${PORT} busy, retrying in ${LISTEN_RETRY_INTERVAL_MS}ms...`);
+  setTimeout(() => { try { server.listen(PORT, BIND_HOST); } catch {} }, LISTEN_RETRY_INTERVAL_MS);
+});
 
 server.listen(PORT, BIND_HOST, () => {
   const addr = server.address();
@@ -131,7 +162,15 @@ server.listen(PORT, BIND_HOST, () => {
     });
 
     // Watchdog injection: setState writes go to the `system` project's
-    // `pty_daemon.status` field; restartAgent uses process-manager.
+    // `pty_daemon.status` field. NOTE: we no longer inject restartAgent.
+    // Historically there were TWO respawn paths after a daemon crash:
+    //   1. The injected `_restartAgentFn` loop inside requestAgentRestarts
+    //   2. The onAgentsNeedRespawn listener below
+    // Both ended at the same `pm.startAgent` call, so the watchdog had to
+    // maintain a dedupe Set (`_restartingAgents`) to prevent double-spawns.
+    // Removing path 1 means the listener is the single source of truth;
+    // dedupe machinery stays in the watchdog module as a safety net but
+    // is no longer load-bearing.
     initDaemonWatchdog({
       setState: (key, value, reason) => {
         try {
@@ -141,17 +180,14 @@ server.listen(PORT, BIND_HOST, () => {
           setState(projectId, field, value, 'system:pty-watchdog', reason || 'watchdog', { isHumanOverride: true });
         } catch (e) { console.error('[pty-watchdog] setState injection failed:', e.message); }
       },
-      restartAgent: async (agentId) => {
-        const { startAgent } = await import('./process-manager.mjs');
-        return startAgent(agentId);
-      },
       notify: (msg) => console.warn('[pty-watchdog]', msg),
     });
 
-    // Lost-agent respawn (Option A): when the watchdog respawns the
-    // daemon and Windows wipes all conpty handles, every tracked agent
-    // needs restarting. dedupeRestartAgent coalesces with the watchdog's
-    // injected-fn path so we don't double-respawn.
+    // Lost-agent respawn — the SOLE recovery path now. When the watchdog
+    // respawns the daemon and Windows wipes all conpty handles, every
+    // tracked agent needs restarting. dedupeRestartAgent guards against
+    // concurrent requestAgentRestarts() calls (rare but possible under
+    // rapid successive daemon crashes).
     onAgentsNeedRespawn(async (lost) => {
       if (!Array.isArray(lost) || lost.length === 0) return;
       console.log(`[TeamMCP] onAgentsNeedRespawn fired for ${lost.length} agent(s):`, lost);
@@ -186,13 +222,26 @@ server.listen(PORT, BIND_HOST, () => {
         }
         console.log(`[TeamMCP] reattach: ${items.length} agent(s) found in daemon`);
         const { reattachExistingAgent } = await import('./process-manager.mjs');
+        const { getAgentByName } = await import('./db.mjs');
         for (const row of items) {
           const agentId = row.agent || row.agentId || row.name;
           if (!agentId) continue;
-          let scrollback = '';
+          let scrollback = Buffer.alloc(0);
           try {
             const sb = await getScrollback(agentId, 1000);
-            scrollback = sb?.data || sb?.scrollback || '';
+            // Daemon returns { data: base64-string, encoding: 'base64' }.
+            // Decode to Buffer here so the WS bridge can ship it as a
+            // binary frame — converting via toString('utf-8') would corrupt
+            // multi-byte CJK sequences (see pty-manager.mjs notes).
+            if (sb?.data && sb?.encoding === 'base64') {
+              scrollback = Buffer.from(sb.data, 'base64');
+            } else if (sb?.data) {
+              scrollback = Buffer.from(sb.data, 'utf-8');
+            } else if (sb?.scrollback) {
+              scrollback = Buffer.isBuffer(sb.scrollback)
+                ? sb.scrollback
+                : Buffer.from(sb.scrollback, 'utf-8');
+            }
           } catch (e) {
             console.warn(`[TeamMCP] reattach: getScrollback(${agentId}) failed: ${e.message}`);
           }
@@ -207,6 +256,24 @@ server.listen(PORT, BIND_HOST, () => {
       }
     })();
   }
+
+  // ── Codex-PTY agents resume ──────────────────────────────
+  // For runtime=codex-pty agents, the actual codex.exe lives in the daemon.
+  // The claude reattach loop above (reattachExistingAgent) wires the PTY
+  // handle, but we also want startAgent's status/registerWsAgent paths to
+  // run. Idempotent: startAgent reuses existing daemon handles.
+  (async () => {
+    try {
+      const { resumeAllOnBoot } = await import('./codex-pty-runner.mjs');
+      const r = await resumeAllOnBoot();
+      const total = r.started + r.reattached;
+      if (total > 0) {
+        console.log(`[TeamMCP] codex-pty runtime: ${r.started} started, ${r.reattached} reattached`);
+      }
+    } catch (e) {
+      console.error('[TeamMCP] codex-pty runtime resume failed:', e.message);
+    }
+  })();
 
   // ── Memory Engine (Phase 2) ──────────────────────────────
   // H1 fix: fail-fast if MEMORY_LLM_KEY is not set

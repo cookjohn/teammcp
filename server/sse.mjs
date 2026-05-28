@@ -125,6 +125,10 @@ function removeConnection(agentName, res) {
     if (set.size === 0) {
       connections.delete(agentName);
       setAgentStatus(agentName, 'offline');
+      // Notify Dashboard (Chairman + superior) so its agent list flips
+      // online→offline without waiting for the next manual refresh. Missing
+      // this is why "Stop" used to leave the button stuck.
+      try { broadcastStatus(agentName, 'offline'); } catch {}
       log(`${agentName} disconnected`);
       // Clean up batch buffer (messages already persisted in DB, will replay on reconnect)
       const batchBuf = agentBatchBuffers.get(agentName);
@@ -461,8 +465,33 @@ export function pushWithPriorityToAgents(agentNames, data, priority = 'later') {
 
 /**
  * Push an SSE event to a specific agent.
+ *
+ * Runtime dispatch: codex-pty agents have no plugin:fakechat / SSE
+ * subscription; instead the event is pasted into codex's native TUI
+ * input box and submitted via `\r\n`. Claude agents continue to receive
+ * raw SSE events through their plugin.
  */
 export function pushToAgent(agentName, data) {
+  try {
+    const agent = getAgentByName(agentName);
+    if (agent?.runtime === 'codex-pty') {
+      // Native codex TUI: paste the message into the input box and submit.
+      // See server/codex-pty-runner.mjs.
+      import('./codex-pty-runner.mjs').then(({ deliverInboxEvent, isRunning }) => {
+        if (!isRunning(agentName)) {
+          log(`→ ${agentName}: codex-pty agent not running, dropped ${data.type}`);
+          return;
+        }
+        deliverInboxEvent(agentName, data).catch(e =>
+          console.error(`[sse] codex-pty deliverInboxEvent(${agentName}) failed:`, e.message));
+      }).catch(e => console.error(`[sse] codex-pty bridge import failed:`, e.message));
+      log(`→ ${agentName}: codex-pty ← ${data.type} from ${data.from || '?'}`);
+      return true;
+    }
+  } catch (e) {
+    // Fall through to SSE path on any error — defensive only.
+  }
+
   const set = connections.get(agentName);
   if (!set || set.size === 0) {
     log(`→ ${agentName}: MISSED (offline)`);

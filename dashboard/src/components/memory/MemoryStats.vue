@@ -1,9 +1,11 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, inject } from 'vue'
 
 const props = defineProps({
   api: { type: Function, required: true }
 })
+
+const t = inject('t')
 
 const stats = ref({
   critical: 0, important: 0, lesson: 0, routine: 0,
@@ -44,23 +46,23 @@ onMounted(async () => {
   <div class="memory-stats">
     <div class="stat-card stat-critical">
       <div class="stat-value">{{ stats.critical }}</div>
-      <div class="stat-label">Critical</div>
+      <div class="stat-label">{{ t('memory.level.critical') }}</div>
     </div>
     <div class="stat-card stat-important">
       <div class="stat-value">{{ stats.important }}</div>
-      <div class="stat-label">Important</div>
+      <div class="stat-label">{{ t('memory.level.important') }}</div>
     </div>
     <div class="stat-card stat-lesson">
       <div class="stat-value">{{ stats.lesson }}</div>
-      <div class="stat-label">Lesson</div>
+      <div class="stat-label">{{ t('memory.level.lesson') }}</div>
     </div>
     <div class="stat-card stat-routine">
       <div class="stat-value">{{ stats.routine }}</div>
-      <div class="stat-label">Routine</div>
+      <div class="stat-label">{{ t('memory.level.routine') }}</div>
     </div>
     <div class="stat-card stat-total">
       <div class="stat-value">{{ stats.total }}</div>
-      <div class="stat-label">Total</div>
+      <div class="stat-label">{{ t('memory.stats.total') }}</div>
     </div>
   </div>
 </template>

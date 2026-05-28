@@ -1,6 +1,8 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, inject } from 'vue'
 import { agentColor, agentInitial } from '../../utils/format.js'
+
+const t = inject('t')
 
 const props = defineProps({
   members: { type: Array, default: () => [] },
@@ -38,7 +40,7 @@ function getMemberName(member) {
 <template>
   <div class="members-panel">
     <div class="members-header">
-      <h3>Members ({{ members.length }})</h3>
+      <h3>{{ t('members.title') }} ({{ members.length }})</h3>
       <button class="close-btn" @click="$emit('close')">✕</button>
     </div>
 
@@ -52,25 +54,25 @@ function getMemberName(member) {
         <button
           class="remove-btn"
           @click="$emit('removeMember', getMemberName(member))"
-          title="Remove member"
+          :title="t('members.removeMember')"
         >✕</button>
       </div>
 
-      <div v-if="members.length === 0" class="empty-state">No members</div>
+      <div v-if="members.length === 0" class="empty-state">{{ t('members.noMembers') }}</div>
     </div>
 
     <!-- Add member -->
     <div class="add-section">
-      <button v-if="!showAddForm" class="add-btn" @click="showAddForm = true">+ Add Member</button>
+      <button v-if="!showAddForm" class="add-btn" @click="showAddForm = true">{{ t('members.addMember') }}</button>
       <div v-else class="add-form">
         <select v-model="selectedAgent" class="agent-select">
-          <option value="">Select agent...</option>
+          <option value="">{{ t('members.selectAgent') }}</option>
           <option v-for="agent in availableAgents" :key="agent.name" :value="agent.name">
             {{ agent.name }}
           </option>
         </select>
-        <button class="action-btn confirm" @click="addMember" :disabled="!selectedAgent">Add</button>
-        <button class="action-btn" @click="showAddForm = false">Cancel</button>
+        <button class="action-btn confirm" @click="addMember" :disabled="!selectedAgent">{{ t('members.add') }}</button>
+        <button class="action-btn" @click="showAddForm = false">{{ t('members.cancel') }}</button>
       </div>
     </div>
   </div>

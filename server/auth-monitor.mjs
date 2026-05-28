@@ -26,6 +26,10 @@
 // Exports: startAuthMonitor, stopAuthMonitor, clearAgent
 // startAuthMonitor(processesRef, agentsBaseDir, deps) signature preserved.
 
+// ⚠️ 本文件涉及 state_kv 写入。state_kv 无 LRU/TTL 驱逐，严禁用 Date.now() / UUID
+// 等 unbounded 后缀做 field 名——那会造成行数无界增长（参见 2026-04 memory-bloat 事件）。
+// 修改前请先确认 field 名是固定集合、agent 名维度、或其他可枚举的有限集合。
+
 import { readdirSync, existsSync, statSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
@@ -383,10 +387,7 @@ function emitAlert(agentName, jsonlPath, result) {
     // can subscribe to via subscribe_state pattern `auth/event/*`. Value is the
     // canonical tag (always 'api_auth' for v0.2 JSONL detection).
     deps.setState(`auth/event/${agentName}`, 'api_auth');
-    // v0.4: audit state row (LRU self-managed by state system)
-    deps.setState(`audit/auth-monitor/${Date.now()}-${agentName}`, {
-      ts: Date.now(), agent: agentName, jsonlPath, sessionId, requestId, tag,
-    });
+    // state_kv 无 LRU 驱逐，不要用时间戳后缀做 append。auth 失败审计轨迹由 deps.sendMessage('general') 覆盖。
   } catch (e) {
     deps.logger?.error?.(`[auth-monitor] setState failed for ${agentName}: ${e.message}`);
   }

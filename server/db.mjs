@@ -107,6 +107,14 @@ try { db.exec('ALTER TABLE agents ADD COLUMN api_model TEXT'); } catch { /* colu
 
 try { db.exec('ALTER TABLE agents ADD COLUMN auth_strategy TEXT DEFAULT "legacy"'); } catch {}
 
+// Codex agent integration (2026-05-26). runtime tags which CLI the agent
+// executes — 'claude' is the historical default (claude.cmd via PTY daemon);
+// 'codex-pty' routes through codex-pty-runner.mjs (native codex.exe TUI).
+// codex_thread_id is a vestigial column from the abandoned SDK runtime
+// (rev <= 2026-05-27); kept to avoid an SQLite ALTER TABLE DROP dance.
+try { db.exec('ALTER TABLE agents ADD COLUMN runtime TEXT DEFAULT "claude"'); } catch {}
+try { db.exec('ALTER TABLE agents ADD COLUMN codex_thread_id TEXT'); } catch {}
+
 // Add priority column to messages for push optimization
 try { db.exec(`ALTER TABLE messages ADD COLUMN priority TEXT DEFAULT 'later'`); } catch { /* column already exists */ }
 db.exec('CREATE INDEX IF NOT EXISTS idx_messages_priority ON messages(priority)');
@@ -301,7 +309,18 @@ export function setAgentStatus(name, status) {
 }
 
 export function getAllAgents() {
-  return db.prepare('SELECT name, role, status, last_seen, reports_to, use_resume, auth_mode, auth_strategy FROM agents').all();
+  return db.prepare('SELECT name, role, status, last_seen, reports_to, use_resume, auth_mode, auth_strategy, runtime, codex_thread_id FROM agents').all();
+}
+
+// Codex runtime helpers
+export function setAgentRuntime(name, runtime) {
+  // 'claude'    — default node-pty + claude.cmd
+  // 'codex-pty' — native codex.exe TUI in ConPTY, paste/Enter injection
+  //               (see server/codex-pty-runner.mjs)
+  if (!['claude', 'codex-pty'].includes(runtime)) {
+    throw new Error(`unknown runtime: ${runtime}`);
+  }
+  db.prepare('UPDATE agents SET runtime = ? WHERE name = ?').run(runtime, name);
 }
 
 export function setUseResume(agentName, useResume) {
@@ -1081,7 +1100,10 @@ CREATE TABLE IF NOT EXISTS change_log (
     changed_by   TEXT NOT NULL,
     reason       TEXT DEFAULT '',
     timestamp    TEXT NOT NULL DEFAULT (datetime('now')),
-    version      INTEGER NOT NULL
+    version      INTEGER NOT NULL,
+    -- For fresh DBs only; for legacy DBs the ALTER above adds this column.
+    -- Without it, a fresh boot crashes the first /api/events request.
+    source       TEXT DEFAULT 'state'
 );
 
 -- CRITICAL: append-only trigger - prevent UPDATE and DELETE on change_log
@@ -1117,7 +1139,9 @@ CREATE TABLE IF NOT EXISTS audit_reports (
     report_type  TEXT NOT NULL,
     content      TEXT NOT NULL,
     generated_by TEXT NOT NULL,
-    generated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    generated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Inline for fresh DBs; the ALTER TABLE above adds it for legacy DBs.
+    visibility   TEXT DEFAULT 'all'
 );
 
 -- audit_reports is also append-only
@@ -1296,13 +1320,25 @@ export function getPendingApprovals(owner) {
   ).all(owner);
 }
 
+// Cross-owner pending list — used by Chairman (WeChat) to view + resolve any
+// pending approval. Returns the same row shape as getPendingApprovals.
+export function getAllPendingApprovals() {
+  return db.prepare(
+    "SELECT * FROM pending_approvals WHERE status = 'pending' ORDER BY created_at DESC"
+  ).all();
+}
+
 export function resolveApproval(approvalId, approved, resolvedBy, comment) {
   const resolve = db.transaction(() => {
     const approval = db.prepare('SELECT * FROM pending_approvals WHERE approval_id = ?').get(approvalId);
     if (!approval || approval.status !== 'pending') return null;
 
-    // Only the field owner can resolve approvals
-    if (resolvedBy !== approval.owner) {
+    // The field owner can resolve approvals. Chairman is a privileged
+    // delegate who can resolve on any owner's behalf (the practical use
+    // case is approving via WeChat where Chairman is the only available
+    // human). The change_log records resolved_by accurately so the audit
+    // trail still shows who actually pressed the button.
+    if (resolvedBy !== approval.owner && resolvedBy !== 'Chairman') {
       return { error: 'only_owner_can_resolve', owner: approval.owner, attempted_by: resolvedBy };
     }
 
@@ -2283,6 +2319,7 @@ CREATE TABLE IF NOT EXISTS notifications (
 
 export function saveNotification(id, target, channel, content, taskId) {
   db.prepare('INSERT INTO notifications (id, target, channel, content, task_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, target, channel, content, taskId || null, 'pending', new Date().toISOString());
+  publish('notification_queued', { id, target, channel, task_id: taskId || null });
 }
 
 export function getPendingNotifications(target, channel = 'wechat') {
@@ -2459,6 +2496,173 @@ export function deleteMemory(id) {
   return { deleted: true };
 }
 
+// ── Memory TTL Sweep (Phase 4-integration-04) ───────────
+// Clears expired memories based on expires_at < now(), honoring pinned=1.
+// Three modes:
+//   dryRun=true  → SELECT only, returns wouldDelete + sample (max 10)
+//   hardDelete=false (soft, default) → UPDATE level='archived' + append tombstone tag
+//   hardDelete=true → DELETE from memories (and FTS)
+// Pinned rows are always skipped. Broadcasts `memory_sweep` eventbus event on success.
+export function sweepExpiredMemories({ batchSize = 500, hardDelete = false, dryRun = false } = {}) {
+  const startTs = Date.now();
+  const nowIso = new Date().toISOString();
+  const bs = Math.max(1, Math.min(Number(batchSize) || 500, 10000));
+
+  // Candidate selection — expired + not pinned + not already archived (idempotent soft sweep)
+  const selectSql = `
+    SELECT id, agent, title, expires_at, pinned, tags
+    FROM memories
+    WHERE expires_at IS NOT NULL
+      AND expires_at < datetime('now')
+      AND pinned = 0
+      AND level != 'archived'
+    ORDER BY expires_at ASC
+    LIMIT ?
+  `;
+  // Separately count pinned-but-expired so we can report skippedPinned
+  const skippedSql = `
+    SELECT COUNT(*) AS cnt
+    FROM memories
+    WHERE expires_at IS NOT NULL
+      AND expires_at < datetime('now')
+      AND pinned = 1
+  `;
+
+  let candidates;
+  let skippedPinned = 0;
+  try {
+    candidates = db.prepare(selectSql).all(bs);
+    skippedPinned = db.prepare(skippedSql).get().cnt || 0;
+  } catch (err) {
+    console.error('[memory-sweep] candidate query failed:', err.message);
+    throw err;
+  }
+
+  const scanned = candidates.length;
+
+  // ── Dry-run branch ─────────────────────────────────────
+  if (dryRun) {
+    const sample = candidates.slice(0, 10).map(r => ({
+      id: r.id, agent: r.agent, title: r.title, expires_at: r.expires_at,
+    }));
+    const result = {
+      mode: 'dryRun',
+      scanned,
+      wouldDelete: scanned,
+      sample,
+      skippedPinned,
+      durationMs: Date.now() - startTs,
+    };
+    console.info(`[memory-sweep] dryRun scanned=${scanned} wouldDelete=${scanned} skippedPinned=${skippedPinned} duration=${result.durationMs}ms`);
+    try {
+      publish('memory_sweep', {
+        mode: 'dryRun',
+        scanned,
+        wouldDelete: scanned,
+        skippedPinned,
+        durationMs: result.durationMs,
+      });
+    } catch (err) {
+      console.warn('[memory-sweep] event publish failed:', err.message);
+    }
+    return result;
+  }
+
+  if (scanned === 0) {
+    const result = {
+      mode: hardDelete ? 'hard' : 'soft',
+      scanned: 0,
+      deleted: 0,
+      skippedPinned,
+      durationMs: Date.now() - startTs,
+    };
+    console.info(`[memory-sweep] ${result.mode} noop scanned=0 skippedPinned=${skippedPinned}`);
+    try {
+      publish('memory_sweep', {
+        mode: result.mode,
+        scanned: 0,
+        deleted: 0,
+        skippedPinned,
+        durationMs: result.durationMs,
+      });
+    } catch {}
+    return result;
+  }
+
+  let deleted = 0;
+  const mode = hardDelete ? 'hard' : 'soft';
+
+  try {
+    const txn = db.transaction((rows) => {
+      if (hardDelete) {
+        const delMem = db.prepare('DELETE FROM memories WHERE id = ? AND pinned = 0');
+        const delFts = db.prepare('DELETE FROM memories_fts WHERE id = ?');
+        for (const row of rows) {
+          const info = delMem.run(row.id);
+          if (info.changes > 0) {
+            delFts.run(row.id);
+            deleted++;
+          }
+        }
+      } else {
+        // Soft: level='archived' + append tombstone tag. Re-sync FTS row.
+        const updMem = db.prepare(`
+          UPDATE memories
+             SET level = 'archived', tags = ?
+           WHERE id = ? AND pinned = 0
+        `);
+        const delFts = db.prepare('DELETE FROM memories_fts WHERE id = ?');
+        const insFts = db.prepare(
+          'INSERT INTO memories_fts (id, agent, level, title, summary, tags) VALUES (?, ?, ?, ?, ?, ?)'
+        );
+        const selMem = db.prepare('SELECT title, summary FROM memories WHERE id = ?');
+        const tombstoneTag = `tombstone:sweep:${nowIso}`;
+        for (const row of rows) {
+          let parsed = [];
+          try { parsed = JSON.parse(row.tags || '[]'); } catch { parsed = []; }
+          if (!Array.isArray(parsed)) parsed = [];
+          if (!parsed.includes(tombstoneTag)) parsed.push(tombstoneTag);
+          const nextTags = JSON.stringify(parsed);
+          const info = updMem.run(nextTags, row.id);
+          if (info.changes > 0) {
+            const fresh = selMem.get(row.id);
+            if (fresh) {
+              delFts.run(row.id);
+              insFts.run(row.id, row.agent, 'archived', fresh.title, fresh.summary, nextTags);
+            }
+            deleted++;
+          }
+        }
+      }
+    });
+    txn(candidates);
+  } catch (err) {
+    console.error(`[memory-sweep] ${mode} transaction failed, rolled back:`, err.message);
+    throw err;
+  }
+
+  const result = {
+    mode,
+    scanned,
+    deleted,
+    skippedPinned,
+    durationMs: Date.now() - startTs,
+  };
+  console.info(`[memory-sweep] ${mode} scanned=${scanned} deleted=${deleted} skippedPinned=${skippedPinned} duration=${result.durationMs}ms`);
+  try {
+    publish('memory_sweep', {
+      mode,
+      scanned,
+      deleted,
+      skippedPinned,
+      durationMs: result.durationMs,
+    });
+  } catch (err) {
+    console.warn('[memory-sweep] event publish failed:', err.message);
+  }
+  return result;
+}
+
 export function searchMemories(query, { agent, level, limit = 20 } = {}) {
   const sanitized = sanitizeFtsQuery(query);
   if (!sanitized) return [];
@@ -2539,6 +2743,495 @@ CREATE TABLE IF NOT EXISTS llm_usage (
 CREATE INDEX IF NOT EXISTS idx_llm_usage_date ON llm_usage(created_at);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_purpose ON llm_usage(purpose);
 `);
+
+// ── Memory diagnostics (Phase 4-integration-05) ──────────
+// Read-only aggregate metrics for the memories subsystem. Safe for any
+// authenticated caller; exposes counts/distributions only, no row content.
+// Schema is stable and fields are always present (fall back to 0 / {} on error).
+export function getMemoriesDiagnostics() {
+  const out = {
+    memories_total: 0,
+    memories_fts_count: 0,
+    level_breakdown: {},
+    expired_count: 0,
+    pinned_count: 0,
+    ttl_days_distribution: {},
+    avg_access_count: 0,
+    generated_at: new Date().toISOString(),
+  };
+
+  // memories_total
+  try {
+    const r = db.prepare('SELECT COUNT(*) AS cnt FROM memories').get();
+    out.memories_total = r?.cnt || 0;
+  } catch (err) {
+    console.warn('[memories-diagnostics] memories_total failed:', err.message);
+  }
+
+  // memories_fts_count
+  try {
+    const r = db.prepare('SELECT COUNT(*) AS cnt FROM memories_fts').get();
+    out.memories_fts_count = r?.cnt || 0;
+  } catch (err) {
+    console.warn('[memories-diagnostics] memories_fts_count failed:', err.message);
+  }
+
+  // level_breakdown — dynamic aggregation, whatever levels exist
+  try {
+    const rows = db.prepare(
+      'SELECT level, COUNT(*) AS cnt FROM memories GROUP BY level'
+    ).all();
+    for (const r of rows) {
+      const k = r.level == null ? 'null' : String(r.level);
+      out.level_breakdown[k] = r.cnt;
+    }
+  } catch (err) {
+    console.warn('[memories-diagnostics] level_breakdown failed:', err.message);
+  }
+
+  // expired_count — expires_at < now() AND pinned = 0 (same predicate as sweep)
+  try {
+    const r = db.prepare(`
+      SELECT COUNT(*) AS cnt FROM memories
+      WHERE expires_at IS NOT NULL
+        AND expires_at < datetime('now')
+        AND pinned = 0
+    `).get();
+    out.expired_count = r?.cnt || 0;
+  } catch (err) {
+    console.warn('[memories-diagnostics] expired_count failed:', err.message);
+  }
+
+  // pinned_count
+  try {
+    const r = db.prepare('SELECT COUNT(*) AS cnt FROM memories WHERE pinned = 1').get();
+    out.pinned_count = r?.cnt || 0;
+  } catch (err) {
+    console.warn('[memories-diagnostics] pinned_count failed:', err.message);
+  }
+
+  // ttl_days_distribution — bucketized remaining-TTL in days for non-expired rows
+  // Buckets: "expired", "0-1", "1-7", "7-30", "30-90", "90+", "no_ttl"
+  try {
+    const rows = db.prepare(`
+      SELECT
+        CASE
+          WHEN expires_at IS NULL THEN 'no_ttl'
+          WHEN expires_at < datetime('now') THEN 'expired'
+          WHEN expires_at < datetime('now', '+1 day') THEN '0-1'
+          WHEN expires_at < datetime('now', '+7 days') THEN '1-7'
+          WHEN expires_at < datetime('now', '+30 days') THEN '7-30'
+          WHEN expires_at < datetime('now', '+90 days') THEN '30-90'
+          ELSE '90+'
+        END AS bucket,
+        COUNT(*) AS cnt
+      FROM memories
+      GROUP BY bucket
+    `).all();
+    for (const r of rows) out.ttl_days_distribution[r.bucket] = r.cnt;
+  } catch (err) {
+    console.warn('[memories-diagnostics] ttl_days_distribution failed:', err.message);
+  }
+
+  // avg_access_count — may not exist in older schemas; guarded
+  try {
+    const r = db.prepare('SELECT AVG(COALESCE(access_count, 0)) AS avg FROM memories').get();
+    out.avg_access_count = r?.avg == null ? 0 : Number(Number(r.avg).toFixed(3));
+  } catch (err) {
+    // access_count column may not exist in all schemas — soft-fail
+    out.avg_access_count = null;
+  }
+
+  return out;
+}
+
+// ── G1.B: change_log append-only triggers — retention bypass via UDF ──
+// CREATE TRIGGER IF NOT EXISTS does NOT replace an existing trigger. The
+// originals at ~line 1088 and 1094 were created before the retention scanner
+// existed, so they unconditionally ABORT on UPDATE/DELETE. We need retention
+// sweeps (which hard-delete expired change_log rows) to succeed, while keeping
+// the append-only guarantee for every OTHER writer.
+//
+// Implementation (CTO-ruled 2026-04-22, supersedes the earlier sentinel-table
+// approach): define a SQL UDF `is_sweeping()` that reads a module-scoped JS
+// flag. The delete trigger fires (ABORTs) whenever the flag is OFF. The flag
+// is ON only for the duration of retention.mjs's sweepAll() policy loop.
+//
+// Why UDF, not sentinel: (a) SQLite triggers cannot reference temp.* tables
+// at all ("trigger cannot reference objects in database temp") — tried, failed.
+// (b) A sentinel in main schema works but silently bypasses on any connection
+// that opens the DB. (c) The UDF is registered per-connection via
+// `db.function()`; if a future worker thread opens its own connection WITHOUT
+// registering the function, the trigger's `is_sweeping() = 0` evaluates to
+// "no such function: is_sweeping" and RAISEs — fail-loud, not silent bypass.
+//
+// Only `change_log_no_delete` gets the WHEN guard: retention sweeps DELETE,
+// never UPDATE, so `change_log_no_update` stays unconditional. The no_update
+// trigger IS still re-migrated (DROP+CREATE) in case a prior version of this
+// migration added a WHEN clause to it.
+//
+// Ordering: UDF must be registered BEFORE the trigger could fire; register
+// here at module-init time, before any code path that could INSERT/DELETE
+// on change_log.
+
+// Module-scoped retention sweep flag. Exported setter lets retention.mjs
+// toggle it around its policy loop; this module's UDF reads it directly.
+// Kept in db.mjs (not retention.mjs) to avoid a db → retention circular import.
+let _retentionSweeping = false;
+
+/**
+ * Toggle the retention-sweep flag that the `is_sweeping()` SQL UDF reads.
+ * Called by retention.mjs around its policy loop. Always pair set(true) with
+ * set(false) inside a try/finally; leaving the flag stuck ON would disable
+ * the append-only guarantee on change_log.
+ */
+export function setRetentionSweeping(active) {
+  _retentionSweeping = !!active;
+}
+
+/**
+ * Read the retention-sweep flag (for tests / diagnostics).
+ */
+export function isRetentionSweeping() {
+  return _retentionSweeping;
+}
+
+// Register the UDF. `deterministic: false` because the value changes per-call.
+//
+// Fail-loud boundary: in the single-connection case (current) this throws if
+// the function gets double-registered — `db.function` on better-sqlite3
+// raises on duplicate names, and we let that propagate so it surfaces at boot.
+// Future worker-pool / multi-connection case: EACH connection's sweep code
+// must call `db.function('is_sweeping', _isSweeping)` after opening. If a
+// worker connection forgets, the change_log_no_delete trigger fires
+// "no such function: is_sweeping" at DELETE time — that is the INTENDED
+// fail-loud. CEO sign-off 2026-04-22.
+if (typeof db.function !== 'function') {
+  throw new Error(
+    '[retention] db.function is not available on this SQLite binding — UDF-based bypass cannot be installed. Refusing to continue.'
+  );
+}
+try {
+  db.function(
+    'is_sweeping',
+    { deterministic: false },
+    () => (_retentionSweeping ? 1 : 0)
+  );
+} catch (err) {
+  throw new Error(
+    `[retention] failed to register is_sweeping() UDF (likely duplicate registration or incompatible better-sqlite3): ${err.message}`
+  );
+}
+
+db.exec(`
+DROP TRIGGER IF EXISTS change_log_no_update;
+CREATE TRIGGER change_log_no_update
+BEFORE UPDATE ON change_log
+BEGIN
+    SELECT RAISE(ABORT, 'change_log is append-only: UPDATE not allowed');
+END;
+
+DROP TRIGGER IF EXISTS change_log_no_delete;
+CREATE TRIGGER change_log_no_delete
+BEFORE DELETE ON change_log
+WHEN is_sweeping() = 0
+BEGIN
+    SELECT RAISE(ABORT, 'change_log is append-only: DELETE not allowed');
+END;
+`);
+
+// ── Retention audit table (G1.A per CTO correction) ────
+// Append-only audit trail: one row per (sweep-run, policy). Created here rather
+// than in retention.mjs because db.mjs owns schema setup.
+//
+// Note: the `ts` column is renamed to `started_at` by the FAIL 5 migration
+// block below. The CREATE TABLE here defines the INITIAL schema only; the
+// migration block handles the evolution. Indexes are created in the migration
+// block (after the rename) so re-boot on a migrated DB doesn't try to create
+// `idx_retention_event_ts` on a column that no longer exists.
+db.exec(`
+CREATE TABLE IF NOT EXISTS retention_event (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts              TEXT NOT NULL DEFAULT (datetime('now')),
+    policy          TEXT NOT NULL,
+    scanned         INTEGER NOT NULL DEFAULT 0,
+    soft_deleted    INTEGER NOT NULL DEFAULT 0,
+    hard_deleted    INTEGER NOT NULL DEFAULT 0,
+    bytes_reclaimed INTEGER NOT NULL DEFAULT 0,
+    duration_ms     INTEGER NOT NULL DEFAULT 0,
+    caller          TEXT NOT NULL DEFAULT 'unknown',
+    error           TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_retention_event_policy ON retention_event(policy);
+`);
+
+// ── Retention audit backfill (G1.B/D/F patch): severity + note columns ──
+// CTO required these columns on retention_event; G1.A missed them. Idempotent
+// ALTER guarded by PRAGMA table_info so re-boot migrations are no-ops.
+//
+// Per CTO 2026-04-22: SQLite ALTER TABLE ADD COLUMN cannot add a CHECK
+// constraint and cannot add NOT NULL without a default on existing rows —
+// so enforce the enum in the prepared-statement layer instead of the schema.
+// Valid severity values: 'info' | 'warn' | 'error' | 'lint' | 'catchup'.
+//   - 'catchup' tags Day -1 fossil-cleanup rows (large one-time backlog) so
+//     R1 steady-state SQL can exclude them from 48h soak metrics. CEO+CTO
+//     sign-off 2026-04-22.
+//
+// FAIL 5 backfill (CTO 2026-04-22): add `sweep_id TEXT` + rename `ts` →
+// `started_at`. Target final schema (13 cols):
+//   id, sweep_id, policy, scanned, soft_deleted, hard_deleted,
+//   bytes_reclaimed, duration_ms, caller, started_at, error, severity, note
+// sweep_id groups per-policy rows + the __sweepAll__ aggregate of one run;
+// lint + auto_vacuum rows have sweep_id = NULL (not part of a sweep).
+// started_at is captured ONCE at sweepAll start, giving C a stable sweep
+// window instead of random insert times.
+{
+  const existingCols = new Set(
+    db.prepare('PRAGMA table_info(retention_event)').all().map((r) => r.name)
+  );
+  if (!existingCols.has('severity')) {
+    db.exec(`ALTER TABLE retention_event ADD COLUMN severity TEXT DEFAULT 'info'`);
+  }
+  if (!existingCols.has('note')) {
+    db.exec(`ALTER TABLE retention_event ADD COLUMN note TEXT DEFAULT NULL`);
+  }
+  if (!existingCols.has('sweep_id')) {
+    db.exec(`ALTER TABLE retention_event ADD COLUMN sweep_id TEXT`);
+  }
+  // Rename ts → started_at idempotently. SQLite 3.25+ supports RENAME COLUMN.
+  // Only act when the legacy `ts` column is still present and the target
+  // `started_at` is absent — otherwise no-op.
+  if (existingCols.has('ts') && !existingCols.has('started_at')) {
+    db.exec(`ALTER TABLE retention_event RENAME COLUMN ts TO started_at`);
+    // The old index idx_retention_event_ts now references a renamed column;
+    // SQLite auto-updates index definitions on RENAME COLUMN. Re-create with
+    // the new name for clarity / queryability (IF NOT EXISTS is safe).
+    db.exec(`DROP INDEX IF EXISTS idx_retention_event_ts`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_retention_event_started_at ON retention_event(started_at)`);
+  } else if (!existingCols.has('started_at')) {
+    // Brand-new DB path: retention_event was just created with `ts`; rename.
+    // Hit by fresh installs only (the earlier CREATE TABLE above uses `ts`).
+    db.exec(`ALTER TABLE retention_event RENAME COLUMN ts TO started_at`);
+    db.exec(`DROP INDEX IF EXISTS idx_retention_event_ts`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_retention_event_started_at ON retention_event(started_at)`);
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_retention_event_sweep_id ON retention_event(sweep_id)`);
+}
+
+const VALID_RETENTION_SEVERITY = new Set(['info', 'warn', 'error', 'lint', 'catchup']);
+
+const _insertRetentionEvent = db.prepare(`
+  INSERT INTO retention_event (sweep_id, policy, scanned, soft_deleted, hard_deleted, bytes_reclaimed, duration_ms, caller, started_at, error, severity, note)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`);
+
+/**
+ * Append a retention event audit row. Used by server/retention.mjs after each
+ * policy sweep. Best-effort — failures are logged, not thrown.
+ *
+ * sweep_id:  string | null. Same UUID shared by all rows of one sweepAll run
+ *            (N per-policy rows + 1 __sweepAll__ aggregate). Lint / auto_vacuum
+ *            rows pass null (not part of a sweep).
+ * started_at: ISO timestamp. Caller provides — retention.mjs captures it ONCE
+ *            at sweep start so C's soak queries see a stable sweep window.
+ *            Lint / auto_vacuum rows pass the current ISO timestamp.
+ * severity: 'info' (default) | 'warn' | 'error' | 'lint' | 'catchup'
+ *           Enforced in this layer (SQLite ALTER cannot add a CHECK).
+ * note:     optional free-text annotation (e.g. 'dryRun',
+ *           'auto_vacuum != INCREMENTAL; incremental_vacuum skipped; ...').
+ *
+ * Throws if severity is not in VALID_RETENTION_SEVERITY.
+ */
+export function insertRetentionEvent({
+  policy,
+  sweep_id = null,
+  scanned = 0,
+  soft_deleted = 0,
+  hard_deleted = 0,
+  bytes_reclaimed = 0,
+  duration_ms = 0,
+  caller = 'unknown',
+  started_at = null,
+  error = null,
+  severity = 'info',
+  note = null,
+}) {
+  if (!VALID_RETENTION_SEVERITY.has(severity)) {
+    throw new TypeError(
+      `insertRetentionEvent: invalid severity '${severity}' — must be one of ${Array.from(VALID_RETENTION_SEVERITY).join(', ')}`
+    );
+  }
+  // started_at must always have a value so the NOT NULL default (inherited
+  // from the original CREATE TABLE definition) holds. Fall back to now().
+  const startedAtValue = started_at ? String(started_at) : new Date().toISOString();
+  try {
+    _insertRetentionEvent.run(
+      sweep_id == null ? null : String(sweep_id),
+      policy,
+      scanned | 0,
+      soft_deleted | 0,
+      hard_deleted | 0,
+      Math.max(0, Number(bytes_reclaimed) | 0),
+      duration_ms | 0,
+      String(caller),
+      startedAtValue,
+      error ? String(error) : null,
+      severity,
+      note == null ? null : String(note),
+    );
+  } catch (err) {
+    console.warn('[retention-event] insert failed:', err.message);
+  }
+}
+
+// ── Retention Policy Registry (G1.A) ────────────────────
+// In-memory registry of retention policies. Modules call registerRetention() at
+// startup to declare a type of row that should be aged out; the scanner in
+// server/retention.mjs later iterates the registry and runs each policy.
+//
+// This primitive ONLY registers — it does not execute or schedule anything.
+// Policy shape (see JSDoc on registerRetention below):
+//   {
+//     name:            string (unique),
+//     table:           string,
+//     whereClause:     string (SQL WHERE fragment, parameterized),
+//     whereParams:     () => any[]  (resolved at sweep time),
+//     selectColumns?:  string (default 'id'; extra columns for dryRun diagnostics),
+//     rowIdentifier?:  string (default 'id'; column used for DELETE/UPDATE
+//                       WHERE. Pass 'rowid' for id-less / composite-PK tables),
+//     softDelete?:     { column, value, tombstoneTag? } | null,
+//     hardDeleteAfter?: number (ms; if set, rows already soft-deleted for this
+//                       long become eligible for hard-delete),
+//     batchSize?:      number (default 500, clamped 1..10000),
+//     onSweep?:        (result) => void   (optional per-policy hook after sweep),
+//     customSweep?:    (ctx) => result  — if present, the scanner SKIPS its
+//                       generic SELECT/DELETE and calls customSweep(ctx) instead.
+//                       Used when a table needs FTS-atomic delete or other
+//                       non-generic semantics (see memories_ttl → sweepExpiredMemories).
+//                       ctx: { dryRun, hardDelete, batchSize, sampleLimit, caller,
+//                              severity, db, sweepId, startedAt, policyName }
+//                       Return: { scanned, softDeleted, hardDeleted, sample?, errors? }
+//                       When customSweep is set, whereClause/whereParams may be
+//                       stub values (the scanner still validates them to keep a
+//                       single shape, but never executes them).
+//   }
+const _retentionPolicies = new Map();
+
+/**
+ * Register a retention policy. Last write wins for a given name (re-registration
+ * replaces). Returns the stored, normalized policy object.
+ *
+ * @param {object} policy - see module-level docblock for shape.
+ * @returns {object} normalized policy
+ */
+export function registerRetention(policy) {
+  if (!policy || typeof policy !== 'object') {
+    throw new TypeError('registerRetention: policy must be an object');
+  }
+  if (!policy.name || typeof policy.name !== 'string') {
+    throw new TypeError('registerRetention: policy.name is required (string)');
+  }
+  if (!policy.table || typeof policy.table !== 'string') {
+    throw new TypeError(`registerRetention[${policy.name}]: policy.table is required (string)`);
+  }
+  if (!policy.whereClause || typeof policy.whereClause !== 'string') {
+    throw new TypeError(`registerRetention[${policy.name}]: policy.whereClause is required (string)`);
+  }
+  if (policy.whereParams !== undefined && typeof policy.whereParams !== 'function') {
+    throw new TypeError(`registerRetention[${policy.name}]: policy.whereParams must be a function`);
+  }
+  if (policy.softDelete !== undefined && policy.softDelete !== null) {
+    const sd = policy.softDelete;
+    if (typeof sd !== 'object' || !sd.column || !('value' in sd)) {
+      throw new TypeError(`registerRetention[${policy.name}]: policy.softDelete must be { column, value, tombstoneTag? }`);
+    }
+  }
+  if (policy.customSweep !== undefined && typeof policy.customSweep !== 'function') {
+    throw new TypeError(
+      `registerRetention[${policy.name}]: policy.customSweep must be a function when present`
+    );
+  }
+
+  // rowIdentifier: column used in SELECT's identifier slot and DELETE/UPDATE
+  // WHERE clause. Default 'id'. Tables without an `id` column (e.g. state_kv,
+  // PK (project_id, field)) pass 'rowid' to use SQLite's implicit rowid.
+  // Restricted to a simple SQL identifier to keep the string-interpolated
+  // SQL safe (policy config is trusted, but we still sanity-check).
+  const rowIdentifier = policy.rowIdentifier || 'id';
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(rowIdentifier)) {
+    throw new TypeError(
+      `registerRetention[${policy.name}]: policy.rowIdentifier must be a simple identifier (got '${rowIdentifier}')`
+    );
+  }
+
+  const normalized = {
+    name: policy.name,
+    table: policy.table,
+    whereClause: policy.whereClause,
+    whereParams: policy.whereParams || (() => []),
+    selectColumns: policy.selectColumns || 'id',
+    rowIdentifier,
+    softDelete: policy.softDelete || null,
+    hardDeleteAfter: Number.isFinite(policy.hardDeleteAfter) ? policy.hardDeleteAfter : null,
+    batchSize: Math.max(1, Math.min(Number(policy.batchSize) || 500, 10000)),
+    onSweep: typeof policy.onSweep === 'function' ? policy.onSweep : null,
+    customSweep: typeof policy.customSweep === 'function' ? policy.customSweep : null,
+  };
+
+  // ── Write-amplification lint (CEO-approved sub-DoD 2026-04-22) ──
+  // If someone registers a state_kv policy whose WHERE clause contains a
+  // timestamped or UUID-shaped key pattern, it's almost certainly a symptom
+  // of write amplification (someone is INSERTing one row per event instead
+  // of UPDATEing a single row). Retention won't fix the root cause.
+  // See auth-monitor.mjs:386 for the canonical mistake.
+  try {
+    if (normalized.table === 'state_kv') {
+      const haystack = String(normalized.whereClause || '');
+      const longDigits = /\d{10,}/;
+      const uuidV4 = /[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i;
+      let matched = null;
+      if (longDigits.test(haystack)) matched = 'long-digit timestamp';
+      else if (uuidV4.test(haystack)) matched = 'uuid-v4';
+      if (matched) {
+        const msg = `state_kv with timestamped/UUID field looks like write-amplification. Consider removing the write instead of registering retention. See auth-monitor.mjs:386 for the canonical mistake.`;
+        console.warn(`[retention-lint] ${normalized.name}: ${msg}`);
+        insertRetentionEvent({
+          policy: normalized.name,
+          severity: 'lint',
+          caller: 'registerRetention',
+          note: `${matched} in whereClause; ${msg}`,
+        });
+      }
+    }
+  } catch (err) {
+    console.warn('[retention-lint] check failed:', err.message);
+  }
+
+  _retentionPolicies.set(normalized.name, normalized);
+  return normalized;
+}
+
+/**
+ * Return the list of currently registered retention policies in insertion order.
+ * Returned array is a shallow copy — mutating it does not affect the registry.
+ */
+export function getRetentionPolicies() {
+  return Array.from(_retentionPolicies.values());
+}
+
+/**
+ * Remove a single policy (primarily for tests). Returns true if removed.
+ */
+export function unregisterRetention(name) {
+  return _retentionPolicies.delete(name);
+}
+
+/**
+ * Clear the entire registry (primarily for tests).
+ */
+export function clearRetentionPolicies() {
+  _retentionPolicies.clear();
+}
 
 export function closeDb() {
   try { db.close(); } catch {}

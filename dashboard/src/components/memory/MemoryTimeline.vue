@@ -1,6 +1,8 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, inject } from 'vue'
 import { formatTime, formatDate, escapeHtml } from '../../utils/format.js'
+
+const t = inject('t')
 
 const props = defineProps({
   memories: { type: Array, default: () => [] },
@@ -37,11 +39,12 @@ function levelIcon(level) {
 }
 
 function categoryLabel(cat) {
-  const labels = {
-    error: 'Error', decision: 'Decision', milestone: 'Milestone',
-    debug: 'Debug', security: 'Security', pattern: 'Pattern', general: 'General'
-  }
-  return labels[cat] || cat
+  // Translate via i18n; fall back to the raw key when unrecognized.
+  return cat ? t('memory.category.' + cat) || cat : cat
+}
+
+function levelLabel(level) {
+  return level ? t('memory.level.' + level) || level : level
 }
 
 function doSearch() {
@@ -62,7 +65,7 @@ const canNext = computed(() => props.offset + props.limit < props.total)
 const pageText = computed(() => {
   const start = props.total === 0 ? 0 : props.offset + 1
   const end = Math.min(props.offset + props.limit, props.total)
-  return `${start}\u2013${end} of ${props.total}`
+  return `${start}\u2013${end} ${t('memory.pageOf')} ${props.total}`
 })
 </script>
 
@@ -74,16 +77,16 @@ const pageText = computed(() => {
         <input
           v-model="searchInput"
           class="search-input"
-          placeholder="Search memories..."
+          :placeholder="t('memory.search')"
           @keyup.enter="doSearch"
         />
-        <button class="btn-sm" @click="doSearch">Search</button>
-        <button v-if="searchInput" class="btn-sm btn-ghost" @click="clearSearch">Clear</button>
+        <button class="btn-sm" @click="doSearch">{{ t('memory.searchBtn') }}</button>
+        <button v-if="searchInput" class="btn-sm btn-ghost" @click="clearSearch">{{ t('memory.clear') }}</button>
       </div>
       <button
         class="btn-sm btn-ghost"
         @click="showFilters = !showFilters"
-      >{{ showFilters ? 'Hide Filters' : 'Filters' }}</button>
+      >{{ showFilters ? t('memory.hideFilters') : t('memory.filters') }}</button>
     </div>
 
     <!-- Filters panel -->
@@ -93,7 +96,7 @@ const pageText = computed(() => {
         @change="emit('filter', { agent: $event.target.value })"
         class="filter-select"
       >
-        <option value="">All Agents</option>
+        <option value="">{{ t('memory.allAgents') }}</option>
         <option v-for="a in AGENT_OPTIONS.slice(1)" :key="a" :value="a">{{ a }}</option>
       </select>
       <select
@@ -101,9 +104,9 @@ const pageText = computed(() => {
         @change="emit('filter', { level: $event.target.value })"
         class="filter-select"
       >
-        <option value="">All Levels</option>
+        <option value="">{{ t('memory.allLevels') }}</option>
         <option v-for="l in LEVEL_OPTIONS.slice(1)" :key="l" :value="l">
-          {{ l.charAt(0).toUpperCase() + l.slice(1) }}
+          {{ levelLabel(l) }}
         </option>
       </select>
       <select
@@ -111,7 +114,7 @@ const pageText = computed(() => {
         @change="emit('filter', { category: $event.target.value })"
         class="filter-select"
       >
-        <option value="">All Categories</option>
+        <option value="">{{ t('memory.allCategories') }}</option>
         <option v-for="c in CATEGORY_OPTIONS.slice(1)" :key="c" :value="c">
           {{ categoryLabel(c) }}
         </option>
@@ -120,10 +123,10 @@ const pageText = computed(() => {
 
     <!-- Timeline list -->
     <div class="timeline-list" :class="{ loading }">
-      <div v-if="loading" class="loading-indicator">Loading...</div>
+      <div v-if="loading" class="loading-indicator">{{ t('memory.loading') }}</div>
       <div v-else-if="memories.length === 0" class="empty-state">
         <div class="icon">\u{1F4AD}</div>
-        <div>No memories found</div>
+        <div>{{ t('memory.noMemories') }}</div>
       </div>
       <div
         v-for="m in memories"
@@ -140,7 +143,7 @@ const pageText = computed(() => {
             <span class="memory-time">{{ formatTime(m.created_at) }}</span>
           </div>
           <div class="timeline-meta">
-            <span class="level-badge" :style="{ background: levelColor(m.level) }">{{ m.level }}</span>
+            <span class="level-badge" :style="{ background: levelColor(m.level) }">{{ levelLabel(m.level) }}</span>
             <span v-if="m.category !== 'general'" class="category-badge">{{ categoryLabel(m.category) }}</span>
             <span class="agent-badge">{{ m.agent }}</span>
           </div>
@@ -154,9 +157,9 @@ const pageText = computed(() => {
 
     <!-- Pagination -->
     <div v-if="total > limit" class="pagination">
-      <button class="btn-sm" :disabled="!canPrev" @click="emit('prev')">Prev</button>
+      <button class="btn-sm" :disabled="!canPrev" @click="emit('prev')">{{ t('memory.prev') }}</button>
       <span class="page-info">{{ pageText }}</span>
-      <button class="btn-sm" :disabled="!canNext" @click="emit('next')">Next</button>
+      <button class="btn-sm" :disabled="!canNext" @click="emit('next')">{{ t('memory.next') }}</button>
     </div>
   </div>
 </template>

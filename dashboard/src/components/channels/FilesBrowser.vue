@@ -9,6 +9,8 @@ const props = defineProps({
 
 const emit = defineEmits(['close'])
 
+const t = inject('t')
+
 const folders = ref([])
 const files = ref([])
 const loading = ref(false)
@@ -124,13 +126,13 @@ function getDownloadUrl(file) {
 <template>
   <div class="files-browser">
     <div class="files-header">
-      <h3>Files</h3>
+      <h3>{{ t('files.title') }}</h3>
       <button class="close-btn" @click="$emit('close')">✕</button>
     </div>
 
     <!-- Breadcrumbs -->
     <div class="breadcrumbs">
-      <span class="breadcrumb-item" @click="navigateToRoot">Root</span>
+      <span class="breadcrumb-item" @click="navigateToRoot">{{ t('files.root') }}</span>
       <template v-for="(item, i) in folderPath" :key="item.id">
         <span class="breadcrumb-sep">/</span>
         <span class="breadcrumb-item" @click="navigateToBreadcrumb(i)">{{ item.name }}</span>
@@ -139,21 +141,21 @@ function getDownloadUrl(file) {
 
     <!-- New folder -->
     <div class="actions-bar">
-      <button v-if="!showNewFolder" class="new-folder-btn" @click="showNewFolder = true">+ New Folder</button>
+      <button v-if="!showNewFolder" class="new-folder-btn" @click="showNewFolder = true">{{ t('files.newFolder') }}</button>
       <div v-else class="new-folder-form">
         <input
           v-model="newFolderName"
           class="folder-input"
-          placeholder="Folder name"
+          :placeholder="t('files.folderName')"
           @keydown.enter="createFolder"
           @keydown.escape="showNewFolder = false"
         />
-        <button class="action-small-btn" @click="createFolder">Create</button>
-        <button class="action-small-btn cancel" @click="showNewFolder = false">Cancel</button>
+        <button class="action-small-btn" @click="createFolder">{{ t('files.create') }}</button>
+        <button class="action-small-btn cancel" @click="showNewFolder = false">{{ t('files.cancel') }}</button>
       </div>
     </div>
 
-    <div v-if="loading" class="loading-state">Loading...</div>
+    <div v-if="loading" class="loading-state">{{ t('files.loading') }}</div>
 
     <div v-else class="files-list">
       <!-- Folders -->
@@ -166,14 +168,14 @@ function getDownloadUrl(file) {
             @keydown.enter="renameFolder(folder)"
             @keydown.escape="renamingId = null"
           />
-          <button class="action-small-btn" @click="renameFolder(folder)">Save</button>
+          <button class="action-small-btn" @click="renameFolder(folder)">{{ t('files.save') }}</button>
         </template>
         <template v-else>
           <span class="file-icon" @click="navigateToFolder(folder)">📁</span>
           <span class="file-name" @click="navigateToFolder(folder)">{{ folder.name }}</span>
           <div class="file-actions">
-            <button class="action-small-btn" @click="startRename(folder)">Rename</button>
-            <button class="action-small-btn delete" @click="deleteFolder(folder)">Del</button>
+            <button class="action-small-btn" @click="startRename(folder)">{{ t('files.rename') }}</button>
+            <button class="action-small-btn delete" @click="deleteFolder(folder)">{{ t('files.delete') }}</button>
           </div>
         </template>
       </div>
@@ -193,7 +195,7 @@ function getDownloadUrl(file) {
 
       <!-- Empty state -->
       <div v-if="folders.length === 0 && files.length === 0" class="empty-state">
-        No files or folders
+        {{ t('files.emptyBrowser') }}
       </div>
     </div>
   </div>

@@ -4,8 +4,9 @@
  * TeamMCP messages to Chairman → forwards to WeChat
  */
 import crypto from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, chmodSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
+import QRCode from 'qrcode';
 
 const DEFAULT_BASE_URL = 'https://ilinkai.weixin.qq.com';
 const BOT_TYPE = '3';
@@ -17,6 +18,9 @@ let getUpdatesBuf = '';
 let polling = false;
 let loginInProgress = false;
 let loginQRData = null; // { qrcode, qrcode_img_content }
+// Surface the last failure (e.g. session timeout -14, network) so Dashboard
+// can show why the bridge is disconnected instead of a generic dot.
+let lastError = null; // { at, code, message }
 
 // Callbacks (set by init)
 let onMessageReceived = null; // (text, fromUser, contextToken) => void
@@ -285,20 +289,41 @@ function saveSession() {
 export async function startLogin() {
   if (loginInProgress) return { status: 'already_in_progress' };
   loginInProgress = true;
+  lastError = null;
   try {
     const qrResp = await apiGet(DEFAULT_BASE_URL, `ilink/bot/get_bot_qrcode?bot_type=${BOT_TYPE}`);
+    // qrcode_img_content from the iLink API is a `https://liteapp.weixin.qq.com/...`
+    // deep link, NOT image data — rendering it via <img src> fails. Encode the
+    // link string into a PNG data URL on our side so the Dashboard can show it
+    // with a plain <img>. The QR code's payload is whichever string actually
+    // makes a WeChat client successful at scanning, so we prefer
+    // qrcode_img_content (the long URL) and fall back to the short qrcode id.
+    const payload = qrResp.qrcode_img_content || qrResp.qrcode || '';
+    let qrDataUrl = null;
+    try {
+      qrDataUrl = await QRCode.toDataURL(payload, { width: 240, margin: 2 });
+    } catch (qrErr) {
+      console.error('[wechat] QR encode failed:', qrErr.message);
+    }
     loginQRData = {
       qrcode: qrResp.qrcode,
       qrcode_img_content: qrResp.qrcode_img_content,
+      qr_data_url: qrDataUrl,
     };
     console.log('[wechat] QR code generated, waiting for scan...');
 
     // Start polling for scan status in background
     pollLoginStatus(qrResp.qrcode);
 
-    return { status: 'qr_generated', qrcode_img_content: qrResp.qrcode_img_content };
+    return {
+      status: 'qr_generated',
+      qr: qrDataUrl,                              // Dashboard reads this first
+      qrcode_img_content: qrResp.qrcode_img_content,
+      qrcode_url: qrResp.qrcode_img_content,      // raw URL for fallback / manual link
+    };
   } catch (e) {
     loginInProgress = false;
+    lastError = { at: new Date().toISOString(), code: 'login_error', message: e.message };
     throw e;
   }
 }
@@ -384,8 +409,27 @@ async function pollLoop() {
 
         console.log(`[wechat←] ${text.slice(0, 60)}`);
 
-        // Keyword: "进度" returns doing tasks summary
-        if (text === '进度' || text === '任务进度') {
+        // ── Keyword commands ──
+        // Exact-match commands that short-circuit normal message forwarding.
+        // Keep this list small + memorable; document in 帮助 response.
+        const cmd = text.trim();
+        const HELP_TEXT = [
+          '📖 TeamMCP 微信指令：',
+          '• 进度 / 任务进度 — 列出进行中的任务',
+          '• 通知 — 列出未读离线通知',
+          '• 审批 — 列出待审批请求',
+          '• 批准 a3f7 / 拒绝 a3f7 [原因] — 处理审批（a3f7 为短码）',
+          '• 帮助 / help — 显示本指令列表',
+          '',
+          '其他文本会作为 Chairman 消息推送给 CEO / Audit。',
+        ].join('\n');
+
+        if (cmd === '帮助' || cmd === 'help' || cmd === '?' || cmd === '？') {
+          await sendToWeChat(HELP_TEXT, fromUser, contextToken);
+          continue;
+        }
+
+        if (cmd === '进度' || cmd === '任务进度') {
           try {
             const { getDoingTasks, getPendingNotifications } = await import('./db.mjs');
             const doingTasks = getDoingTasks();
@@ -400,12 +444,59 @@ async function pollLoop() {
               reply += '当前没有进行中的任务。\n';
             }
             if (pending.length > 0) {
-              reply += `\n📬 ${pending.length} 条离线通知待查看`;
+              reply += `\n📬 ${pending.length} 条离线通知待查看（回复 "通知" 列出）`;
             }
             await sendToWeChat(reply.trim(), fromUser, contextToken);
-            continue; // Don't forward to TeamMCP
+            continue;
           } catch (e) {
-            console.error('[wechat] keyword query failed:', e.message);
+            console.error('[wechat] 进度 keyword failed:', e.message);
+          }
+        }
+
+        if (cmd === '通知' || cmd === '消息' || cmd === 'notifications') {
+          try {
+            const { getPendingNotifications } = await import('./db.mjs');
+            const pending = getPendingNotifications('Chairman', 'wechat');
+            if (pending.length === 0) {
+              await sendToWeChat('当前没有未读通知。', fromUser, contextToken);
+            } else {
+              // Show up to 10 — past that it's noise; user can pull more
+              // via the Dashboard.
+              const lines = [`📬 未读通知 (${pending.length})：`];
+              for (const n of pending.slice(0, 10)) {
+                const preview = (n.content || '').replace(/\n/g, ' ').slice(0, 80);
+                lines.push(`• ${preview}`);
+              }
+              if (pending.length > 10) lines.push(`...还有 ${pending.length - 10} 条,详见 Dashboard`);
+              await sendToWeChat(lines.join('\n'), fromUser, contextToken);
+            }
+            continue;
+          } catch (e) {
+            console.error('[wechat] 通知 keyword failed:', e.message);
+          }
+        }
+
+        if (cmd === '审批' || cmd === 'approvals') {
+          try {
+            const { getAllPendingApprovals } = await import('./db.mjs');
+            const pending = getAllPendingApprovals();
+            if (pending.length === 0) {
+              await sendToWeChat('当前没有待审批的请求。', fromUser, contextToken);
+            } else {
+              const lines = [`📋 待审批 (${pending.length})：`];
+              for (const a of pending.slice(0, 10)) {
+                const sc = a.approval_id.slice(-4);
+                const pv = (() => { try { return JSON.parse(a.proposed_value || '{}'); } catch { return {}; } })();
+                lines.push(`• #${sc} [${a.owner}] ${pv.tool_name || a.field}`);
+              }
+              if (pending.length > 10) lines.push(`...还有 ${pending.length - 10} 条`);
+              lines.push('');
+              lines.push('回复："批准 a3f7" 或 "拒绝 a3f7 原因"');
+              await sendToWeChat(lines.join('\n'), fromUser, contextToken);
+            }
+            continue;
+          } catch (e) {
+            console.error('[wechat] 审批 keyword failed:', e.message);
           }
         }
 
@@ -436,8 +527,11 @@ async function pollLoop() {
 
           if (approved !== null) {
             try {
-              const { getPendingApprovals, resolveApproval } = await import('./db.mjs');
-              const pending = getPendingApprovals('CEO'); // TODO: support per-approver
+              const { getAllPendingApprovals, resolveApproval } = await import('./db.mjs');
+              // Chairman acts as a privileged delegate — they can resolve
+              // approvals owned by ANY agent, not just CEO. The db-side
+                // resolveApproval whitelists Chairman as a valid resolver.
+              const pending = getAllPendingApprovals();
               let targetApproval = null;
 
               if (shortCode) {
@@ -450,12 +544,13 @@ async function pollLoop() {
                 await sendToWeChat('当前没有待审批的请求。', fromUser, contextToken);
                 continue;
               } else {
-                // Multiple pending, no code — list them
+                // Multiple pending, no code — list them (show owner so user
+                // knows whose approval they're acting on)
                 let listMsg = `当前有 ${pending.length} 条待审批，请带短码回复：\n`;
                 for (const a of pending) {
                   const sc = a.approval_id.slice(-4);
                   const pv = (() => { try { return JSON.parse(a.proposed_value || '{}'); } catch { return {}; } })();
-                  listMsg += `• #${sc} ${pv.tool_name || a.field}\n`;
+                  listMsg += `• #${sc} [${a.owner}] ${pv.tool_name || a.field}\n`;
                 }
                 await sendToWeChat(listMsg.trim(), fromUser, contextToken);
                 continue;
@@ -470,12 +565,13 @@ async function pollLoop() {
               const comment = approved ? '' : (trimmed.replace(/^\S+\s+[a-f0-9]{4}\s*/i, '') || '');
 
               const result = resolveApproval(targetApproval.approval_id, approved, 'Chairman', comment);
-              if (result) {
+              if (result && !result.error) {
                 const statusText = approved ? '已批准' : '已拒绝';
                 const pv = (() => { try { return JSON.parse(targetApproval.proposed_value || '{}'); } catch { return {}; } })();
                 const toolName = pv.tool_name || targetApproval.field;
-                await sendToWeChat(`${statusText}: ${toolName}`, fromUser, contextToken);
-                console.log(`[wechat] Approval ${statusText}: ${targetApproval.approval_id}`);
+                const ownerNote = targetApproval.owner !== 'Chairman' ? ` (owner: ${targetApproval.owner})` : '';
+                await sendToWeChat(`${statusText}: ${toolName}${ownerNote}`, fromUser, contextToken);
+                console.log(`[wechat] Approval ${statusText}: ${targetApproval.approval_id} owner=${targetApproval.owner}`);
               } else {
                 await sendToWeChat('审批处理失败，可能已被处理。', fromUser, contextToken);
               }
@@ -489,42 +585,17 @@ async function pollLoop() {
         if (onMessageReceived) onMessageReceived(text, fromUser, contextToken);
       }
       // Deliver pending notifications to WeChat
-      try {
-        const { getPendingNotifications, markNotificationDelivered } = await import('./db.mjs');
-        const pending = getPendingNotifications('Chairman', 'wechat');
-        if (pending.length > 0) {
-          // Merge notifications for same task
-          const merged = new Map();
-          for (const n of pending) {
-            const key = n.task_id || n.id;
-            merged.set(key, n); // Keep latest for each task
-          }
-          for (const [, notif] of merged) {
-            try {
-              await sendToWeChat(notif.content, '');
-              markNotificationDelivered(notif.id);
-            } catch (e) {
-              console.error(`[wechat] notification delivery failed: ${e.message}`);
-              break; // Stop on first failure (likely token issue)
-            }
-          }
-          // Mark all delivered (including merged/skipped ones)
-          for (const n of pending) {
-            if (!merged.has(n.task_id || n.id) || merged.get(n.task_id || n.id).id !== n.id) {
-              markNotificationDelivered(n.id);
-            }
-          }
-          if (merged.size > 0) console.log(`[wechat] Delivered ${merged.size} pending notification(s)`);
-        }
-      } catch {}
+      await flushPendingNotifications();
     } catch (e) {
       if (e.message?.includes('session timeout') || e.message?.includes('-14')) {
-        console.error('[wechat] Session expired. Please re-login via Dashboard.');
+        console.error('[wechat] Session expired (errcode -14). Please re-login via Dashboard.');
+        lastError = { at: new Date().toISOString(), code: 'session_expired', message: 'Session expired (errcode -14). Re-scan QR to reconnect.' };
         polling = false;
         session = null;
         return;
       }
       console.error(`[wechat] Poll error: ${e.message}`);
+      lastError = { at: new Date().toISOString(), code: 'poll_error', message: e.message };
       await new Promise(r => setTimeout(r, 3000));
     }
   }
@@ -533,6 +604,57 @@ async function pollLoop() {
 // --- Send to WeChat ---
 
 const CONTEXT_TOKEN_MAX_AGE_MS = 23 * 60 * 60_000; // 23h (buffer before 24h expiry)
+
+// ── Pending notification flush ────────────────────────────
+// Called from two paths:
+//   1. pollLoop each tick (fallback, in case events are missed)
+//   2. eventbus 'notification_queued' subscriber → immediate flush
+// Single-flight: overlapping calls collapse into one pass so we don't
+// double-send. We also skip when the bridge isn't connected — those
+// notifications stay 'pending' and get retried on the next call.
+
+let _flushInFlight = null;
+
+export async function flushPendingNotifications() {
+  if (!session?.token || !polling) return; // Bridge offline → keep in queue
+  if (_flushInFlight) return _flushInFlight;
+  _flushInFlight = (async () => {
+    try {
+      const { getPendingNotifications, markNotificationDelivered } = await import('./db.mjs');
+      const pending = getPendingNotifications('Chairman', 'wechat');
+      if (pending.length === 0) return;
+      // Merge: latest per (task_id || id). Older duplicates per task are
+      // discarded as the user only needs the freshest state.
+      const merged = new Map();
+      const discarded = [];
+      for (const n of pending) {
+        const key = n.task_id || n.id;
+        if (merged.has(key)) discarded.push(merged.get(key));
+        merged.set(key, n);
+      }
+      let sent = 0;
+      for (const [, notif] of merged) {
+        try {
+          await sendToWeChat(notif.content, '');
+          markNotificationDelivered(notif.id);
+          sent++;
+        } catch (e) {
+          console.error(`[wechat] notification delivery failed: ${e.message}`);
+          return; // Stop on first failure (token issue / network)
+        }
+      }
+      // Older duplicates were never sent — mark them delivered too so they
+      // don't accumulate. The newest version represents the user-visible state.
+      for (const n of discarded) markNotificationDelivered(n.id);
+      if (sent > 0) console.log(`[wechat] Delivered ${sent} pending notification(s) (collapsed from ${pending.length})`);
+    } catch (e) {
+      console.error('[wechat] flushPending error:', e.message);
+    } finally {
+      _flushInFlight = null;
+    }
+  })();
+  return _flushInFlight;
+}
 
 export async function sendToWeChat(text, toUserId, contextToken) {
   if (!session?.token) throw new Error('WeChat not connected');
@@ -565,18 +687,58 @@ export async function sendToWeChat(text, toUserId, contextToken) {
 // --- Status ---
 
 export function getStatus() {
+  // status: single field that drives the Dashboard pill — keeps the panel
+  // contract simple. Old { connected, polling, loginInProgress } fields are
+  // retained for any consumer that still reads them.
+  let status;
+  if (loginInProgress) status = 'scanning';
+  else if (session?.token && polling) status = 'connected';
+  else status = 'disconnected';
+
   return {
+    status,
     connected: !!session?.token && polling,
     polling,
     loginInProgress,
     qrcode: loginQRData?.qrcode_img_content || null,
+    // qr = renderable PNG data URL (preferred for <img src>). Falls back to
+    // the raw deep-link if QR encoding failed (legacy clients can still
+    // attempt to render it as a link).
+    qr: loginQRData?.qr_data_url || loginQRData?.qrcode_img_content || null,
+    qrcode_url: loginQRData?.qrcode_img_content || null,
     accountId: session?.accountId || null,
     baseUrl: session?.baseUrl || null,
+    lastError,
   };
 }
 
+// stopPolling is the soft path — pauses the long-poll loop but keeps the
+// session in memory + on disk so a restart auto-resumes. NOT what 解绑
+// should do.
 export function stopPolling() {
   polling = false;
+}
+
+// disconnectAndLogout is the hard path — what the Dashboard 解绑 button
+// (POST /api/wechat/disconnect) means: stop polling, clear in-memory
+// session, delete the token file. Next bind starts from a fresh QR.
+export function disconnectAndLogout() {
+  polling = false;
+  loginInProgress = false;
+  loginQRData = null;
+  session = null;
+  getUpdatesBuf = '';
+  lastFromUserId = '';
+  contextTokens.clear();
+  lastError = null;
+  try {
+    if (existsSync(TOKEN_FILE)) {
+      unlinkSync(TOKEN_FILE);
+      console.log(`[wechat] Token file deleted: ${TOKEN_FILE}`);
+    }
+  } catch (e) {
+    console.error('[wechat] Failed to delete token file:', e.message);
+  }
 }
 
 // Alias for backward compatibility
@@ -584,9 +746,22 @@ export const uploadAndSendImage = uploadAndSendFile;
 
 // --- Init ---
 
+let _eventbusUnsub = null;
+
 export function init(messageCallback) {
   onMessageReceived = messageCallback;
   if (loadSession()) {
     startPolling();
+  }
+  // Subscribe to 'notification_queued' so DB writes trigger an immediate
+  // push instead of waiting up to 42s for the next getupdates timeout.
+  // Subscribe only once per process — re-entry is a noop.
+  if (!_eventbusUnsub) {
+    import('./eventbus.mjs').then(({ subscribe }) => {
+      _eventbusUnsub = subscribe('notification_queued', (event) => {
+        if (event.target !== 'Chairman' || event.channel !== 'wechat') return;
+        flushPendingNotifications().catch(() => {});
+      });
+    }).catch(e => console.error('[wechat] eventbus subscribe failed:', e.message));
   }
 }

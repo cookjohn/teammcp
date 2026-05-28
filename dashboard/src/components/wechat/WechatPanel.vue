@@ -9,6 +9,8 @@ const t = inject('t', (k) => k)
 
 const status = ref('unknown')
 const qrData = ref('')
+const accountId = ref('')
+const lastError = ref(null)
 let pollTimer = null
 
 function headers() {
@@ -18,12 +20,25 @@ function headers() {
   }
 }
 
+function applyStatus(data) {
+  status.value = data.status || 'disconnected'
+  accountId.value = data.accountId || ''
+  lastError.value = data.lastError || null
+  // While scanning, the status poll also carries the QR (PNG data URL).
+  // Keep qrData in sync so re-opening the panel mid-scan still shows it.
+  if (data.status === 'scanning') {
+    const qr = data.qr || data.qrcode || ''
+    if (qr) qrData.value = qr
+  } else if (data.status === 'connected' || data.status === 'disconnected') {
+    qrData.value = ''
+  }
+}
+
 async function init() {
   try {
     const res = await fetch('/api/wechat/status', { headers: headers() })
     if (res.ok) {
-      const data = await res.json()
-      status.value = data.status || 'disconnected'
+      applyStatus(await res.json())
     } else {
       status.value = 'disconnected'
     }
@@ -79,7 +94,7 @@ function startPoll() {
       const res = await fetch('/api/wechat/status', { headers: headers() })
       if (res.ok) {
         const data = await res.json()
-        status.value = data.status || 'disconnected'
+        applyStatus(data)
         if (data.status === 'connected') {
           stopPoll()
           qrData.value = ''
@@ -116,6 +131,12 @@ onUnmounted(() => {
          : status === 'scanning' ? t('wechat.scanning')
          : t('wechat.disconnected') }}
       </span>
+      <span v-if="status === 'connected' && accountId" class="wechat-account">{{ accountId }}</span>
+    </div>
+
+    <!-- Last error (session timeout / poll error) -->
+    <div v-if="lastError && status !== 'connected'" class="wechat-error">
+      {{ lastError.message }}
     </div>
 
     <!-- QR code when scanning -->
@@ -193,6 +214,27 @@ onUnmounted(() => {
 .wechat-status-text {
   font-size: 13px;
   color: var(--text-dim);
+}
+
+.wechat-account {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: monospace;
+  margin-left: auto;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wechat-error {
+  font-size: 11px;
+  color: var(--red);
+  background: rgba(229, 83, 75, 0.08);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  margin-bottom: 10px;
+  line-height: 1.4;
 }
 
 .wechat-qr {

@@ -1,9 +1,11 @@
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, inject } from 'vue'
 
 const props = defineProps({
   api: { type: Function, required: true }
 })
+
+const t = inject('t')
 
 const health = ref(null)
 const loading = ref(true)
@@ -52,53 +54,53 @@ onUnmounted(() => {
 <template>
   <div class="daemon-health">
     <div class="panel-header">
-      <h3>PTY Daemon Health</h3>
+      <h3>{{ t('memory.daemon.title') }}</h3>
       <div :class="['status-indicator', health?.status || 'unknown']" :style="{ background: statusColor(health?.status) }">
-        {{ health?.status || 'Unknown' }}
+        {{ health?.status || t('memory.daemon.unknown') }}
       </div>
     </div>
 
-    <div v-if="loading" class="loading">Checking daemon status...</div>
+    <div v-if="loading" class="loading">{{ t('memory.daemon.checking') }}</div>
 
     <div v-else-if="health" class="health-content">
       <div class="health-grid">
         <div class="health-card">
-          <div class="health-label">Status</div>
+          <div class="health-label">{{ t('memory.daemon.status') }}</div>
           <div class="health-value" :style="{ color: statusColor(health.status) }">
             {{ health.status }}
           </div>
         </div>
         <div v-if="health.uptime_s" class="health-card">
-          <div class="health-label">Uptime</div>
+          <div class="health-label">{{ t('memory.daemon.uptime') }}</div>
           <div class="health-value">{{ formatUptime(health.uptime_s) }}</div>
         </div>
         <div v-if="health.agents_running !== undefined" class="health-card">
-          <div class="health-label">Active Agents</div>
+          <div class="health-label">{{ t('memory.daemon.activeAgents') }}</div>
           <div class="health-value">{{ health.agents_running }}</div>
         </div>
         <div v-if="health.buffer_size !== undefined" class="health-card">
-          <div class="health-label">Buffer Size</div>
+          <div class="health-label">{{ t('memory.daemon.bufferSize') }}</div>
           <div class="health-value">{{ health.buffer_size }}</div>
         </div>
         <div v-if="health.memory_mb" class="health-card">
-          <div class="health-label">Memory</div>
+          <div class="health-label">{{ t('memory.daemon.memoryMb') }}</div>
           <div class="health-value">{{ health.memory_mb }} MB</div>
         </div>
         <div v-if="health.connected !== undefined" class="health-card">
-          <div class="health-label">IPC Connected</div>
+          <div class="health-label">{{ t('memory.daemon.ipcConnected') }}</div>
           <div class="health-value" :style="{ color: health.connected ? '#3dd68c' : '#e5534b' }">
-            {{ health.connected ? 'Yes' : 'No' }}
+            {{ health.connected ? t('memory.daemon.yes') : t('memory.daemon.no') }}
           </div>
         </div>
       </div>
 
       <div v-if="health.error" class="health-error">
-        Error: {{ health.error }}
+        {{ t('memory.daemon.error') }}: {{ health.error }}
       </div>
     </div>
 
     <div v-else class="empty-state">
-      <div>Daemon health data unavailable</div>
+      <div>{{ t('memory.daemon.noData') }}</div>
     </div>
   </div>
 </template>

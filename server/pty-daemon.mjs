@@ -62,6 +62,12 @@ const ENV_ALLOW_LIST = Object.freeze(new Set([
   // these but api_key agents do; the daemon doesn't distinguish.
   'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL',
   'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_MODEL',
+  // codex-pty runtime: CODEX_HOME points the codex.exe child at a per-agent
+  // config dir (model_reasoning_effort/approval_policy/sandbox_mode overrides
+  // without touching ~/.codex/). The DISABLE_KEYBOARD_ENHANCEMENT one is
+  // intentionally set EMPTY by the runner — we depend on win32-input-mode
+  // staying ON for paste/Enter injection. See server/codex-pty-runner.mjs.
+  'CODEX_HOME', 'CODEX_TUI_DISABLE_KEYBOARD_ENHANCEMENT',
 ]));
 
 // Prefix blacklist — any key STARTING WITH one of these is rejected even if
@@ -1354,12 +1360,45 @@ export function reattachAgent(agent, handleId, resumeFromSeq, maxReplayBytes, ca
 }
 
 /**
- * v1.1 watchdog.pong payload — daemon side.
+ * v1.1 watchdog.pong payload — daemon side. Returns enough signal for
+ * an observability layer to render an actual health verdict (not just
+ * "I exist"). Each handle exposes credit + paused state so a stuck PTY
+ * (e.g. client failing to ack) is immediately visible.
  */
 export function getWatchdogStatus() {
+  const memUsage = process.memoryUsage();
+  const handles = [];
+  let totalPendingChunks = 0;
+  let pausedCount = 0;
+  for (const [agent, entry] of agents) {
+    handles.push({
+      agent,
+      handleId: entry.handleId,
+      pid: entry.pid,
+      uptimeSec: Math.floor((Date.now() - entry.startTime) / 1000),
+      credit: entry.credit,
+      seq: entry.seq,
+      cumulativeEmittedBytes: entry.cumulativeEmittedBytes,
+      cumulativeAckedBytes: entry.cumulativeAckedBytes,
+      paused: !!entry.paused,
+      pendingQueueLen: entry.pendingQueue?.length || 0,
+    });
+    totalPendingChunks += entry.pendingQueue?.length || 0;
+    if (entry.paused) pausedCount++;
+  }
   return {
     daemonUptime: Math.floor((Date.now() - startTime) / 1000),
     handleCount: agents.size,
+    pausedCount,
+    totalPendingChunks,
+    memoryMb: Math.round(memUsage.rss / 1024 / 1024 * 100) / 100,
+    eventBuffer: {
+      items: eventBuffer.length,
+      bytes: eventBuffer.memoryBytes,
+      level: eventBuffer.level,
+    },
+    spawnStats: getSpawnStats(),
+    handles,
   };
 }
 

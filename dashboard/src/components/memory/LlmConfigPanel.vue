@@ -1,9 +1,11 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, inject } from 'vue'
 
 const props = defineProps({
   api: { type: Function, required: true }
 })
+
+const t = inject('t')
 
 const configs = ref([])
 const loading = ref(true)
@@ -60,7 +62,7 @@ async function saveConfig() {
     await loadConfigs()
     editing.value = null
   } catch (err) {
-    alert('Save failed: ' + err.message)
+    alert(t('memory.llm.saveFailed') + ': ' + err.message)
   } finally {
     saving.value = false
   }
@@ -94,11 +96,11 @@ onMounted(() => loadConfigs())
 <template>
   <div class="llm-config-panel">
     <div class="panel-header">
-      <h3>LLM Configuration</h3>
-      <p class="panel-desc">Configure LLM providers for memory classification, summarization, and queries.</p>
+      <h3>{{ t('memory.llm.title') }}</h3>
+      <p class="panel-desc">{{ t('memory.llm.desc') }}</p>
     </div>
 
-    <div v-if="loading" class="loading">Loading configs...</div>
+    <div v-if="loading" class="loading">{{ t('memory.llm.loading') }}</div>
 
     <div v-else class="config-list">
       <div v-for="config in configs" :key="config.purpose" class="config-card">
@@ -111,25 +113,25 @@ onMounted(() => loadConfigs())
             v-if="editing !== config.purpose"
             class="btn-sm"
             @click="startEdit(config)"
-          >Edit</button>
+          >{{ t('memory.llm.edit') }}</button>
         </div>
 
         <!-- Read-only view -->
         <div v-if="editing !== config.purpose" class="config-readonly">
           <div class="config-row">
-            <span class="config-key">Provider</span>
+            <span class="config-key">{{ t('memory.llm.provider') }}</span>
             <span class="config-val">{{ config.provider }}</span>
           </div>
           <div class="config-row">
-            <span class="config-key">Model</span>
+            <span class="config-key">{{ t('memory.llm.model') }}</span>
             <span class="config-val">{{ config.model }}</span>
           </div>
           <div class="config-row">
-            <span class="config-key">API Key</span>
-            <span class="config-val">{{ config.api_key_masked || 'Not set' }}</span>
+            <span class="config-key">{{ t('memory.llm.apiKey') }}</span>
+            <span class="config-val">{{ config.api_key_masked || t('memory.llm.notSet') }}</span>
           </div>
           <div class="config-row">
-            <span class="config-key">Max Cost/Day</span>
+            <span class="config-key">{{ t('memory.llm.maxCostDay') }}</span>
             <span class="config-val">${{ config.max_daily_cost_usd }}</span>
           </div>
         </div>
@@ -137,60 +139,60 @@ onMounted(() => loadConfigs())
         <!-- Edit form -->
         <div v-else class="config-edit">
           <div class="form-group">
-            <label>Provider</label>
+            <label>{{ t('memory.llm.provider') }}</label>
             <select v-model="editForm.provider" class="form-input">
               <option v-for="p in PROVIDER_OPTIONS" :key="p" :value="p">{{ p }}</option>
             </select>
           </div>
           <div class="form-group">
-            <label>Model</label>
+            <label>{{ t('memory.llm.model') }}</label>
             <input v-model="editForm.model" class="form-input" placeholder="claude-3-5-haiku-20241022" />
           </div>
           <div class="form-group">
-            <label>API Key <span class="hint">(leave blank to keep existing)</span></label>
+            <label>{{ t('memory.llm.apiKey') }} <span class="hint">{{ t('memory.llm.apiKeyHint') }}</span></label>
             <input v-model="editForm.api_key" type="password" class="form-input" placeholder="sk-..." />
           </div>
           <div v-if="editForm.provider !== 'anthropic'" class="form-group">
-            <label>Base URL</label>
+            <label>{{ t('memory.llm.baseUrl') }}</label>
             <input v-model="editForm.base_url" class="form-input" placeholder="https://api.openai.com" />
           </div>
           <div class="form-row">
             <div class="form-group">
-              <label>Max Tokens</label>
+              <label>{{ t('memory.llm.maxTokens') }}</label>
               <input v-model.number="editForm.max_tokens" type="number" class="form-input" />
             </div>
             <div class="form-group">
-              <label>Temperature</label>
+              <label>{{ t('memory.llm.temperature') }}</label>
               <input v-model.number="editForm.temperature" type="number" step="0.1" min="0" max="2" class="form-input" />
             </div>
           </div>
           <div class="form-row">
             <div class="form-group">
-              <label>Timeout (ms)</label>
+              <label>{{ t('memory.llm.timeoutMs') }}</label>
               <input v-model.number="editForm.timeout_ms" type="number" class="form-input" />
             </div>
             <div class="form-group">
-              <label>Max Cost/Day ($)</label>
+              <label>{{ t('memory.llm.maxCostDay') }} ($)</label>
               <input v-model.number="editForm.max_daily_cost_usd" type="number" step="0.1" class="form-input" />
             </div>
           </div>
           <div class="form-group">
             <label class="checkbox-label">
               <input type="checkbox" v-model="editForm.enabled" />
-              Enabled
+              {{ t('memory.llm.enabled') }}
             </label>
           </div>
           <div class="edit-actions">
             <button class="btn-sm" :disabled="saving" @click="saveConfig">
-              {{ saving ? 'Saving...' : 'Save' }}
+              {{ saving ? t('memory.llm.saving') : t('memory.llm.save') }}
             </button>
             <button class="btn-sm btn-ghost" @click="testConnection(config)" :disabled="testing === config.purpose">
-              {{ testing === config.purpose ? 'Testing...' : 'Test Connection' }}
+              {{ testing === config.purpose ? t('memory.llm.testing') : t('memory.llm.test') }}
             </button>
-            <button class="btn-sm btn-ghost" @click="cancelEdit">Cancel</button>
+            <button class="btn-sm btn-ghost" @click="cancelEdit">{{ t('memory.llm.cancel') }}</button>
           </div>
           <div v-if="testResult && testResult.purpose === config.purpose" :class="['test-result', testResult.success ? 'success' : 'error']">
-            {{ testResult.success ? `OK (${testResult.latency_ms}ms)` : `Failed: ${testResult.error}` }}
+            {{ testResult.success ? `OK (${testResult.latency_ms}ms)` : `${t('memory.llm.saveFailed')}: ${testResult.error}` }}
           </div>
         </div>
       </div>

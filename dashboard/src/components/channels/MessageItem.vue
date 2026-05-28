@@ -1,7 +1,9 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, inject } from 'vue'
 import { renderMarkdown } from '../../utils/markdown.js'
 import { formatTime, agentColor, agentInitial } from '../../utils/format.js'
+
+const t = inject('t')
 
 const REACTION_EMOJIS = ['👍', '👎', '❤️', '😄', '🎉', '👀', '🤔', '✅']
 
@@ -89,7 +91,7 @@ function selectReaction(emoji) {
     <!-- Reply indicator -->
     <div v-if="replyToMessage" class="reply-indicator">
       <span class="reply-icon">↱</span>
-      <span class="reply-text">Replying to <strong :style="{ color: agentColor(replyToMessage.from_agent) }">{{ replyToMessage.from_agent }}</strong></span>
+      <span class="reply-text">{{ t('msg.replyingTo') }} <strong :style="{ color: agentColor(replyToMessage.from_agent) }">{{ replyToMessage.from_agent }}</strong></span>
     </div>
 
     <div class="message-row">
@@ -103,15 +105,15 @@ function selectReaction(emoji) {
         <div class="message-header">
           <span class="sender-name" :style="{ color: senderColor }">{{ message.from_agent }}</span>
           <span v-if="sourceLabel" class="source-badge" :class="sourceBadgeClass">{{ sourceLabel }}</span>
-          <span v-if="isPinned" class="pin-badge" title="Pinned">📌</span>
-          <span v-if="message.edited_at" class="edited-badge">(edited)</span>
+          <span v-if="isPinned" class="pin-badge" :title="t('msg.pinned')">📌</span>
+          <span v-if="message.edited_at" class="edited-badge">{{ t('msg.edited') }}</span>
           <span class="msg-time">{{ formatTime(message.created_at) }}</span>
         </div>
 
         <div class="message-content" v-html="displayContent"></div>
 
         <button v-if="isLongMessage" class="toggle-btn" @click="collapsed = !collapsed">
-          {{ collapsed ? 'Show more...' : 'Show less' }}
+          {{ collapsed ? t('msg.showMore') : t('msg.showLess') }}
         </button>
 
         <!-- Reactions -->
@@ -130,11 +132,11 @@ function selectReaction(emoji) {
 
         <!-- Action buttons -->
         <div class="message-actions">
-          <button class="action-btn" @click="toggleReactionPicker" title="Add reaction">😊</button>
-          <button class="action-btn" @click="$emit('reply', message)" title="Reply">↩</button>
+          <button class="action-btn" @click="toggleReactionPicker" :title="t('msg.addReaction')">😊</button>
+          <button class="action-btn" @click="$emit('reply', message)" :title="t('msg.reply')">↩</button>
           <button
             class="action-btn"
-            :title="isPinned ? 'Unpin message' : 'Pin message'"
+            :title="isPinned ? t('msg.unpinMessage') : t('msg.pinMessage')"
             @click="isPinned ? $emit('unpin', message.id) : $emit('pin', message.id)"
           >📌</button>
         </div>

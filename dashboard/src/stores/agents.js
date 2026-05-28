@@ -31,12 +31,21 @@ export function useAgentsStore(api) {
 
   async function startAgent(name) {
     await api(`/api/agents/${encodeURIComponent(name)}/start`, { method: 'POST' })
+    // Immediate refresh — picks up status="starting" / pid.
     await loadAgents()
+    // codex-pty agents take 5-15s before their MCP plugin connects via SSE
+    // and flips status to "online". The SSE broadcast handles the live
+    // update, but if the Dashboard tab lost the SSE event for any reason
+    // this fallback poll catches up. Cheap and idempotent.
+    setTimeout(() => { loadAgents().catch(() => {}) }, 8000)
   }
 
   async function stopAgent(name) {
     await api(`/api/agents/${encodeURIComponent(name)}/stop`, { method: 'POST' })
     await loadAgents()
+    // Stop is mostly instant, but the SSE plugin's disconnect (which flips
+    // status→offline server-side) trails the kill by ~500ms on Windows.
+    setTimeout(() => { loadAgents().catch(() => {}) }, 1500)
   }
 
   async function toggleResume(name, enable) {

@@ -152,6 +152,13 @@ function buildSanitizedDaemonEnv(isDev) {
   if (process.env.AGENTS_BASE_DIR !== undefined) {
     sanitized.AGENTS_BASE_DIR = process.env.AGENTS_BASE_DIR;
   }
+  // Allow extending the daemon's cmd allowlist via env (e.g. codex.exe lives
+  // deep in a per-platform npm package and won't be found by `where codex`,
+  // which only resolves the npm shim — so the explicit absolute path needs
+  // to be injected here).
+  if (process.env.TEAMMCP_CMD_ALLOWLIST_EXTRA !== undefined) {
+    sanitized.TEAMMCP_CMD_ALLOWLIST_EXTRA = process.env.TEAMMCP_CMD_ALLOWLIST_EXTRA;
+  }
   return sanitized;
 }
 

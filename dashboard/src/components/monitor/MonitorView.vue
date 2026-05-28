@@ -8,11 +8,12 @@ const api = inject('api')
 const monitorStore = useMonitorStore(api)
 const agentsStore = useAgentsStore(api)
 
+// Labels resolved in template via $t('monitor.winXX').
 const windowOptions = [
-  { value: '15m', label: '15 min' },
-  { value: '1h', label: '1 hour' },
-  { value: '6h', label: '6 hours' },
-  { value: '24h', label: '24 hours' },
+  { value: '15m', key: 'monitor.win15m' },
+  { value: '1h',  key: 'monitor.win1h'  },
+  { value: '6h',  key: 'monitor.win6h'  },
+  { value: '24h', key: 'monitor.win24h' },
 ]
 const selectedWindow = ref('1h')
 const refreshTimer = ref(null)
@@ -98,9 +99,9 @@ onUnmounted(() => {
 <template>
   <div class="monitor-view">
     <div class="monitor-header">
-      <h2>{{ $t('nav.monitor') || 'Runtime Monitor' }}</h2>
+      <h2>{{ $t('nav.monitor') }}</h2>
       <select v-model="selectedWindow" @change="onWindowChange" class="window-select">
-        <option v-for="opt in windowOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+        <option v-for="opt in windowOptions" :key="opt.value" :value="opt.value">{{ $t(opt.key) }}</option>
       </select>
       <button class="refresh-btn" @click="loadAll" :disabled="monitorStore.loading.value">&#128260;</button>
     </div>
@@ -108,9 +109,9 @@ onUnmounted(() => {
     <div class="monitor-body">
       <!-- Agent Status Grid -->
       <div class="monitor-section">
-        <div class="section-title">Agent Status</div>
+        <div class="section-title">{{ $t('monitor.agentStatus') }}</div>
         <div v-if="monitorStore.loading.value && monitorStore.summary.value.byAgent.length === 0" class="monitor-empty">{{ $t('state.loading') }}</div>
-        <div v-else-if="monitorStore.summary.value.byAgent.length === 0" class="monitor-empty">No agent activity in this window</div>
+        <div v-else-if="monitorStore.summary.value.byAgent.length === 0" class="monitor-empty">{{ $t('monitor.noActivity') }}</div>
         <div v-else class="agent-status-grid">
           <div v-for="a in monitorStore.summary.value.byAgent" :key="a.agent" class="monitor-agent-card">
             <div class="monitor-agent-header">
@@ -118,10 +119,10 @@ onUnmounted(() => {
               <span class="monitor-agent-name" :style="{ color: agentColor(a.agent) }">{{ a.agent }}</span>
             </div>
             <div class="monitor-agent-stats">
-              <div class="stat-row"><span>Tool Calls</span><span class="stat-val">{{ a.tool_calls || 0 }}</span></div>
-              <div class="stat-row"><span>Failures</span><span class="stat-val">{{ a.failures || 0 }}</span></div>
-              <div class="stat-row"><span>Total Events</span><span class="stat-val">{{ a.total_events || 0 }}</span></div>
-              <div class="stat-row"><span>Last Seen</span><span class="stat-val">{{ a.last_seen ? formatTime(a.last_seen) : '-' }}</span></div>
+              <div class="stat-row"><span>{{ $t('monitor.toolCalls') }}</span><span class="stat-val">{{ a.tool_calls || 0 }}</span></div>
+              <div class="stat-row"><span>{{ $t('monitor.failures') }}</span><span class="stat-val">{{ a.failures || 0 }}</span></div>
+              <div class="stat-row"><span>{{ $t('monitor.totalEvents') }}</span><span class="stat-val">{{ a.total_events || 0 }}</span></div>
+              <div class="stat-row"><span>{{ $t('monitor.lastSeen') }}</span><span class="stat-val">{{ a.last_seen ? formatTime(a.last_seen) : '-' }}</span></div>
             </div>
           </div>
         </div>
@@ -129,14 +130,14 @@ onUnmounted(() => {
 
       <!-- Tool Usage Timeline -->
       <div class="monitor-section">
-        <div class="section-title">Tool Usage Timeline</div>
-        <div v-if="monitorStore.toolTimeline.value.length === 0" class="monitor-empty">No tool usage events yet</div>
+        <div class="section-title">{{ $t('monitor.toolTimeline') }}</div>
+        <div v-if="monitorStore.toolTimeline.value.length === 0" class="monitor-empty">{{ $t('monitor.noToolEvents') }}</div>
         <div v-else class="tool-timeline">
           <div class="timeline-header">
-            <span>Time</span>
-            <span>Agent</span>
-            <span>Tool</span>
-            <span>Response</span>
+            <span>{{ $t('monitor.colTime') }}</span>
+            <span>{{ $t('monitor.colAgent') }}</span>
+            <span>{{ $t('monitor.colTool') }}</span>
+            <span>{{ $t('monitor.colResponse') }}</span>
           </div>
           <div v-for="(item, i) in monitorStore.toolTimeline.value" :key="i" class="timeline-row">
             <span class="timeline-time">{{ formatTime(item.timestamp) }}</span>

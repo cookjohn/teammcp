@@ -69,6 +69,15 @@ The team's complete knowledge exists not only in a central database but is distr
 
 ## Quick Start
 
+### Prerequisites
+
+- **Node.js 22+** — to run the server
+- **Claude Code CLI** — `npm i -g @anthropic-ai/claude-code` then `claude login`. Agents you register with the `claude` runtime spawn this binary.
+- **Bun** ([install](https://bun.sh)) — the fakechat channel plugin that ships inside each `claude` agent runs on Bun. Without it agents start but never connect to SSE.
+- *(Optional)* **OpenAI Codex CLI** — `npm i -g @openai/codex` then `codex login`, only if you want `codex-pty` runtime agents.
+
+The dashboard surfaces missing dependencies in its top-right health badge once you log in, so you can verify the install before registering agents.
+
 ### Option A: NPM (Recommended)
 
 ```bash
@@ -87,7 +96,50 @@ npm start
 # Open http://localhost:3100
 ```
 
-The Dashboard will guide you through creating your account and adding Agents.
+### Option C: Linux server deployment
+
+The dashboard / API / wizard run fine on Linux. Agent process management uses a headless `node-pty` path (no Terminal.app, no PTY daemon). One caveat that bites every fresh install: **the claude CLI refuses `--dangerously-skip-permissions` when running as root**, so the server must run under a non-root user. The setup script handles this end-to-end:
+
+```bash
+# As root, from inside the cloned source
+sudo bash scripts/setup-linux.sh
+```
+
+What it does (idempotent):
+
+| Step | Detail |
+|---|---|
+| Create user | `teammcp` (system user, home `/home/teammcp`) |
+| OS deps | `unzip` + `python3` + `make` + `g++` (node-pty needs to compile) |
+| Code → `/opt/teammcp` | rsync-syncs your checkout, chowns to teammcp |
+| Data → `/home/teammcp/teammcp-data` | `TEAMMCP_HOME` for the service |
+| claude CLI | `npm i -g @anthropic-ai/claude-code` |
+| bun | installed under `/home/teammcp/.bun/`, symlinked into `/usr/local/bin` so the boot health-check finds it (the default install lands under `/root/.bun/` which the `teammcp` user can't traverse) |
+| Dashboard | `vite build` into `server/public/` |
+| systemd | `teammcp.service`, runs as `teammcp` user, logs to journald, auto-restart on failure |
+
+After it finishes, log in claude **as the teammcp user** so spawned agents pick up the OAuth credentials:
+
+```bash
+sudo -u teammcp -i claude /login
+systemctl start teammcp.service
+journalctl -u teammcp.service -f
+```
+
+Open `http://<host>:3100` and walk through the wizard.
+
+### First-run walkthrough
+
+The dashboard auto-launches a 6-step Setup Wizard the first time you open it with zero registered agents. The wizard:
+
+1. **Welcome** — quick intro.
+2. **Basic config** — where agent data lives (defaults to `${TEAMMCP_HOME}/agents`, override if you want), optional codex.exe path, optional registration secret. Inputs are written to `${TEAMMCP_HOME}/data/user-config.json` so they survive restarts.
+3. **Your profile** — register yourself as the team leader and receive an API key (save it — it's only shown once).
+4. **First worker agent** — pick a name, role, runtime (`claude` or `codex-pty`), and auth mode.
+5. **Setup complete** — click *Start &lt;agent name&gt; now* to bring the agent online in one click. Or use the Agents tab later.
+6. **Tour** — overview of the four main views (Channels, Tasks, Agents, State).
+
+After the wizard you're logged in. Open the **Channels** tab and chat with your agent.
 
 ### Claude Code Auto-Setup (Recommended)
 

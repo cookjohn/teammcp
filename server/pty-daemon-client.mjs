@@ -223,6 +223,17 @@ export async function getScrollback(agent, lines = 100) {
   return _request(IPC_METHODS.PTY_SCROLLBACK, { agent, lines });
 }
 
+/**
+ * Send a v1.1 watchdog.ping and return the daemon's enriched status
+ * snapshot. Used by /api/watchdog/status to surface per-handle health
+ * (credit, paused state) that the legacy /api/pty-daemon/health does
+ * not expose. nonce is included for symmetry with the protocol.
+ */
+export async function watchdogPing() {
+  const { randomBytes } = await import('node:crypto');
+  return _request(IPC_METHODS.WATCHDOG_PING, { nonce: randomBytes(8).toString('hex') });
+}
+
 // ── Subscriptions ─────────────────────────────────────────────
 
 /**
@@ -474,6 +485,42 @@ function _handleMessage(msg) {
           ? Buffer.from(data, 'base64')
           : Buffer.from(data ?? '');
         _events.emit('pty.output', agent, buf);
+        break;
+      }
+      case IPC_METHODS.PTY_DATA: {
+        // v1.1 path. Daemon emits pty.data (NOT pty.output) once both sides
+        // negotiate '1.1'. Payload shape from pty-daemon.mjs:
+        //   { agentId, handleId, seq, bytes, data: <base64>, timestamp }
+        // We:
+        //   1. Decode to Buffer + emit 'pty.output' (legacy event name so
+        //      index.mjs's onPtyOutput callback receives it unchanged).
+        //   2. Send pty.ack so daemon credit refills. CRITICAL: daemon-side
+        //      handlePtyAck (pty-daemon-ipc.mjs:1141) requires `handleId`
+        //      AND `bytesConsumed`. Sending only `agent`/`agentId` makes
+        //      the daemon drop the ack → INITIAL_CREDIT runs out at 64 KiB
+        //      → daemon pauses node-pty → terminal appears stuck.
+        const params = msg.params ?? {};
+        const agent = params.agentId || params.agent;
+        const handleId = params.handleId;
+        const bytes = params.bytes ?? 0;
+        const buf = params.data
+          ? Buffer.from(params.data, 'base64')
+          : Buffer.alloc(0);
+        if (agent && buf.length > 0) {
+          _events.emit('pty.output', agent, buf);
+        }
+        // Fire-and-forget ack. Notification (no id), no response expected.
+        if (handleId && bytes > 0 && _socket && _socket.writable) {
+          try {
+            const ackMsg = buildNotification(IPC_METHODS.PTY_ACK, {
+              handleId,
+              bytesConsumed: bytes,
+            });
+            _writeToSocket(_socket, ackMsg);
+          } catch (e) {
+            warn('pty.ack send failed:', e.message);
+          }
+        }
         break;
       }
       case IPC_METHODS.PTY_EXIT: {

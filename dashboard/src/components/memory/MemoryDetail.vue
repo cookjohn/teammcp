@@ -1,6 +1,10 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, inject } from 'vue'
 import { formatTime, formatDate } from '../../utils/format.js'
+
+const t = inject('t')
+function levelLabel(level) { return level ? t('memory.level.' + level) || level : level }
+function categoryLabel(cat) { return cat ? t('memory.category.' + cat) || cat : cat }
 
 const props = defineProps({
   memory: { type: Object, required: true }
@@ -50,10 +54,10 @@ const LEVEL_OPTIONS = ['critical', 'important', 'lesson', 'routine']
       <!-- Level + Category badges -->
       <div class="detail-badges">
         <span class="level-badge" :style="{ background: levelColor(memory.level) }">
-          {{ memory.level }}
+          {{ levelLabel(memory.level) }}
         </span>
-        <span class="category-badge">{{ memory.category }}</span>
-        <span v-if="memory.pinned" class="pin-badge">Pinned</span>
+        <span class="category-badge">{{ categoryLabel(memory.category) }}</span>
+        <span v-if="memory.pinned" class="pin-badge">{{ t('memory.detail.pinned') }}</span>
       </div>
 
       <!-- Agent + time -->
@@ -67,13 +71,13 @@ const LEVEL_OPTIONS = ['critical', 'important', 'lesson', 'routine']
 
       <!-- Summary -->
       <div class="detail-section">
-        <div class="section-title">Summary</div>
+        <div class="section-title">{{ t('memory.detail.summary') }}</div>
         <div class="section-content">{{ memory.summary }}</div>
       </div>
 
       <!-- Tags -->
       <div v-if="tags.length > 0" class="detail-section">
-        <div class="section-title">Tags</div>
+        <div class="section-title">{{ t('memory.detail.tags') }}</div>
         <div class="tags-list">
           <span v-for="tag in tags" :key="tag" class="tag">{{ tag }}</span>
         </div>
@@ -82,23 +86,23 @@ const LEVEL_OPTIONS = ['critical', 'important', 'lesson', 'routine']
       <!-- Raw event (collapsible) -->
       <div v-if="memory.raw_event" class="detail-section">
         <div class="section-title collapsible" @click="showRaw = !showRaw">
-          Raw Event {{ showRaw ? '\u25B2' : '\u25BC' }}
+          {{ t('memory.detail.rawEvent') }} {{ showRaw ? '\u25B2' : '\u25BC' }}
         </div>
         <pre v-if="showRaw" class="raw-event">{{ memory.raw_event }}</pre>
       </div>
 
       <!-- TTL + access info -->
       <div class="detail-section detail-info">
-        <div>TTL: {{ memory.ttl_days }} days</div>
-        <div>Access count: {{ memory.access_count }}</div>
-        <div v-if="memory.expires_at">Expires: {{ formatDate(memory.expires_at) }}</div>
+        <div>{{ t('memory.detail.ttl') }}: {{ memory.ttl_days }} {{ t('memory.detail.days') }}</div>
+        <div>{{ t('memory.detail.accessCount') }}: {{ memory.access_count }}</div>
+        <div v-if="memory.expires_at">{{ t('memory.detail.expires') }}: {{ formatDate(memory.expires_at) }}</div>
       </div>
     </div>
 
     <!-- Actions -->
     <div class="detail-actions">
       <button class="btn-sm" @click="togglePin">
-        {{ memory.pinned ? 'Unpin' : 'Pin' }}
+        {{ memory.pinned ? t('memory.detail.unpin') : t('memory.detail.pin') }}
       </button>
       <select
         :value="memory.level"
@@ -106,10 +110,10 @@ const LEVEL_OPTIONS = ['critical', 'important', 'lesson', 'routine']
         class="level-select"
       >
         <option v-for="l in LEVEL_OPTIONS" :key="l" :value="l">
-          {{ l.charAt(0).toUpperCase() + l.slice(1) }}
+          {{ levelLabel(l) }}
         </option>
       </select>
-      <button class="btn-sm btn-danger" @click="emit('delete', memory.id)">Delete</button>
+      <button class="btn-sm btn-danger" @click="emit('delete', memory.id)">{{ t('memory.detail.delete') }}</button>
     </div>
   </div>
 </template>

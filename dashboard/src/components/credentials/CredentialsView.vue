@@ -269,7 +269,7 @@ onMounted(() => {
       <div class="cred-overview-bar" v-if="localStore.overview.value">
         <div class="cred-stat-card">
           <div class="stat-value">{{ (localStore.overview.value.agents || []).length }}</div>
-          <div class="stat-label">{{ t('credentials.agent') }}s</div>
+          <div class="stat-label">{{ t('credentials.agents') }}</div>
         </div>
         <div class="cred-stat-card green">
           <div class="stat-value">{{ (localStore.overview.value.agents || []).filter(a => a.auth_strategy === 'path_a').length }}</div>
@@ -355,11 +355,14 @@ onMounted(() => {
               <td>
                 <span class="agent-name" :style="{ color: agentColor(lease.agent) }">{{ lease.agent || '-' }}</span>
               </td>
-              <td class="dim">{{ lease.leased_at ? formatDate(lease.leased_at) + ' ' + formatTime(lease.leased_at) : '-' }}</td>
-              <td class="dim">{{ lease.expires_at ? formatDate(lease.expires_at) + ' ' + formatTime(lease.expires_at) : '-' }}</td>
+              <td class="dim">{{ lease.leased_at ? formatDate(lease.leased_at, t) + ' ' + formatTime(lease.leased_at) : '-' }}</td>
+              <td class="dim">{{ lease.expires_at ? formatDate(lease.expires_at, t) + ' ' + formatTime(lease.expires_at) : '-' }}</td>
               <td>
                 <span class="status-dot" :class="lease.status === 'active' ? 'online' : (lease.status === 'revoked' ? 'offline' : 'warn')"></span>
-                {{ lease.status ? lease.status.charAt(0).toUpperCase() + lease.status.slice(1) : 'Unknown' }}
+                {{ lease.status === 'active' ? t('credentials.statusActive')
+                   : lease.status === 'revoked' ? t('credentials.statusRevoked')
+                   : lease.status === 'expired' ? t('credentials.statusExpired')
+                   : t('credentials.statusUnknown') }}
               </td>
               <td>
                 <button
@@ -376,7 +379,7 @@ onMounted(() => {
 
         <!-- Pagination -->
         <div v-if="localStore.leasesTotal.value > 50" class="leases-pagination">
-          <span>{{ t('credentials.page') }} {{ leasesPage }} {{ t('credentials.of') }} {{ totalPages }} ({{ localStore.leasesTotal.value }} total)</span>
+          <span>{{ t('credentials.page') }} {{ leasesPage }} {{ t('credentials.of') }} {{ totalPages }} ({{ localStore.leasesTotal.value }} {{ t('credentials.total') }})</span>
           <button v-if="leasesPage > 1" class="btn-pagination" @click="loadPage(leasesPage - 1)">&larr;</button>
           <button v-if="leasesPage < totalPages" class="btn-pagination" @click="loadPage(leasesPage + 1)">&rarr;</button>
         </div>
@@ -391,11 +394,11 @@ onMounted(() => {
             <span>{{ localStore.overview.value.tokenStatus.isValid ? t('credentials.connected') : t('credentials.disconnected') }}</span>
           </div>
           <div v-if="localStore.overview.value.tokenStatus.expiresAt" class="tokenstore-meta">
-            Expires: {{ new Date(localStore.overview.value.tokenStatus.expiresAt).toLocaleString() }}
+            {{ t('credentials.expires') }}: {{ new Date(localStore.overview.value.tokenStatus.expiresAt).toLocaleString() }}
             <span class="dim">({{ localStore.overview.value.tokenStatus.expiresIn }})</span>
           </div>
           <div v-if="localStore.overview.value.tokenStatus.lastRefresh" class="tokenstore-meta">
-            {{ t('credentials.lastRefresh') }}: {{ formatDate(localStore.overview.value.tokenStatus.lastRefresh) }} {{ formatTime(localStore.overview.value.tokenStatus.lastRefresh) }}
+            {{ t('credentials.lastRefresh') }}: {{ formatDate(localStore.overview.value.tokenStatus.lastRefresh, t) }} {{ formatTime(localStore.overview.value.tokenStatus.lastRefresh) }}
           </div>
           <div class="tokenstore-actions">
             <button class="btn-token" @click="refreshOAuth" :disabled="refreshing">{{ t('credentials.refresh') }}</button>
@@ -406,9 +409,9 @@ onMounted(() => {
                some browser configurations. -->
           <div v-if="oauthPending" class="oauth-paste-form">
             <p class="oauth-paste-hint">
-              1. 在新标签页登录 Anthropic<br>
-              2. 登录后会被 redirect 到 <code>platform.claude.com/oauth/code/callback?code=...&state=...</code><br>
-              3. <strong>复制那个完整 URL（或只复制 code）</strong>，粘贴到下面，点完成
+              1. {{ t('credentials.oauthStep1') }}<br>
+              2. {{ t('credentials.oauthStep2Prefix') }} <code>platform.claude.com/oauth/code/callback?code=...&state=...</code><br>
+              3. <strong>{{ t('credentials.oauthStep3') }}</strong>
             </p>
             <input
               type="text"
@@ -421,9 +424,9 @@ onMounted(() => {
             />
             <div class="oauth-paste-actions">
               <button class="btn-token" @click="submitOAuthCode" :disabled="oauthSubmitting || !oauthPasted">
-                {{ oauthSubmitting ? '提交中...' : '完成登录' }}
+                {{ oauthSubmitting ? t('credentials.oauthSubmitting') : t('credentials.oauthSubmit') }}
               </button>
-              <button class="btn-token btn-cancel" @click="cancelOAuthLogin" :disabled="oauthSubmitting">取消</button>
+              <button class="btn-token btn-cancel" @click="cancelOAuthLogin" :disabled="oauthSubmitting">{{ t('credentials.cancel') }}</button>
             </div>
             <div v-if="oauthError" class="oauth-paste-error">{{ oauthError }}</div>
           </div>

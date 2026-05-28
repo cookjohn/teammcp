@@ -1,0 +1,20 @@
+# cwd-local codex config for the inbound-bridge experiments.
+# codex 0.133+ reads ~/.codex/config.toml globally; whether it also reads
+# <cwd>/.codex/config.toml is what we're about to verify. If it doesn't,
+# we fall back to globally registering teammcp-codextest before each test
+# and removing it after, OR using -c overrides on the command line.
+
+# Use low effort — for an ACK/inbox-handler agent, deep reasoning wastes
+# tokens. With "low", a 2-tool-call cycle should cost ~2-5K instead of 25-34K.
+model = "gpt-5.4"
+model_reasoning_effort = "low"
+personality = "pragmatic"
+
+[mcp_servers.teammcp]
+command = "node"
+args = ["C:/Users/ssdlh/Desktop/teammcp/plugin-dist/mcp-client/teammcp-channel.mjs"]
+
+[mcp_servers.teammcp.env]
+AGENT_NAME = "CodexTest"
+TEAMMCP_KEY = "tmcp_b78247efc7cd4a4292969519"
+TEAMMCP_URL = "http://localhost:3100"

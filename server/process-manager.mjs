@@ -10,6 +10,8 @@ const impl = await (
     ? import('./process-manager-impl-win.mjs')
   : PLATFORM === 'darwin'
     ? import('./process-manager-impl-mac.mjs')
+  : PLATFORM === 'linux'
+    ? import('./process-manager-impl-linux.mjs')
   : (() => { throw new Error(`[process-manager] unsupported platform: ${PLATFORM}`); })()
 );
 

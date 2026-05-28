@@ -21,47 +21,46 @@ import {
 
 const SCROLLBACK_LIMIT = 100000; // 100KB ring buffer per agent
 
-// agentName → { clients: Set<ws>, scrollback: string }
+// agentName → { clients: Set<ws>, scrollback: Buffer }
+// Scrollback is Buffer (not string) so we never break multi-byte UTF-8
+// characters across chunk boundaries. Browser xterm.write() handles
+// Uint8Array natively and uses a streaming TextDecoder internally, which
+// preserves partial multi-byte sequences across frames.
 const wsEntries = new Map();
 
-/**
- * Strip a potentially incomplete ANSI escape sequence from the START of a string.
- */
-function stripLeadingPartialAnsi(str) {
-  const escIdx = str.indexOf('\x1b');
-  if (escIdx === -1) return str;
-  if (escIdx === 0) {
-    const m = str.match(/^\x1b(?:\[[0-9;?]*[A-Za-z]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()][A-Z0-9]|[NOPEHMD78=>c][\s\S]?)/);
-    if (m) return str;
-    const nextEsc = str.indexOf('\x1b', 1);
-    return nextEsc === -1 ? '' : str.slice(nextEsc);
-  }
-  return str;
+function asBuffer(data) {
+  if (Buffer.isBuffer(data)) return data;
+  if (data == null) return Buffer.alloc(0);
+  if (typeof data === 'string') return Buffer.from(data, 'utf-8');
+  if (data instanceof Uint8Array) return Buffer.from(data);
+  return Buffer.from(String(data), 'utf-8');
 }
 
 /**
  * Broadcast PTY output to WebSocket clients for a given agent.
  * Called by index.mjs's onPtyOutput handler via globalThis.__ptyWsBroadcast.
+ *
+ * IMPORTANT: keeps data as Buffer end-to-end. Calling toString('utf-8') on
+ * an arbitrary chunk would split multi-byte CJK characters and produce
+ * U+FFFD replacement chars (the "乱码" bug).
  */
 function broadcastToWsClients(agent, dataBuffer) {
   let entry = wsEntries.get(agent);
   if (!entry) {
-    entry = { clients: new Set(), scrollback: '' };
+    entry = { clients: new Set(), scrollback: Buffer.alloc(0) };
     wsEntries.set(agent, entry);
   }
 
-  const data = typeof dataBuffer === 'string' ? dataBuffer : dataBuffer.toString('utf-8');
+  const buf = asBuffer(dataBuffer);
 
-  // Buffer output for late-joining clients
-  entry.scrollback += data;
+  // Append to ring scrollback (Buffer concat, NOT string +=)
+  entry.scrollback = Buffer.concat([entry.scrollback, buf]);
   if (entry.scrollback.length > SCROLLBACK_LIMIT) {
-    entry.scrollback = stripLeadingPartialAnsi(
-      entry.scrollback.slice(entry.scrollback.length - SCROLLBACK_LIMIT)
-    );
+    entry.scrollback = entry.scrollback.subarray(entry.scrollback.length - SCROLLBACK_LIMIT);
   }
 
   for (const ws of entry.clients) {
-    if (ws.readyState === 1) ws.send(data);
+    if (ws.readyState === 1) ws.send(buf, { binary: true });
   }
 }
 
@@ -116,20 +115,21 @@ export function attachWsServer(httpServer) {
 
         let entry = wsEntries.get(agent);
         if (!entry) {
-          entry = { clients: new Set(), scrollback: '' };
+          entry = { clients: new Set(), scrollback: Buffer.alloc(0) };
           wsEntries.set(agent, entry);
         }
 
         entry.clients.add(ws);
 
-        // Clear screen then send buffered scrollback to late-joining client
-        ws.send('\x1b[2J\x1b[H');
-        if (entry.scrollback) ws.send(entry.scrollback);
+        // Clear screen then send buffered scrollback to late-joining client.
+        // Both sent as binary frames for consistency with broadcast path.
+        ws.send(Buffer.from('\x1b[2J\x1b[H', 'utf-8'), { binary: true });
+        if (entry.scrollback.length) ws.send(entry.scrollback, { binary: true });
         console.log(`[pty] client attached: ${agent} (${entry.clients.size} clients)`);
 
         ws.on('message', (msg) => {
           const str = msg.toString();
-          // Handle resize messages
+          // Resize is sent as a JSON envelope; everything else is raw key bytes.
           if (str.startsWith('{')) {
             try {
               const cmd = JSON.parse(str);
@@ -139,7 +139,9 @@ export function attachWsServer(httpServer) {
               }
             } catch {}
           }
-          // Forward input to Daemon
+          // Forward input bytes straight to PTY daemon. Works for both claude
+          // and codex-pty — codex's native TUI handles win32-input-mode itself
+          // when xterm.js emits the right sequences.
           ipcWriteToPty(agent, str).catch(() => {});
         });
 
@@ -219,30 +221,29 @@ export async function getPtyNamesAsync() {
  * we copy a snapshot here so the first WS client sees recent history).
  */
 export function registerWsAgent(name, seedScrollback) {
+  const seed = asBuffer(seedScrollback);
   if (!wsEntries.has(name)) {
     wsEntries.set(name, {
       clients: new Set(),
-      scrollback: typeof seedScrollback === 'string' ? seedScrollback : '',
+      scrollback: seed,
     });
-  } else if (typeof seedScrollback === 'string' && seedScrollback.length) {
-    // Preserve existing client connections, just refresh the scrollback.
-    wsEntries.get(name).scrollback = seedScrollback;
+  } else if (seed.length) {
+    wsEntries.get(name).scrollback = seed;
   }
 }
 
 export function attachPtyOutput(name, proc) {
   // Still needed: agents are spawned locally until PTY spawn is migrated to Daemon
-  const entry = { clients: new Set(), scrollback: '' };
+  const entry = { clients: new Set(), scrollback: Buffer.alloc(0) };
 
   proc.onData((data) => {
-    entry.scrollback += data;
+    const buf = asBuffer(data);
+    entry.scrollback = Buffer.concat([entry.scrollback, buf]);
     if (entry.scrollback.length > SCROLLBACK_LIMIT) {
-      entry.scrollback = stripLeadingPartialAnsi(
-        entry.scrollback.slice(entry.scrollback.length - SCROLLBACK_LIMIT)
-      );
+      entry.scrollback = entry.scrollback.subarray(entry.scrollback.length - SCROLLBACK_LIMIT);
     }
     for (const ws of entry.clients) {
-      if (ws.readyState === 1) ws.send(data);
+      if (ws.readyState === 1) ws.send(buf, { binary: true });
     }
   });
 
@@ -273,4 +274,19 @@ export function resizePty(name, cols, rows) {
 export function killPtyByName(name) {
   if (!isDaemonConnected()) return;
   ipcKillPty(name).catch(() => {});
+}
+
+/**
+ * Read the WS scrollback buffer for an agent as UTF-8 text.
+ * Used by screenshotAgent on platforms without a compositor (Linux headless).
+ * Returns '' if no scrollback is tracked.
+ */
+export function getScrollbackText(name) {
+  const entry = wsEntries.get(name);
+  if (!entry || !entry.scrollback?.length) return '';
+  try {
+    return entry.scrollback.toString('utf-8');
+  } catch {
+    return '';
+  }
 }

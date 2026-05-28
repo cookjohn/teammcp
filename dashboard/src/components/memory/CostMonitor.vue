@@ -1,9 +1,12 @@
 <script setup>
-import { ref, onMounted, watch } from 'vue'
+import { ref, onMounted, watch, inject } from 'vue'
 
 const props = defineProps({
   api: { type: Function, required: true }
 })
+
+const t = inject('t')
+function periodLabel(p) { return t('memory.cost.' + p) || p }
 
 const period = ref('day')
 const usage = ref(null)
@@ -37,43 +40,43 @@ function formatNumber(n) {
 <template>
   <div class="cost-monitor">
     <div class="panel-header">
-      <h3>Cost Monitor</h3>
+      <h3>{{ t('memory.cost.title') }}</h3>
       <div class="period-tabs">
         <button
           v-for="p in ['day', 'week', 'month']"
           :key="p"
           :class="['period-tab', { active: period === p }]"
           @click="period = p"
-        >{{ p.charAt(0).toUpperCase() + p.slice(1) }}</button>
+        >{{ periodLabel(p) }}</button>
       </div>
     </div>
 
-    <div v-if="loading" class="loading">Loading...</div>
+    <div v-if="loading" class="loading">{{ t('memory.cost.loading') }}</div>
 
     <div v-else-if="usage" class="cost-content">
       <!-- Summary cards -->
       <div class="cost-summary">
         <div class="cost-card">
           <div class="cost-value">{{ formatCost(usage.total_cost) }}</div>
-          <div class="cost-label">Total Cost</div>
+          <div class="cost-label">{{ t('memory.cost.totalCost') }}</div>
         </div>
         <div class="cost-card">
           <div class="cost-value">{{ formatNumber(usage.total_requests) }}</div>
-          <div class="cost-label">Total Requests</div>
+          <div class="cost-label">{{ t('memory.cost.totalRequests') }}</div>
         </div>
       </div>
 
       <!-- By Purpose -->
       <div class="cost-section">
-        <h4>By Purpose</h4>
+        <h4>{{ t('memory.cost.byPurpose') }}</h4>
         <table class="cost-table">
           <thead>
             <tr>
-              <th>Purpose</th>
-              <th>Requests</th>
-              <th>Input Tokens</th>
-              <th>Output Tokens</th>
-              <th>Cost</th>
+              <th>{{ t('memory.cost.colPurpose') }}</th>
+              <th>{{ t('memory.cost.colRequests') }}</th>
+              <th>{{ t('memory.cost.colInputTokens') }}</th>
+              <th>{{ t('memory.cost.colOutputTokens') }}</th>
+              <th>{{ t('memory.cost.colCost') }}</th>
             </tr>
           </thead>
           <tbody>
@@ -85,7 +88,7 @@ function formatNumber(n) {
               <td class="cost-cell">{{ formatCost(row.cost) }}</td>
             </tr>
             <tr v-if="!usage.by_purpose?.length">
-              <td colspan="5" class="empty-cell">No usage data</td>
+              <td colspan="5" class="empty-cell">{{ t('memory.cost.noData') }}</td>
             </tr>
           </tbody>
         </table>
@@ -93,13 +96,13 @@ function formatNumber(n) {
 
       <!-- By Model -->
       <div class="cost-section">
-        <h4>By Model</h4>
+        <h4>{{ t('memory.cost.byModel') }}</h4>
         <table class="cost-table">
           <thead>
             <tr>
-              <th>Model</th>
-              <th>Requests</th>
-              <th>Cost</th>
+              <th>{{ t('memory.cost.colModel') }}</th>
+              <th>{{ t('memory.cost.colRequests') }}</th>
+              <th>{{ t('memory.cost.colCost') }}</th>
             </tr>
           </thead>
           <tbody>
@@ -109,7 +112,7 @@ function formatNumber(n) {
               <td class="cost-cell">{{ formatCost(row.cost) }}</td>
             </tr>
             <tr v-if="!usage.by_model?.length">
-              <td colspan="3" class="empty-cell">No usage data</td>
+              <td colspan="3" class="empty-cell">{{ t('memory.cost.noData') }}</td>
             </tr>
           </tbody>
         </table>
@@ -117,7 +120,7 @@ function formatNumber(n) {
 
       <!-- Daily Trend -->
       <div v-if="usage.daily_trend?.length" class="cost-section">
-        <h4>30-Day Trend</h4>
+        <h4>{{ t('memory.cost.trend30d') }}</h4>
         <div class="trend-chart">
           <div
             v-for="day in usage.daily_trend"

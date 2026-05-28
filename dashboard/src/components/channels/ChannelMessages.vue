@@ -1,10 +1,12 @@
 <script setup>
-import { ref, computed, watch, nextTick, onMounted } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, inject } from 'vue'
 import { formatDate } from '../../utils/format.js'
 import MessageItem from './MessageItem.vue'
 import ComposeBox from './ComposeBox.vue'
 import FilesBrowser from './FilesBrowser.vue'
 import MembersPanel from './MembersPanel.vue'
+
+const t = inject('t')
 
 const props = defineProps({
   channel: { type: Object, default: null },
@@ -140,7 +142,7 @@ function onRemoveMember(name) {
 <template>
   <div v-if="!channel" class="empty-state">
     <div class="empty-icon">💬</div>
-    <div>Select a channel to view messages</div>
+    <div>{{ t('channel.select') }}</div>
   </div>
 
   <div v-else class="channel-view">
@@ -154,11 +156,11 @@ function onRemoveMember(name) {
           <span v-if="channel.description" class="header-desc">{{ channel.description }}</span>
         </div>
         <div class="header-actions">
-          <button class="header-btn" :class="{ active: showMembers }" @click="toggleMembers" title="Members">
-            👥 <span class="btn-label">Members</span>
+          <button class="header-btn" :class="{ active: showMembers }" @click="toggleMembers" :title="t('channel.members')">
+            👥 <span class="btn-label">{{ t('channel.members') }}</span>
           </button>
-          <button class="header-btn" :class="{ active: showFiles }" @click="toggleFiles" title="Files">
-            📁 <span class="btn-label">Files</span>
+          <button class="header-btn" :class="{ active: showFiles }" @click="toggleFiles" :title="t('channel.files')">
+            📁 <span class="btn-label">{{ t('channel.files') }}</span>
           </button>
         </div>
       </div>
@@ -168,7 +170,7 @@ function onRemoveMember(name) {
         <!-- Load more -->
         <div v-if="hasMore" class="load-more">
           <button class="load-more-btn" :disabled="loading" @click="onLoadMore">
-            {{ loading ? 'Loading...' : 'Load older messages' }}
+            {{ loading ? t('state.loading') : t('msg.loadOlder') }}
           </button>
         </div>
 
@@ -195,13 +197,13 @@ function onRemoveMember(name) {
 
         <!-- Empty state -->
         <div v-if="messages.length === 0 && !loading" class="no-messages">
-          No messages yet. Be the first to say something!
+          {{ t('msg.noMessages') }}
         </div>
       </div>
 
       <!-- New message indicator -->
       <div v-if="hasNewMessage" class="new-message-bar" @click="scrollToBottom">
-        ↓ New messages
+        ↓ {{ t('msg.newMessages') }}
       </div>
 
       <!-- Compose box -->

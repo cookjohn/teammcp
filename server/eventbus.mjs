@@ -12,6 +12,11 @@ const EVENT_TYPES = [
   'agent_online',
   'knowledge_gap_detected',
   'audit_alert',
+  'memory_sweep',
+  'memory_created',
+  // Wired by wechat-bridge to flush pending notifications immediately
+  // instead of waiting for the next 42s getupdates timeout cycle.
+  'notification_queued',
 ];
 
 // Publish an event

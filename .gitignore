@@ -42,8 +42,9 @@ wechat-token.json
 # NPM tarball
 *.tgz
 
-# Agent directories (local only)
-agents/
+# Agent directories (local only) — anchor to repo root so this doesn't
+# also swallow dashboard/src/components/agents/.
+/agents/
 
 # Test scripts
 scripts/test-sdk-agent.mjs
@@ -62,3 +63,22 @@ server-backup-*/
 # Local test scripts
 test-permission*.mjs
 test-wechat-approval.mjs
+
+# Runtime error logs (stderr captures, soak runs, T1 boot probes)
+*.err
+
+# Local-only sibling dev dir
+teammcp-code-dev/
+
+# Pre-edit backup snapshots (server/_backup_YYYYMMDD/, *.bak-pre-*)
+server/_backup_*/
+*.bak-pre-*
+
+# Local data dir (DB + state). The *.db rules above already cover the binary
+# files, but the dir itself can also accumulate transient artifacts.
+/data/
+/logs/
+
+# Remote deploy probe scripts (contain SSH creds when run)
+_remote-*.py
+_teammcp-src.tar.gz

@@ -35,6 +35,26 @@ if (!AGENT_NAME || !API_KEY) {
 // ---------------------------------------------------------------------------
 // HTTP helpers
 // ---------------------------------------------------------------------------
+// Retry on transient network errors so agents survive a server hot-restart
+// (~2-5s downtime). 5xx is also retried — those are usually boot-time races
+// against modules that aren't initialized yet. 4xx is NOT retried (auth /
+// validation errors don't get better by trying again).
+const RETRY_MAX_ATTEMPTS = 6;
+const RETRY_BASE_MS = 500;
+const RETRY_MAX_MS = 4000;
+const RETRYABLE_ERR_CODES = new Set([
+  'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EPIPE',
+  'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT', 'ENOTFOUND',
+]);
+
+function isRetryableError(err) {
+  const cause = err?.cause;
+  const code = cause?.code || err?.code;
+  if (code && RETRYABLE_ERR_CODES.has(code)) return true;
+  const msg = String(err?.message || '');
+  return msg.includes('fetch failed') || msg.includes('socket hang up');
+}
+
 async function apiRequest(method, path, body) {
   const url = `${BASE_URL}${path}`;
   const opts = {
@@ -46,12 +66,26 @@ async function apiRequest(method, path, body) {
   };
   if (body) opts.body = JSON.stringify(body);
 
-  const res = await fetch(url, opts);
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`API ${method} ${path} → ${res.status}: ${text}`);
+  let lastErr;
+  for (let attempt = 1; attempt <= RETRY_MAX_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(url, opts);
+      if (res.ok) return res.json();
+      if (res.status >= 500 && attempt < RETRY_MAX_ATTEMPTS) {
+        const delay = Math.min(RETRY_BASE_MS * 2 ** (attempt - 1), RETRY_MAX_MS);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+      const text = await res.text().catch(() => "");
+      throw new Error(`API ${method} ${path} → ${res.status}: ${text}`);
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= RETRY_MAX_ATTEMPTS || !isRetryableError(err)) throw err;
+      const delay = Math.min(RETRY_BASE_MS * 2 ** (attempt - 1), RETRY_MAX_MS);
+      await new Promise(r => setTimeout(r, delay));
+    }
   }
-  return res.json();
+  throw lastErr;
 }
 
 // ---------------------------------------------------------------------------
