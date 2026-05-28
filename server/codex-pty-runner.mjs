@@ -50,15 +50,17 @@ const CHANNEL_PLUGIN_PATH = join(
 const CODEX_EXE = process.env.CODEX_EXE ||
   'C:/Users/ssdlh/AppData/Roaming/npm/node_modules/@openai/codex/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe';
 
-// Submit key. We probed (logs/probe/raw.bin) and confirmed codex enables
-// win32-input-mode (\x1b[?9001h) at startup, so the textbook fix was to send
-// the encoded key sequence (\x1b[13;28;13;1;0;1_ + release). But empirical
-// testing (scripts/codex-test/test-enter-variants.mjs) found that plain
-// CRLF actually triggers submit — and the win32 encoded form does NOT.
-// Crossterm/ratatui apparently accepts both inputs but treats \r\n as the
-// canonical Enter on the Windows code path. Keep \r\n; revisit only if a
-// future codex version breaks it.
-const SUBMIT_KEY = '\r\n';
+// Submit key. codex enables win32-input-mode (\x1b[?9001h) at startup, so
+// the canonical Enter is the encoded key event (press + release):
+//   \x1b[Vk;Sc;Uc;Kd;Cs;Rc_  → Vk=13 (VK_RETURN), Sc=28, Uc=13 (CR),
+//   Kd=1 down / 0 up, Cs=0, Rc=1.
+// History: on older codex builds plain CRLF ('\r\n') triggered submit and the
+// win32 form did NOT, so we shipped '\r\n'. As of codex-cli 0.133.0 that
+// reversed — CRLF leaves the text sitting in the input box and only the win32
+// encoded Enter submits (re-verified 2026-05-28 via
+// scripts/codex-test/test-enter-variants.mjs, variant V1). Revisit with that
+// harness if a future codex version breaks it again.
+const SUBMIT_KEY = '\x1b[13;28;13;1;0;1_\x1b[13;28;13;0;0;1_';
 
 function bracketedPaste(text) {
   // If the message ever contains the paste-end terminator we'd close paste

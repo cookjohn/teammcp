@@ -468,8 +468,9 @@ export function pushWithPriorityToAgents(agentNames, data, priority = 'later') {
  *
  * Runtime dispatch: codex-pty agents have no plugin:fakechat / SSE
  * subscription; instead the event is pasted into codex's native TUI
- * input box and submitted via `\r\n`. Claude agents continue to receive
- * raw SSE events through their plugin.
+ * input box and submitted via the win32-input-mode Enter key event
+ * (see SUBMIT_KEY in codex-pty-runner.mjs). Claude agents continue to
+ * receive raw SSE events through their plugin.
  */
 export function pushToAgent(agentName, data) {
   try {
