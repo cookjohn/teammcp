@@ -2474,6 +2474,58 @@ export function getCcMetricsSince(lastId = 0, limit = 200) {
   return db.prepare('SELECT * FROM cc_metrics WHERE id > ? ORDER BY id ASC LIMIT ?').all(lastId, limit);
 }
 
+// ── Session review (memory internalization) ──────────────
+// Sessions have no explicit SessionEnd event, so "finished" = idle: a
+// session_id with cc_metrics whose newest row is older than idleMs, and
+// which has not been reviewed yet (no memory_sessions row). Returns the
+// aggregate shape memory_sessions needs, oldest-finished first.
+export function getReviewableSessions(idleMs = 20 * 60 * 1000, limit = 3, minMetrics = 5) {
+  const cutoff = new Date(Date.now() - idleMs).toISOString();
+  return db.prepare(`
+    SELECT c.session_id,
+           MIN(c.agent)        AS agent,
+           COUNT(*)            AS metric_count,
+           MIN(c.timestamp)    AS started_at,
+           MAX(c.timestamp)    AS ended_at,
+           SUM(CASE WHEN c.event = 'PostToolUse' THEN 1 ELSE 0 END) AS tool_count,
+           SUM(CASE WHEN c.error IS NOT NULL AND c.error != '' THEN 1 ELSE 0 END) AS error_count
+    FROM cc_metrics c
+    WHERE c.session_id IS NOT NULL AND c.session_id != ''
+      AND c.session_id NOT IN (SELECT session_id FROM memory_sessions)
+    GROUP BY c.session_id
+    HAVING MAX(c.timestamp) < ? AND COUNT(*) >= ?
+    ORDER BY MAX(c.timestamp) ASC
+    LIMIT ?
+  `).all(cutoff, minMetrics, limit);
+}
+
+export function getSessionMetrics(sessionId, limit = 100) {
+  return db.prepare(
+    'SELECT event, tool_name, error, reason, model, timestamp FROM cc_metrics WHERE session_id = ? ORDER BY timestamp ASC LIMIT ?'
+  ).all(sessionId, limit);
+}
+
+// INSERT OR IGNORE on session_id (UNIQUE) — double-review is a no-op.
+export function createMemorySession(s) {
+  const id = randomUUID();
+  const started = s.started_at ? new Date(s.started_at) : null;
+  const ended = s.ended_at ? new Date(s.ended_at) : null;
+  const duration_s = (started && ended) ? Math.max(0, Math.round((ended - started) / 1000)) : null;
+  const info = db.prepare(`
+    INSERT OR IGNORE INTO memory_sessions
+      (id, agent, session_id, started_at, ended_at, duration_s, tool_count, error_count, summary, key_actions, lessons)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id, s.agent || 'unknown', s.session_id,
+    s.started_at || new Date().toISOString(), s.ended_at || new Date().toISOString(),
+    duration_s, s.tool_count || 0, s.error_count || 0,
+    s.summary || '',
+    JSON.stringify(Array.isArray(s.key_actions) ? s.key_actions : []),
+    JSON.stringify(Array.isArray(s.lessons) ? s.lessons : []),
+  );
+  return info.changes > 0;
+}
+
 // ── Notifications ───────────────────────────────────────
 
 db.exec(`

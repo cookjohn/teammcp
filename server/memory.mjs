@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
-import { createMemory, getState, setState, getCcMetricsSince } from './db.mjs';
+import { createMemory, getState, setState, getCcMetricsSince,
+         getReviewableSessions, getSessionMetrics, createMemorySession } from './db.mjs';
 import { subscribe, subscribeAll, publish } from './eventbus.mjs';
 import { ProviderRegistry, TeamSearchProvider } from './memory-providers.mjs';
 import { SkillNudgeProvider } from './skill-nudge-provider.mjs';
@@ -360,6 +361,72 @@ function stopCcMetricsScan() {
   }
 }
 
+// ── Session review: distill idle sessions into lessons ───
+// There is no SessionEnd cc_metrics event, so a session is "finished" when
+// it has been idle for SESSION_IDLE_MS. We LLM-review the finished session's
+// metrics into { summary, key_actions, lessons } and persist one row to
+// memory_sessions (session_id is UNIQUE → idempotent). Cost-bounded: at most
+// SESSION_REVIEW_MAX per sweep, gated by MEMORY_INTERNALIZE (default on).
+const SESSION_IDLE_MS = Number(process.env.SESSION_IDLE_MS) || 20 * 60 * 1000;
+const SESSION_REVIEW_INTERVAL = 5 * 60 * 1000;
+const SESSION_REVIEW_MAX = Number(process.env.SESSION_REVIEW_MAX) || 3;
+let sessionReviewTimer = null;
+let _reviewInFlight = false;
+
+function internalizeEnabled() {
+  return process.env.MEMORY_INTERNALIZE !== 'off';
+}
+
+async function reviewIdleSessions() {
+  if (_reviewInFlight || !internalizeEnabled()) return;
+  _reviewInFlight = true;
+  try {
+    const sessions = getReviewableSessions(SESSION_IDLE_MS, SESSION_REVIEW_MAX);
+    if (sessions.length === 0) return;
+    const { reviewSession } = await import('./memory-llm.mjs');
+    for (const s of sessions) {
+      try {
+        const metrics = getSessionMetrics(s.session_id);
+        const review = await reviewSession(metrics);
+        createMemorySession({
+          agent: s.agent,
+          session_id: s.session_id,
+          started_at: s.started_at,
+          ended_at: s.ended_at,
+          tool_count: s.tool_count,
+          error_count: s.error_count,
+          summary: review.summary,
+          key_actions: review.key_actions,
+          lessons: review.lessons,
+        });
+        log(`Session reviewed: ${s.agent}/${s.session_id.slice(0, 8)} — ${review.lessons?.length || 0} lesson(s)`);
+      } catch (err) {
+        // One bad session must not block the rest; it'll be retried next
+        // sweep (no memory_sessions row was written).
+        console.error(`[Memory] session review failed for ${s.session_id}:`, err.message);
+      }
+    }
+  } catch (err) {
+    console.error('[Memory] reviewIdleSessions error:', err.message);
+  } finally {
+    _reviewInFlight = false;
+  }
+}
+
+function startSessionReview() {
+  sessionReviewTimer = setInterval(() => { reviewIdleSessions().catch(() => {}); }, SESSION_REVIEW_INTERVAL);
+  sessionReviewTimer.unref?.();
+  log(`session review started (idle=${SESSION_IDLE_MS / 60000}min, max=${SESSION_REVIEW_MAX}/sweep, internalize=${internalizeEnabled() ? 'on' : 'off'})`);
+}
+
+function stopSessionReview() {
+  if (sessionReviewTimer) {
+    clearInterval(sessionReviewTimer);
+    sessionReviewTimer = null;
+    log('session review stopped');
+  }
+}
+
 // ── Event source: Messages hook (keyword filtering) ─────
 
 function handleMessageSaved(event) {
@@ -476,6 +543,7 @@ export function startMemoryEngine() {
   subscribeMessages();
   startCcMetricsScan();
   startDedupCleanup();
+  startSessionReview();
 
   // ── Provider Registry ──────────────────────────────────
   providerRegistry = new ProviderRegistry();
@@ -524,6 +592,7 @@ export async function stopMemoryEngine() {
 
   stopCcMetricsScan();
   stopDedupCleanup();
+  stopSessionReview();
   unsubscribeEventbus();
   unsubscribeMessages();
 

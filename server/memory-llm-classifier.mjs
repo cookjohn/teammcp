@@ -33,7 +33,7 @@ import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { MemoryProvider } from './memory-providers.mjs';
-import { classifyBatch } from './memory-llm.mjs';
+import { classifyBatch, deepSummary } from './memory-llm.mjs';
 
 const LOG_PREFIX = '[Memory-LLM-Classifier]';
 
@@ -152,31 +152,38 @@ class LlmClassifierProvider extends MemoryProvider {
          WHERE id = ?`
       );
       let appliedReal = 0, appliedFallback = 0;
+      const criticalForDeep = [];  // { memory_id, text } needing deep analysis
       for (let i = 0; i < classifications.length; i++) {
         const c = classifications[i];
         const ev = eventsForLlm[i];
         if (!c || !ev) continue;
+        const finalLevel = c.level || ev.level_hint || 'routine';
         try {
           updateStmt.run(
             (c.title || '').slice(0, 200),
             (c.summary || '').slice(0, 2000),
-            c.level || ev.level_hint || 'routine',
+            finalLevel,
             c.category || 'general',
             JSON.stringify(Array.isArray(c.tags) ? c.tags.slice(0, 10) : []),
             ev.memory_id,
           );
           this._stats.processed++;
-          // Heuristic-fallback rows have category='general' and a generated title,
-          // hard to detect from outside — we approximate by checking if the
-          // returned title matches what extractTitle would produce. Skipping
-          // for now; the stats are best-effort.
           appliedReal++;
+          if (finalLevel === 'critical') criticalForDeep.push({ memory_id: ev.memory_id, text: ev.text });
         } catch (err) {
           logErr(`UPDATE failed for memory ${ev.memory_id}: ${err.message}`);
           this._stats.errors++;
         }
       }
       log(`Processed ${classifications.length} memories (applied=${appliedReal}, total_processed=${this._stats.processed}, llmCalls=${this._stats.llmCalls})`);
+
+      // Deep analysis: only critical-level memories get the extra deepSummary
+      // pass (root cause + action items), gated by MEMORY_INTERNALIZE and the
+      // criticalDeep flag. Low volume by design (~handful/day) — folded into
+      // the summary so no schema change is needed.
+      if (process.env.MEMORY_INTERNALIZE !== 'off' && criticalForDeep.length > 0) {
+        await this._deepAnalyzeCritical(criticalForDeep);
+      }
     } catch (err) {
       this._stats.errors++;
       // classifyBatch's own catch already returned heuristic fallback,
@@ -189,6 +196,34 @@ class LlmClassifierProvider extends MemoryProvider {
       while (this._buffer.length > this.batchSize * 4) this._buffer.shift();
     } finally {
       this._inFlight = false;
+    }
+  }
+
+  /**
+   * Run deepSummary on critical memories and fold root_cause + action_items
+   * into the existing summary. Best-effort: any failure leaves the
+   * classify-level summary intact. Bounded by the caller's batch size.
+   */
+  async _deepAnalyzeCritical(items) {
+    const updateSummary = db.prepare('UPDATE memories SET summary = ? WHERE id = ?');
+    for (const it of items) {
+      try {
+        const deep = await deepSummary({ text: it.text });
+        if (!deep) continue;
+        const parts = [];
+        if (deep.summary) parts.push(deep.summary);
+        if (deep.root_cause) parts.push(`根因: ${deep.root_cause}`);
+        if (Array.isArray(deep.action_items) && deep.action_items.length) {
+          parts.push(`行动项: ${deep.action_items.join('; ')}`);
+        }
+        const merged = parts.join('\n').slice(0, 2000);
+        if (merged) {
+          updateSummary.run(merged, it.memory_id);
+          this._stats.deepAnalyzed = (this._stats.deepAnalyzed || 0) + 1;
+        }
+      } catch (err) {
+        logErr(`deepSummary failed for memory ${it.memory_id}: ${err.message}`);
+      }
     }
   }
 }

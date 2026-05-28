@@ -146,7 +146,18 @@ class LLMClient {
    * @returns {{ provider, model, api_key, base_url, max_tokens, temperature, timeout_ms, max_daily_cost_usd }}
    */
   getConfig(purpose) {
-    const row = this._configCache.get(purpose);
+    let row = this._configCache.get(purpose);
+    // Fallback: a purpose with no row (e.g. 'review') or an empty key
+    // (e.g. 'summarize' seeded blank) borrows the canonical 'classify'
+    // config, which is the one operators actually provision. This lets
+    // reviewSession + deepSummary run on the same DeepSeek key without
+    // separate key management. Only falls back if classify itself is keyed.
+    if (!row || !row.api_key_enc) {
+      const fallback = this._configCache.get('classify');
+      if (fallback && fallback.api_key_enc) {
+        row = fallback;
+      }
+    }
     if (!row) {
       throw new Error(`No LLM config found for purpose: ${purpose}`);
     }
