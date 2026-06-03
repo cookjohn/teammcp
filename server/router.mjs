@@ -3187,12 +3187,16 @@ export async function handleRequest(req, res) {
       const period = url.searchParams.get('period') || 'day';
       let cutoff;
       const now = new Date();
+      // llm_usage.created_at is stored by SQLite datetime('now') as
+      // "YYYY-MM-DD HH:MM:SS" (space separator). toISOString() yields a 'T'
+      // separator; lexicographic compare against a 'T' cutoff filters out
+      // every row (space 0x20 < T 0x54). Always use a space here.
       if (period === 'week') {
-        cutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19);
+        cutoff = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
       } else if (period === 'month') {
-        cutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19);
+        cutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
       } else {
-        cutoff = now.toISOString().slice(0, 10) + 'T00:00:00';
+        cutoff = now.toISOString().slice(0, 10) + ' 00:00:00';
       }
 
       const totals = db.prepare(`
@@ -3213,7 +3217,7 @@ export async function handleRequest(req, res) {
         GROUP BY model
       `).all(cutoff);
 
-      const trendCutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19);
+      const trendCutoff = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 19).replace('T', ' ');
       const dailyTrend = db.prepare(`
         SELECT date(created_at) as date, COALESCE(SUM(estimated_cost_usd), 0) as cost
         FROM llm_usage WHERE created_at >= ?
