@@ -339,9 +339,16 @@ export async function deliverInboxEvent(name, event) {
     return { delivered: false, reason: 'paste_failed' };
   }
 
-  // Let codex's TUI consume the paste before we hit submit. The TUI batches
-  // input on a render tick (~16ms); 150ms is a comfortable margin.
-  await new Promise(r => setTimeout(r, 150));
+  // Let codex's TUI consume the paste before we hit submit. The delay must
+  // scale with paste size: short prompts settle in <150ms, but a 1KB+ paste
+  // (multi-paragraph messages, UTF-8 Chinese at 3 bytes/char) needs more
+  // ingestion headroom. If the win32 Enter arrives while codex is still
+  // processing the bracketed-paste buffer, it gets absorbed into the pasted
+  // text and the message sits unsubmitted in the input box.
+  // Heuristic: 200ms base + 1ms per UTF-8 byte, capped at 3s.
+  const pasteBytes = Buffer.byteLength(prompt, 'utf8');
+  const settleMs = Math.min(3000, 200 + pasteBytes);
+  await new Promise(r => setTimeout(r, settleMs));
 
   try {
     await ipcWriteToPty(name, SUBMIT_KEY);
