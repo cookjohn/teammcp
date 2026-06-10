@@ -166,7 +166,15 @@ export async function startAgent(name) {
   // @openai/codex-sdk threads. They do still register a wsEntries slot so
   // Dashboard /api/pty-sessions + Terminal view work the same.
   const agentRow = getAgentByName(name);
-  if (agentRow?.runtime === 'codex-pty') {
+  if (!agentRow) {
+    // Closes TOCTOU race vs. concurrent agent deletion: without this guard
+    // the claude path below would silently mkdir an orphan agent dir and
+    // spawn claude.exe against an empty config. The codex-pty path has its
+    // own check in codex-pty-runner, so this check keeps the error
+    // consistent across runtimes (and across callers — REST, WeChat, CLI).
+    throw Object.assign(new Error(`agent not found: ${name}`), { statusCode: 404 });
+  }
+  if (agentRow.runtime === 'codex-pty') {
     // Native codex.exe in ConPTY via daemon. See server/codex-pty-runner.mjs.
     const { startAgent: codexPtyStart } = await import('./codex-pty-runner.mjs');
     const result = await codexPtyStart(name);

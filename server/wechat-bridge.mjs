@@ -417,6 +417,9 @@ async function pollLoop() {
           '📖 TeamMCP 微信指令：',
           '• 进度 / 任务进度 — 列出进行中的任务',
           '• 通知 — 列出未读离线通知',
+          '• 启动 X / start X — 启动名为 X 的 Agent (别名: 拉起 X)',
+          '• 停止 X / stop X — 停止名为 X 的 Agent (别名: 关闭 X)',
+          '• 状态 / status — 列出所有 Agent 的在线状态与运行时长 (别名: 在线 / agents)',
           '• 审批 — 列出待审批请求',
           '• 批准 a3f7 / 拒绝 a3f7 [原因] — 处理审批（a3f7 为短码）',
           '• 帮助 / help — 显示本指令列表',
@@ -473,6 +476,150 @@ async function pollLoop() {
             continue;
           } catch (e) {
             console.error('[wechat] 通知 keyword failed:', e.message);
+          }
+        }
+
+        // ── Agent management: 启动 / 停止 / 状态 ──
+        // Acts with Chairman's authority (bridge gate). Calls startAgent /
+        // stopAgent in-process — no HTTP self-round-trip. Pre-flights with
+        // getAgentByName so a typo'd name doesn't silently create a fresh
+        // agent dir on the claude runtime (startAgent would auto-mkdir).
+
+        // Bare "启动" / "停止" with no arg: reply with usage hint instead
+        // of letting it fall through to onMessageReceived (which would push
+        // a useless single-word message to CEO/Audit).
+        if (cmd === '启动' || cmd === '拉起' || cmd === '拉起来' || cmd === 'start') {
+          await sendToWeChat('用法: 启动 <agent名>，例如: 启动 CEO。回复 "状态" 查看全部 agent。', fromUser, contextToken);
+          continue;
+        }
+        if (cmd === '停止' || cmd === '关闭' || cmd === 'stop') {
+          await sendToWeChat('用法: 停止 <agent名>，例如: 停止 CEO。回复 "状态" 查看全部 agent。', fromUser, contextToken);
+          continue;
+        }
+
+        const startMatch = cmd.match(/^(?:启动|拉起来|拉起|start)\s+(\S+)$/i);
+        if (startMatch) {
+          const name = startMatch[1];
+          if (!/^[A-Za-z0-9_.\-]+$/.test(name)) {
+            await sendToWeChat('❌ 名称不合法,仅支持字母/数字/_/./-', fromUser, contextToken);
+            continue;
+          }
+          try {
+            const { getAgentByName } = await import('./db.mjs');
+            if (!getAgentByName(name)) {
+              await sendToWeChat(`❌ 未找到 Agent: ${name}`, fromUser, contextToken);
+              continue;
+            }
+            const { startAgent } = await import('./process-manager.mjs');
+            const result = await startAgent(name);
+            const pid = (result && result.pid) || '?';
+            // Codex-pty reattach to existing PTY is the only signal worth
+            // surfacing — fresh starts don't need a runtime tag.
+            const tag = result && result.codexPty && result.reattached ? ' [已恢复上次会话]' : '';
+            await sendToWeChat(`✅ 已启动 ${name} (PID ${pid})${tag}`, fromUser, contextToken);
+          } catch (err) {
+            if (err.statusCode === 400 && /already tracked/i.test(err.message || '')) {
+              await sendToWeChat(`ℹ️ ${name} 已在运行中`, fromUser, contextToken);
+            } else {
+              // Sanitize absolute paths from error messages before sending to
+              // WeChat. The bracketed [CODE] tag added too much noise for a
+              // non-dev audience — drop it; keep the full err in console.error
+              // for ops.
+              const safeMsg = String(err.message || 'unknown error')
+                .replace(/[A-Z]:\\[^\s'"]+/g, '<path>')
+                .replace(/\/[A-Za-z]+\/[^\s'"]+/g, '<path>');
+              await sendToWeChat(`❌ 启动 ${name} 失败: ${safeMsg}`, fromUser, contextToken);
+              console.error('[wechat] 启动 keyword failed:', err);
+            }
+          }
+          continue;
+        }
+
+        const stopMatch = cmd.match(/^(?:停止|关闭|stop)\s+(\S+)$/i);
+        if (stopMatch) {
+          const name = stopMatch[1];
+          if (!/^[A-Za-z0-9_.\-]+$/.test(name)) {
+            await sendToWeChat('❌ 名称不合法,仅支持字母/数字/_/./-', fromUser, contextToken);
+            continue;
+          }
+          try {
+            const { getAgentByName } = await import('./db.mjs');
+            if (!getAgentByName(name)) {
+              await sendToWeChat(`❌ 未找到 Agent: ${name}`, fromUser, contextToken);
+              continue;
+            }
+            const { stopAgent } = await import('./process-manager.mjs');
+            const result = await stopAgent(name);
+            // Two shapes here: claude runtime returns { killedPidCount },
+            // codex-pty runner returns { stopped: true|false } with no count.
+            // Map both to a unified "killed" so the reply is consistent.
+            let killed = null;
+            if (result && typeof result.killedPidCount === 'number') {
+              killed = result.killedPidCount;
+            } else if (result && result.stopped === false) {
+              killed = 0;
+            } else if (result && result.stopped === true) {
+              killed = 1;
+            }
+            if (killed === 0) {
+              await sendToWeChat(`ℹ️ ${name} 当前未运行`, fromUser, contextToken);
+            } else if (killed != null) {
+              await sendToWeChat(`✅ 已停止 ${name} (终止 ${killed} 个进程)`, fromUser, contextToken);
+            } else {
+              await sendToWeChat(`✅ 已停止 ${name}`, fromUser, contextToken);
+            }
+          } catch (err) {
+            const safeMsg = String(err.message || 'unknown error')
+              .replace(/[A-Z]:\\[^\s'"]+/g, '<path>')
+              .replace(/\/[A-Za-z]+\/[^\s'"]+/g, '<path>');
+            await sendToWeChat(`❌ 停止 ${name} 失败: ${safeMsg}`, fromUser, contextToken);
+            console.error('[wechat] 停止 keyword failed:', err);
+          }
+          continue;
+        }
+
+        if (/^(?:状态|在线|status|agents)$/i.test(cmd)) {
+          try {
+            const { getAllAgents } = await import('./db.mjs');
+            const agents = getAllAgents();
+            if (agents.length === 0) {
+              await sendToWeChat('当前没有已注册的 Agent。', fromUser, contextToken);
+              continue;
+            }
+            // Chinese units to match the surrounding 中文 reply text.
+            const fmtRuntime = (lastSeen) => {
+              if (!lastSeen) return '—';
+              const ms = Date.now() - new Date(lastSeen).getTime();
+              if (!Number.isFinite(ms) || ms < 0) return '—';
+              const s = Math.floor(ms / 1000);
+              if (s < 60) return `${s} 秒`;
+              const m = Math.floor(s / 60);
+              if (m < 60) return `${m} 分钟`;
+              const h = Math.floor(m / 60);
+              if (h < 24) return `${h} 小时 ${m % 60} 分`;
+              const d = Math.floor(h / 24);
+              return `${d} 天 ${h % 24} 小时`;
+            };
+            // Cap each section at HEAD rows to keep the reply readable on phone
+            // (matches the 通知 / 审批 cap-at-10 idiom elsewhere in this file).
+            const HEAD = 10;
+            const online = agents.filter(a => a.status === 'online');
+            const offline = agents.filter(a => a.status !== 'online');
+            const lines = [`🤖 Agent 状态 (${agents.length})：`];
+            if (online.length) {
+              lines.push(`\n🟢 在线 (${online.length})：`);
+              for (const a of online.slice(0, HEAD)) lines.push(`• ${a.name} [${a.role || '—'}] · 运行 ${fmtRuntime(a.last_seen)}`);
+              if (online.length > HEAD) lines.push(`...还有 ${online.length - HEAD} 个在线,详见 Dashboard`);
+            }
+            if (offline.length) {
+              lines.push(`\n⚫ 离线 (${offline.length})：`);
+              for (const a of offline.slice(0, HEAD)) lines.push(`• ${a.name} [${a.role || '—'}] · ${a.status || 'offline'} · 最后活跃 ${fmtRuntime(a.last_seen)}`);
+              if (offline.length > HEAD) lines.push(`...还有 ${offline.length - HEAD} 个离线,详见 Dashboard`);
+            }
+            await sendToWeChat(lines.join('\n'), fromUser, contextToken);
+            continue;
+          } catch (e) {
+            console.error('[wechat] 状态 keyword failed:', e.message);
           }
         }
 
