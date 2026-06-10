@@ -497,7 +497,11 @@ async function pollLoop() {
           continue;
         }
 
-        const startMatch = cmd.match(/^(?:启动|拉起来|拉起|start)\s+(\S+)$/i);
+        // No-space between Chinese verb and ASCII name is the natural form
+        // ("启动CEO" not "启动 CEO") — the CJK/ASCII boundary is its own
+        // delimiter. English verbs still require \s+ so "startCEO" doesn't
+        // accidentally match as one token.
+        const startMatch = cmd.match(/^(?:(?:启动|拉起来|拉起)\s*|start\s+)(\S+)$/i);
         if (startMatch) {
           const name = startMatch[1];
           if (!/^[A-Za-z0-9_.\-]+$/.test(name)) {
@@ -535,7 +539,7 @@ async function pollLoop() {
           continue;
         }
 
-        const stopMatch = cmd.match(/^(?:停止|关闭|stop)\s+(\S+)$/i);
+        const stopMatch = cmd.match(/^(?:(?:停止|关闭)\s*|stop\s+)(\S+)$/i);
         if (stopMatch) {
           const name = stopMatch[1];
           if (!/^[A-Za-z0-9_.\-]+$/.test(name)) {
