@@ -9,6 +9,7 @@ import {
   registerAgent, getAllAgents, getAgentByName,
   saveMessage, getMessages, getMessage, editMessage, deleteMessage, searchMessages,
   getChannel, createChannel, getChannelsForAgent, getChannelMembers, addChannelMember, removeChannelMember,
+  getAllChannelsForManage, updateChannel, archiveChannel, unarchiveChannel, deleteChannelCascade,
   getOrCreateDmChannel, updateReadStatus, setAgentStatus,
   createTask, getTask, getTasks, updateTask, deleteTask, getTaskHistory, updateMessageMetadata,
   getTaskWithChildren, getCheckInDueTasks, updateCheckIn,
@@ -1965,21 +1966,35 @@ export async function handleRequest(req, res) {
     // ── POST /api/channels ────────────────────────────
     if (method === 'POST' && path === '/api/channels') {
       const body = await readBody(req);
+      // Auto-slug id from name when not supplied (dashboard create form only
+      // asks for a human name). ASCII slug; CJK/other names fall back to a
+      // timestamped 'channel-<n>' so the id is always URL-safe + unique-ish.
+      if (!body.id && body.name) {
+        const slug = String(body.name).trim().toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+        body.id = slug || `channel-${Date.now().toString(36)}`;
+      }
       if (!body.id || !body.type) {
-        return json(res, { error: 'id and type are required' }, 400);
+        return json(res, { error: 'id (or name) and type are required' }, 400);
       }
       if (!['group', 'dm', 'topic'].includes(body.type)) {
         return json(res, { error: 'type must be group, dm, or topic' }, 400);
       }
 
-      const existing = getChannel(body.id);
+      let existing = getChannel(body.id);
+      // If the slugged id collides, suffix it rather than rejecting the create.
+      if (existing && body.name) {
+        body.id = `${body.id}-${Date.now().toString(36).slice(-4)}`;
+        existing = getChannel(body.id);
+      }
       if (existing) return json(res, { error: `Channel "${body.id}" already exists` }, 409);
 
       const members = body.members || [];
       // Creator is always a member
       if (!members.includes(req.agent.name)) members.push(req.agent.name);
 
-      const ch = createChannel(body.id, body.type, body.name, body.description, req.agent.name, members);
+      let ch = createChannel(body.id, body.type, body.name, body.description, req.agent.name, members);
+      if (body.category) ch = updateChannel(body.id, { category: String(body.category).slice(0, 64) });
       return json(res, ch, 201);
     }
 
@@ -2013,6 +2028,69 @@ export async function handleRequest(req, res) {
       }
       removeChannelMember(channelId, agentName);
       return json(res, { ok: true, channel: channelId, removed: agentName });
+    }
+
+    // ── Channel management (manual admin) ─────────────────
+    // GET /api/channels/manage — full group/topic list + stats (active+archived)
+    if (method === 'GET' && path === '/api/channels/manage') {
+      return json(res, { channels: getAllChannelsForManage() });
+    }
+
+    // POST /api/channels/:id/archive  +  DELETE (unarchive)
+    if (path.match(/^\/api\/channels\/[^/]+\/archive$/) && path.split('/').length === 5) {
+      const channelId = decodeURIComponent(path.split('/')[3]);
+      if (req.agent.name !== 'Chairman' && req.agent.name !== 'CEO') {
+        return json(res, { error: 'Only Chairman or CEO can manage channels' }, 403);
+      }
+      const ch = getChannel(channelId);
+      if (!ch) return json(res, { error: 'Channel not found' }, 404);
+      if (method === 'POST') {
+        if (ch.type === 'dm') return json(res, { error: 'DM channels cannot be archived' }, 400);
+        if (channelId === 'general' || channelId === 'teammcp-dev') {
+          return json(res, { error: `"${channelId}" is protected and cannot be archived` }, 400);
+        }
+        const updated = archiveChannel(channelId, req.agent.name);
+        return json(res, { ok: true, channel: channelId, archived_at: updated.archived_at });
+      }
+      if (method === 'DELETE') {
+        unarchiveChannel(channelId);
+        return json(res, { ok: true, channel: channelId, archived_at: null });
+      }
+    }
+
+    // PATCH /api/channels/:id — rename / description / category (4 segments)
+    if (method === 'PATCH' && path.match(/^\/api\/channels\/[^/]+$/) && path.split('/').length === 4) {
+      const channelId = decodeURIComponent(path.split('/')[3]);
+      if (req.agent.name !== 'Chairman' && req.agent.name !== 'CEO') {
+        return json(res, { error: 'Only Chairman or CEO can manage channels' }, 403);
+      }
+      const ch = getChannel(channelId);
+      if (!ch) return json(res, { error: 'Channel not found' }, 404);
+      const body = await readBody(req);
+      const patch = {};
+      if (typeof body.name === 'string') patch.name = body.name.slice(0, 120);
+      if (typeof body.description === 'string') patch.description = body.description.slice(0, 500);
+      if (body.category === null || typeof body.category === 'string') {
+        patch.category = body.category ? String(body.category).slice(0, 64) : null;
+      }
+      if (Object.keys(patch).length === 0) return json(res, { error: 'No valid fields to update' }, 400);
+      const updated = updateChannel(channelId, patch);
+      return json(res, updated);
+    }
+
+    // DELETE /api/channels/:id — HARD delete (cascade). Chairman only. (4 segments)
+    if (method === 'DELETE' && path.match(/^\/api\/channels\/[^/]+$/) && path.split('/').length === 4) {
+      const channelId = decodeURIComponent(path.split('/')[3]);
+      if (req.agent.name !== 'Chairman') {
+        return json(res, { error: 'Only Chairman can hard-delete a channel' }, 403);
+      }
+      const ch = getChannel(channelId);
+      if (!ch) return json(res, { error: 'Channel not found' }, 404);
+      if (channelId === 'general' || channelId === 'teammcp-dev') {
+        return json(res, { error: `"${channelId}" is protected and cannot be deleted` }, 400);
+      }
+      const counts = deleteChannelCascade(channelId);
+      return json(res, { ok: true, channel: channelId, deleted: counts });
     }
 
     // ── POST /api/tasks (create task) ─────────────────

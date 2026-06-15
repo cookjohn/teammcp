@@ -14,6 +14,7 @@ import CredentialsView from './components/credentials/CredentialsView.vue'
 import MonitorView from './components/monitor/MonitorView.vue'
 import TerminalView from './components/terminal/TerminalView.vue'
 import MemoriesView from './components/memory/MemoriesView.vue'
+import ChannelsView from './components/channels/ChannelsView.vue'
 import SetupWizard from './components/wizard/SetupWizard.vue'
 import WechatPanel from './components/wechat/WechatPanel.vue'
 import WatchdogPanel from './components/watchdog/WatchdogPanel.vue'
@@ -107,6 +108,7 @@ const currentView = ref('messages')
 
 // Labels resolved via `$t('nav.' + id)` in template \u2014 see i18n/en.js + zh.js.
 const navItems = [
+  { id: 'chanMgmt', icon: '\u{1F4FB}' },
   { id: 'tasks', icon: '\u2611' },
   { id: 'state', icon: '\u2699' },
   { id: 'agents', icon: '\u{1F916}' },
@@ -483,6 +485,10 @@ const unreadCounts = computed(() => channelsStore.unreadCounts.value)
 
       <div v-else-if="currentView === 'memories'" class="view-panel">
         <MemoriesView />
+      </div>
+
+      <div v-else-if="currentView === 'chanMgmt'" class="view-panel">
+        <ChannelsView />
       </div>
 
       <div v-else-if="currentView === 'terminal'" class="view-panel">

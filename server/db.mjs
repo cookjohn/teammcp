@@ -81,6 +81,13 @@ try {
   db.exec(`ALTER TABLE state_kv ADD COLUMN approver TEXT DEFAULT NULL`);
 } catch { /* column already exists */ }
 
+// Channel management (2026-06): manual channel admin needs soft-archive
+// (reversible, keeps history) + free-text category for sidebar grouping.
+// archived_at IS NULL = active. archived_by distinguishes manual vs cleanup.
+try { db.exec(`ALTER TABLE channels ADD COLUMN archived_at DATETIME DEFAULT NULL`); } catch { /* exists */ }
+try { db.exec(`ALTER TABLE channels ADD COLUMN archived_by TEXT DEFAULT NULL`); } catch { /* exists */ }
+try { db.exec(`ALTER TABLE channels ADD COLUMN category TEXT DEFAULT NULL`); } catch { /* exists */ }
+
 // Add reports_to column to agents for data-driven command chain
 try {
   db.exec('ALTER TABLE agents ADD COLUMN reports_to TEXT DEFAULT NULL');
@@ -567,8 +574,9 @@ export function getChannelsForAgent(agentName) {
     SELECT c.*, COALESCE(rs.last_read_msg, '') as last_read
     FROM channels c
     LEFT JOIN read_status rs ON rs.channel_id = c.id AND rs.agent_name = ?
-    WHERE c.type = 'group'
-       OR c.id IN (SELECT channel_id FROM channel_members WHERE agent_name = ?)
+    WHERE (c.type = 'group'
+       OR c.id IN (SELECT channel_id FROM channel_members WHERE agent_name = ?))
+      AND c.archived_at IS NULL
   `).all(agentName, agentName);
 
   // Compute unread counts
@@ -585,8 +593,76 @@ export function getChannelsForAgent(agentName) {
         'SELECT COUNT(*) as cnt FROM messages WHERE channel_id = ? AND from_agent != ?'
       ).get(ch.id, agentName)?.cnt || 0;
     }
-    return { id: ch.id, type: ch.type, name: ch.name, description: ch.description, unread };
+    return { id: ch.id, type: ch.type, name: ch.name, description: ch.description, category: ch.category || null, unread };
   });
+}
+
+// ── Channel management (manual admin) ────────────────────
+// List every group/topic channel (active + archived) with stats for the
+// management view. DMs excluded by design — 107 private dyads must not be
+// browsable/manageable here. Stats via subquery (no hot-path write needed).
+export function getAllChannelsForManage() {
+  return db.prepare(`
+    SELECT c.id, c.type, c.name, c.description, c.category, c.created_by, c.created_at,
+           c.archived_at, c.archived_by,
+           (SELECT COUNT(*) FROM channel_members cm WHERE cm.channel_id = c.id) AS member_count,
+           (SELECT COUNT(*) FROM messages m WHERE m.channel_id = c.id AND m.deleted = 0) AS message_count,
+           (SELECT MAX(m.created_at) FROM messages m WHERE m.channel_id = c.id) AS last_activity_at
+    FROM channels c
+    WHERE c.type IN ('group', 'topic')
+    ORDER BY (c.archived_at IS NOT NULL), c.category, c.name
+  `).all();
+}
+
+export function updateChannel(id, { name, description, category } = {}) {
+  const sets = [];
+  const args = [];
+  if (name !== undefined) { sets.push('name = ?'); args.push(name); }
+  if (description !== undefined) { sets.push('description = ?'); args.push(description); }
+  if (category !== undefined) { sets.push('category = ?'); args.push(category || null); }
+  if (sets.length === 0) return getChannel(id);
+  args.push(id);
+  db.prepare(`UPDATE channels SET ${sets.join(', ')} WHERE id = ?`).run(...args);
+  return getChannel(id);
+}
+
+export function archiveChannel(id, by) {
+  // Idempotent: only archive an active channel; preserves the original
+  // archived_by/at if already archived.
+  db.prepare(
+    "UPDATE channels SET archived_at = datetime('now'), archived_by = ? WHERE id = ? AND archived_at IS NULL"
+  ).run(by || 'unknown', id);
+  return getChannel(id);
+}
+
+export function unarchiveChannel(id) {
+  db.prepare('UPDATE channels SET archived_at = NULL, archived_by = NULL WHERE id = ?').run(id);
+  return getChannel(id);
+}
+
+// Hard delete a channel and ALL its dependent rows. foreign_keys=ON, so we
+// must clear children before the channel row. Wrapped in a transaction so a
+// failure leaves nothing dangling. Returns counts for the confirmation reply.
+export function deleteChannelCascade(id) {
+  const tx = db.transaction(() => {
+    const msgIds = db.prepare('SELECT id FROM messages WHERE channel_id = ?').all(id).map(r => r.id);
+    let reactions = 0, pins = 0;
+    if (msgIds.length) {
+      const placeholders = msgIds.map(() => '?').join(',');
+      reactions = db.prepare(`DELETE FROM reactions WHERE message_id IN (${placeholders})`).run(...msgIds).changes;
+      pins = db.prepare(`DELETE FROM pinned_messages WHERE message_id IN (${placeholders})`).run(...msgIds).changes;
+      // Keep FTS in sync (messages_fts is an external-content-free FTS5 table
+      // populated alongside messages — delete matching rows by id).
+      try { db.prepare(`DELETE FROM messages_fts WHERE id IN (${placeholders})`).run(...msgIds); } catch { /* fts optional */ }
+    }
+    const messages = db.prepare('DELETE FROM messages WHERE channel_id = ?').run(id).changes;
+    const members = db.prepare('DELETE FROM channel_members WHERE channel_id = ?').run(id).changes;
+    const reads = db.prepare('DELETE FROM read_status WHERE channel_id = ?').run(id).changes;
+    try { db.prepare('DELETE FROM pinned_messages WHERE channel_id = ?').run(id); } catch { /* belt+braces */ }
+    const channel = db.prepare('DELETE FROM channels WHERE id = ?').run(id).changes;
+    return { channel, messages, members, reads, reactions, pins };
+  });
+  return tx();
 }
 
 export function getChannelMembers(channelId) {
